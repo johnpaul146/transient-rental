@@ -1,0 +1,611 @@
+/* ============================================ */
+/* EDIT PROFILE PAGE - COMPLETE CSS */
+/* ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 40px 0;
+}
+
+/* ============================================ */
+/* HEADER */
+/* ============================================ */
+.header {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    padding: 15px 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+}
+
+.header-content {
+    max-width: 1300px;
+    margin: 0 auto;
+    padding: 0 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logo {
+    font-size: 24px;
+    font-weight: 700;
+    color: #1e293b;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.logo i {
+    color: #667eea;
+    font-size: 28px;
+}
+
+.nav-links a {
+    padding: 8px 16px;
+    border-radius: 8px;
+    color: #64748b;
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.nav-links a:hover {
+    background: #f1f5f9;
+    color: #667eea;
+}
+
+/* ============================================ */
+/* MAIN CONTAINER */
+/* ============================================ */
+.main-container {
+    max-width: 900px;
+    margin: 100px auto 40px;
+    padding: 0 20px;
+}
+
+/* ============================================ */
+/* EDIT CARD */
+/* ============================================ */
+.edit-card {
+    background: white;
+    border-radius: 30px;
+    padding: 50px;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.edit-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 10px;
+    background: linear-gradient(90deg, #667eea, #764ba2, #667eea);
+    background-size: 200% 100%;
+    animation: gradientMove 3s linear infinite;
+}
+
+@keyframes gradientMove {
+    0% { background-position: 0% 0%; }
+    100% { background-position: 200% 0%; }
+}
+
+/* ============================================ */
+/* EDIT HEADER */
+/* ============================================ */
+.edit-header {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.edit-header h1 {
+    font-size: 36px;
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 10px;
+}
+
+.edit-header h1 i {
+    color: #667eea;
+    margin-right: 10px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.edit-header p {
+    color: #64748b;
+    font-size: 16px;
+}
+
+/* ============================================ */
+/* AVATAR SECTION */
+/* ============================================ */
+.avatar-section {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.avatar-wrapper {
+    position: relative;
+    display: inline-block;
+}
+
+.avatar {
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 10px;
+    color: white;
+    font-size: 48px;
+    overflow: hidden;
+    border: 4px solid #667eea;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    cursor: pointer;
+    transition: all 0.3s;
+    position: relative;
+}
+
+.avatar:hover {
+    transform: scale(1.05);
+    box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+}
+
+.avatar:hover .avatar-overlay {
+    opacity: 1;
+}
+
+.avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+.avatar .default-icon {
+    font-size: 48px;
+    color: white;
+}
+
+.avatar-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.3s;
+    border-radius: 50%;
+}
+
+.avatar-overlay i {
+    color: white;
+    font-size: 24px;
+}
+
+.avatar-name {
+    font-size: 18px;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+/* ============================================ */
+/* PHOTO ACTIONS */
+/* ============================================ */
+.photo-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+.photo-actions .btn-photo {
+    padding: 6px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.photo-actions .btn-photo:hover {
+    transform: translateY(-2px);
+}
+
+.photo-actions .btn-upload {
+    background: #667eea;
+    color: white;
+}
+
+.photo-actions .btn-upload:hover {
+    background: #5a67d8;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+.photo-actions .btn-camera {
+    background: #10b981;
+    color: white;
+}
+
+.photo-actions .btn-camera:hover {
+    background: #059669;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.photo-actions .btn-remove {
+    background: #ef4444;
+    color: white;
+}
+
+.photo-actions .btn-remove:hover {
+    background: #dc2626;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+
+.photo-actions .btn-remove:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.photo-actions .btn-remove:disabled:hover {
+    transform: none;
+}
+
+.hidden-file-input {
+    display: none;
+}
+
+/* ============================================ */
+/* CAMERA MODAL */
+/* ============================================ */
+.camera-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.95);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+.camera-modal.active {
+    display: flex;
+}
+
+.camera-modal video {
+    max-width: 90%;
+    max-height: 65vh;
+    border-radius: 16px;
+    background: #000;
+    border: 2px solid #333;
+}
+
+.camera-modal .camera-controls {
+    margin-top: 25px;
+    display: flex;
+    gap: 15px;
+}
+
+.camera-modal .camera-controls button {
+    padding: 14px 35px;
+    border: none;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.camera-modal .camera-controls .btn-capture {
+    background: #10b981;
+    color: white;
+}
+
+.camera-modal .camera-controls .btn-capture:hover {
+    background: #059669;
+    transform: scale(1.05);
+}
+
+.camera-modal .camera-controls .btn-close-camera {
+    background: #ef4444;
+    color: white;
+}
+
+.camera-modal .camera-controls .btn-close-camera:hover {
+    background: #dc2626;
+}
+
+/* ============================================ */
+/* FORM SECTIONS */
+/* ============================================ */
+.form-section {
+    background: #f8fafc;
+    border-radius: 20px;
+    padding: 30px;
+    margin-bottom: 30px;
+    border: 1px solid #e2e8f0;
+}
+
+.section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 25px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #e2e8f0;
+}
+
+.section-title i {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 18px;
+}
+
+.section-title h3 {
+    font-size: 20px;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0;
+}
+
+/* ============================================ */
+/* FORM GROUPS */
+/* ============================================ */
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #1e293b;
+    font-size: 14px;
+}
+
+.form-group label i {
+    color: #667eea;
+    margin-right: 8px;
+    width: 20px;
+}
+
+.input-wrapper {
+    position: relative;
+}
+
+.input-wrapper i {
+    position: absolute;
+    left: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #94a3b8;
+    font-size: 16px;
+}
+
+.form-control {
+    width: 100%;
+    padding: 14px 15px 14px 45px;
+    border: 2px solid #e2e8f0;
+    border-radius: 12px;
+    font-size: 14px;
+    transition: all 0.3s;
+    background: white;
+}
+
+.form-control:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+}
+
+.form-control[readonly] {
+    background: #f1f5f9;
+    cursor: not-allowed;
+}
+
+.input-hint {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-top: 5px;
+    margin-left: 45px;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+/* ============================================ */
+/* ALERT */
+/* ============================================ */
+.alert {
+    padding: 15px 20px;
+    border-radius: 12px;
+    margin-bottom: 30px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    animation: slideDown 0.5s ease;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.alert-error {
+    background: #fee2e2;
+    color: #ef4444;
+    border: 1px solid #fecaca;
+}
+
+.alert-error i {
+    font-size: 20px;
+}
+
+/* ============================================ */
+/* ACTION BUTTONS */
+/* ============================================ */
+.action-buttons {
+    display: flex;
+    gap: 15px;
+    margin-top: 30px;
+}
+
+.btn-save {
+    flex: 2;
+    padding: 16px;
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.btn-save:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px rgba(16, 185, 129, 0.3);
+}
+
+.btn-save i {
+    font-size: 18px;
+}
+
+.btn-cancel {
+    flex: 1;
+    padding: 16px;
+    background: #64748b;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-decoration: none;
+}
+
+.btn-cancel:hover {
+    background: #475569;
+    transform: translateY(-2px);
+}
+
+/* ============================================ */
+/* INFO BOX */
+/* ============================================ */
+.info-box {
+    background: #eff6ff;
+    border-radius: 12px;
+    padding: 15px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    border-left: 4px solid #3b82f6;
+}
+
+.info-box i {
+    font-size: 24px;
+    color: #3b82f6;
+}
+
+.info-box p {
+    color: #1e293b;
+    font-size: 14px;
+    margin: 0;
+}
+
+/* ============================================ */
+/* RESPONSIVE */
+/* ============================================ */
+@media (max-width: 768px) {
+    .edit-card {
+        padding: 30px 20px;
+    }
+    
+    .form-row {
+        grid-template-columns: 1fr;
+    }
+    
+    .action-buttons {
+        flex-direction: column;
+    }
+    
+    .edit-header h1 {
+        font-size: 28px;
+    }
+    
+    .camera-modal video {
+        max-height: 50vh;
+    }
+}
+
+@media (max-width: 480px) {
+    .edit-card {
+        padding: 20px 15px;
+    }
+    
+    .photo-actions .btn-photo {
+        font-size: 11px;
+        padding: 5px 12px;
+    }
+}
