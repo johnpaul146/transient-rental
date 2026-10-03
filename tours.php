@@ -568,6 +568,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Boat Tours - Hundred Islands</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -668,7 +669,6 @@ $is_logged_in = isset($_SESSION['user_id']);
         .section-title .underline { width: 80px; height: 4px; background: linear-gradient(90deg, #4DA6D9, #7bb8f0); border-radius: 2px; margin: 0 auto; }
 
         .tour-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 25px; }
-        .tour-card { background: #4DA6D9; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 15px rgba(77, 166, 217, 0.15); transition: all 0.3s ease; border: 1px solid rgba(255,255,255,0.15); display: flex; flex-direction: column; cursor: pointer; }
         .tour-card:hover { transform: translateY(-6px); box-shadow: 0 15px 40px rgba(77, 166, 217, 0.25); }
         .tour-image-wrapper { position: relative; overflow: hidden; height: 220px; flex-shrink: 0; }
         .tour-image { width: 100%; height: 100%; object-fit: cover; transition: transform 0.4s ease; }
@@ -689,13 +689,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         .tour-image-wrapper .gallery-count { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.6); color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 500; backdrop-filter: blur(5px); z-index: 2; }
         .tour-image-wrapper .gallery-count i { margin-right: 4px; }
         .tour-content { padding: 20px; flex: 1; display: flex; flex-direction: column; }
-        .tour-name { font-size: 20px; font-weight: 700; color: white; margin-bottom: 4px; line-height: 1.3; }
-        .tour-name i { font-size: 18px; opacity: 0.8; margin-right: 8px; }
-        .tour-desc { color: rgba(255,255,255,0.9); font-size: 14px; line-height: 1.6; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 44px; }
-        .tour-info { display: flex; gap: 20px; margin: 8px 0 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.12); }
-        .tour-info .info-item { display: flex; align-items: center; gap: 6px; font-size: 14px; color: rgba(255,255,255,0.9); }
-        .tour-info .info-item i { font-size: 15px; color: white; }
-
+        
         .tour-places {
             background: rgba(255,255,255,0.15);
             border-radius: 10px;
@@ -729,8 +723,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             border: 2px solid rgba(255,255,255,0.4);
         }
 
-        .tour-price { font-size: 24px; font-weight: 700; color: #F4B400; margin: 6px 0; }
-        .tour-price small { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.6); }
+       
         .tour-actions { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
         .btn-book { width: 100%; padding: 12px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(244, 180, 0, 0.25); }
         .btn-book:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244, 180, 0, 0.35); background: #e6a800; }
@@ -1225,152 +1218,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
-<div class="sidebar" id="sidebar">
-    <button class="sidebar-close" onclick="toggleSidebar()">
-        <i class="fas fa-times"></i>
-    </button>
-
-    <div class="sidebar-header">
-        <a href="index.php" class="logo">
-            <?php if($sidebar_logo_exists): ?>
-                <img src="<?php echo htmlspecialchars($sidebar_logo); ?>?<?php echo time(); ?>" alt="Logo">
-            <?php else: ?>
-                <div class="logo-icon">
-                    <i class="fas fa-umbrella-beach"></i>
-                </div>
-            <?php endif; ?>
-            <div class="logo-text">
-                <span class="main">Transient House</span>
-                <span class="sub">& Tours</span>
-            </div>
-        </a>
-    </div>
-
-    <ul class="nav-menu">
-        <li class="nav-item"><a href="index.php" class="nav-link"><i class="fas fa-home"></i><span>Home</span></a></li>
-        <li class="nav-item"><a href="houses.php" class="nav-link"><i class="fas fa-home"></i><span>Houses</span></a></li>
-        <li class="nav-item"><a href="tours.php" class="nav-link active-nav"><i class="fas fa-umbrella-beach"></i><span>Tours</span></a></li>
-        <li class="nav-item"><a href="activities.php" class="nav-link"><i class="fas fa-water"></i><span>Activities</span></a></li>
-        <li class="nav-item"><a href="food.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food</span></a></li>
-        <li class="nav-item"><a href="packages.php" class="nav-link"><i class="fas fa-box-open"></i><span>My Package</span></a></li>
-
-        <?php if(isset($_SESSION['user_id'])): ?>
-            <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-cog"></i><span>Dashboard</span></a></li>
-            <?php else: ?>
-                <li class="nav-item"><a href="profile.php" class="nav-link"><i class="fas fa-user"></i><span>Profile</span></a></li>
-                <li class="nav-item">
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event)" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Edit Review</span>
-                        </a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event)" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Rate Us</span>
-                        </a>
-                    <?php endif; ?>
-                </li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item"><a href="#" class="nav-link" onclick="openLogoutModal(event); return false;" style="color: #ef4444;"><i class="fas fa-sign-out-alt"></i><span>Logout</span></a></li>
-        <?php else: ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item"><a href="login.php" class="nav-link" style="background: #4DA6D9; color: white; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 600;"><i class="fas fa-sign-in-alt"></i><span>Login</span></a></li>
-            <li class="nav-item" style="margin-top: 8px;"><a href="register.php" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;"><i class="fas fa-user-plus"></i><span>Register</span></a></li>
-        <?php endif; ?>
-    </ul>
-</div>
-
-<div class="header">
-    <div class="header-content">
-        <a href="index.php" class="logo-wrapper">
-            <?php
-            $logo_exists = false;
-            $logo_actual_path = 'uploads/logos/logo.png';
-            if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) {
-                $logo_actual_path = $content['site_settings']['logo_path'];
-            }
-            if(!empty($logo_actual_path) && file_exists($logo_actual_path) && !is_dir($logo_actual_path)) {
-                $logo_exists = true;
-            }
-            if(!$logo_exists && file_exists('uploads/logos/logo.png')) {
-                $logo_exists = true;
-                $logo_actual_path = 'uploads/logos/logo.png';
-            }
-            if($logo_exists):
-            ?>
-                <img src="<?php echo htmlspecialchars($logo_actual_path); ?>?<?php echo time(); ?>" alt="Logo" class="logo-image">
-            <?php else: ?>
-                <div class="logo-image-placeholder"><i class="fas fa-home"></i></div>
-            <?php endif; ?>
-            <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
-                <span class="brand-tagline">Your Home Away From Home</span>
-            </div>
-        </a>
-
-        <div class="desktop-nav">
-            <a href="index.php"><i class="fas fa-home"></i> Home</a>
-            <a href="houses.php"><i class="fas fa-home"></i> Houses</a>
-            <a href="tours.php" class="active-nav"><i class="fas fa-ship"></i> Tours</a>
-            <a href="activities.php"><i class="fas fa-water"></i> Activities</a>
-            <a href="food.php"><i class="fas fa-utensils"></i> Food</a>
-            <a href="packages.php"><i class="fas fa-box-open"></i> My Package</a>
-
-            <?php if(isset($_SESSION['user_id'])): ?>
-                <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                    <a href="admin-dashboard.php"><i class="fas fa-cog"></i> Dashboard</a>
-                <?php else: ?>
-                    <a href="profile.php"><i class="fas fa-user"></i> Profile</a>
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Edit</span></a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Rate Us</span></a>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <a href="#" onclick="openLogoutModal(event); return false;" class="btn-logout"><i class="fas fa-sign-out-alt"></i> <span class="logout-text">Logout</span></a>
-            <?php else: ?>
-                <a href="login.php"><i class="fas fa-sign-in-alt"></i> Login</a>
-            <?php endif; ?>
-        </div>
-    </div>
-</div>
-
-<?php if(isset($success) && !isset($_GET['feedback_success'])): ?>
-<div class="alert-overlay">
-    <div class="alert-box success"><i class="fas fa-check-circle"></i> <?php echo $success; ?></div>
-</div>
-<?php endif; ?>
-
-<?php if(isset($error)): ?>
-<div class="alert-overlay">
-    <div class="alert-box error"><i class="fas fa-exclamation-circle"></i> <?php echo $error; ?></div>
-</div>
-<?php endif; ?>
-
-<?php if(isset($success) && isset($_GET['feedback_success']) || isset($_GET['feedback_success'])): ?>
-<div class="alert-overlay show" id="feedbackSuccessAlert">
-    <div class="alert-box success-popup">
-        <div class="alert-icon"><i class="fas fa-check-circle"></i></div>
-        <h3>Thank You!</h3>
-        <p><?php echo isset($success) ? htmlspecialchars($success) : 'Your feedback has been recorded.'; ?></p>
-        <button class="btn-popup-ok" onclick="dismissAlert()">OK</button>
-    </div>
-</div>
-<?php endif; ?>
-
-<div class="hero">
-    <div class="hero-content">
-        <h1><i class="fas fa-ship"></i> Boat Tours</h1>
-        <p>Explore the beautiful islands with our boat tour packages</p>
-    </div>
-</div>
+<?php include 'components/navbar.php'; ?>
 
 <div class="main-container">
 
@@ -1968,57 +1816,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     </div>
 </div>
 
-<div class="footer">
-    <div class="footer-content">
-        <div class="footer-grid">
-            <div class="footer-col">
-                <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
-                <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
-                <div class="social-links">
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook"><i class="fab fa-facebook-f"></i></a>
-                </div>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-link"></i> Quick Links</h4>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
-                    <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Houses</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
-                    <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
-                    <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
-                    <li><a href="packages.php"><i class="fas fa-chevron-right"></i> My Package</a></li>
-                    <?php if(isset($_SESSION['user_id'])): ?>
-                        <li><a href="profile.php"><i class="fas fa-chevron-right"></i> My Profile</a></li>
-                    <?php endif; ?>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                <div class="footer-map">
-                    <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                </div>
-                <ul>
-                    <li><i class="fas fa-map-marker-alt"></i>
-                        <?php if ($maps_url != '#'): ?>
-                            <a href="<?php echo $maps_url; ?>" target="_blank"><?php echo htmlspecialchars($location_address); ?></a>
-                        <?php else: ?>
-                            <?php echo htmlspecialchars($location_address); ?>
-                        <?php endif; ?>
-                    </li>
-                    <li><i class="fas fa-phone"></i><a href="tel:<?php echo preg_replace('/[^0-9+]/', '', $content['footer']['phone'] ?? '+639123456789'); ?>"><?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?></a></li>
-                    <li><i class="fas fa-envelope"></i><a href="mailto:<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>"><?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?></a></li>
-                </ul>
-            </div>
-        </div>
-        <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?></div>
-            <div class="footer-bottom-links">
-                <a onclick="reopenTermsModal('privacy'); return false;"><?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?></a>
-                <a onclick="reopenTermsModal('terms'); return false;"><?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?></a>
-            </div>
-        </div>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 <div class="modal terms-modal" id="termsModal"
      data-must-accept="<?php echo $force_must_accept ? '1' : '0'; ?>">

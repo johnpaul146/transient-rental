@@ -422,6 +422,31 @@ if($search) {
     $users = $filtered;
 }
 
+// ===============================
+// USER MANAGEMENT STATISTICS
+// ===============================
+
+$total_users = count($users);
+
+$total_guests = 0;
+$total_staff = 0;
+$total_admins = 0;
+
+foreach($users as $statUser){
+
+    if($statUser['role'] === 'guest'){
+        $total_guests++;
+    }
+
+    elseif($statUser['role'] === 'staff'){
+        $total_staff++;
+    }
+
+    elseif($statUser['role'] === 'admin'){
+        $total_admins++;
+    }
+}
+
 // Bookings count
 $user_bookings_count = [];
 foreach($users as $u) {
@@ -1092,7 +1117,721 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             .logout-modal-actions { flex-direction: column-reverse; }
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
-    </style>
+
+        /* ===============================
+   USER MANAGEMENT REDESIGN
+================================ */
+
+.user-stats-grid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:20px;
+    margin-bottom:25px;
+}
+
+.user-stat-card{
+    background:white;
+    border-radius:20px;
+    padding:22px;
+    border:1px solid #e8f0fe;
+    box-shadow:0 10px 30px rgba(11,36,71,.08);
+    display:flex;
+    align-items:center;
+    gap:15px;
+}
+
+.user-stat-icon{
+    width:55px;
+    height:55px;
+    border-radius:16px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:22px;
+    color:white;
+}
+
+.user-stat-icon.blue{
+    background:#4DA6D9;
+}
+
+.user-stat-icon.green{
+    background:#10b981;
+}
+
+.user-stat-icon.yellow{
+    background:#f59e0b;
+}
+
+.user-stat-icon.red{
+    background:#ef4444;
+}
+
+.user-stat-number{
+    font-size:28px;
+    font-weight:800;
+    color:#0B2447;
+}
+
+.user-stat-label{
+    font-size:13px;
+    color:#64748b;
+}
+
+
+.user-toolbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:15px;
+    flex-wrap:wrap;
+}
+
+.user-toolbar-left{
+    display:flex;
+    align-items:center;
+    gap:10px;
+}
+
+
+.user-search{
+    display:flex;
+    gap:10px;
+}
+
+.user-search input{
+    width:300px;
+    padding:12px 16px;
+    border-radius:12px;
+    border:2px solid #e2e8f0;
+}
+
+
+.user-filter{
+    padding:12px 16px;
+    border-radius:12px;
+    border:2px solid #e2e8f0;
+}
+
+
+@media(max-width:900px){
+
+    .user-stats-grid{
+        grid-template-columns:repeat(2,1fr);
+    }
+
+}
+
+
+@media(max-width:600px){
+
+    .user-stats-grid{
+        grid-template-columns:1fr;
+    }
+
+    .user-search input{
+        width:100%;
+    }
+
+}
+
+/* ===============================
+   USER TOOLBAR REDESIGN
+================================ */
+
+.user-management-toolbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:20px;
+    flex-wrap:wrap;
+    padding:20px;
+    background:#ffffff;
+    border-radius:18px;
+    border:1px solid #e8f0fe;
+}
+
+
+.user-toolbar-title{
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+
+.user-toolbar-title i{
+    width:42px;
+    height:42px;
+    border-radius:12px;
+    background:#e8f5ff;
+    color:#4DA6D9;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+}
+
+
+.user-toolbar-title h2{
+    margin:0;
+    font-size:20px;
+    color:#0B2447;
+}
+
+
+.user-toolbar-actions{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+}
+
+
+.user-toolbar-actions input{
+    width:320px;
+    padding:12px 16px;
+    border-radius:12px;
+    border:2px solid #e2e8f0;
+    font-size:14px;
+}
+
+
+.user-toolbar-actions input:focus{
+    outline:none;
+    border-color:#4DA6D9;
+}
+
+
+.user-search-btn{
+    padding:12px 20px;
+    border-radius:12px;
+    background:#4DA6D9;
+    color:white;
+    border:none;
+    font-weight:600;
+}
+
+
+.user-add-btn{
+    padding:12px 20px;
+    border-radius:12px;
+    background:#10b981;
+    color:white;
+    border:none;
+    font-weight:600;
+}
+
+
+@media(max-width:768px){
+
+    .user-management-toolbar{
+        flex-direction:column;
+        align-items:stretch;
+    }
+
+    .user-toolbar-actions{
+        width:100%;
+    }
+
+    .user-toolbar-actions input{
+        width:100%;
+    }
+
+}
+
+/* ===============================
+   USER CARD GRID
+================================ */
+
+.user-card-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:22px;
+    padding:25px;
+    width:100%;
+    box-sizing:border-box;
+}
+
+
+.user-card{
+    background:white;
+    border-radius:24px;
+    border:1px solid #e5edf5;
+    padding:20px;
+    box-shadow:
+        0 8px 25px rgba(6,38,61,.06);
+    transition:.25s ease;
+    position:relative;
+}
+
+
+.user-card:hover{
+    transform:translateY(-6px);
+    box-shadow:
+        0 18px 45px rgba(6,38,61,.12);
+}
+
+
+.user-card-top{
+    display:flex;
+    align-items:center;
+    gap:15px;
+    padding-bottom:18px;
+    border-bottom:1px solid #edf2f7;
+}
+
+
+.user-card .user-avatar{
+    width:60px;
+    height:60px;
+    font-size:24px;
+    flex-shrink:0;
+}
+
+
+.user-name{
+    font-size:20px;
+    font-weight:800;
+    color:#0B2447;
+}
+
+
+.user-username{
+    font-size:13px;
+    color:#64748b;
+}
+
+
+.user-info{
+    margin-top:18px;
+}
+
+
+.user-info-item{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:14px;
+    font-size:14px;
+}
+
+
+.user-info-item strong{
+    color:#64748b;
+}
+
+
+.user-card-actions{
+    margin-top:20px;
+    padding-top:15px;
+    border-top:1px solid #edf2f7;
+}
+
+
+.user-card-actions button{
+    border-radius:12px!important;
+}
+
+
+.user-card-top{
+    display:flex;
+    align-items:center;
+    gap:15px;
+}
+
+
+.user-card .user-avatar{
+    width:55px;
+    height:55px;
+    border-radius:50%;
+    background:#4DA6D9;
+    color:white;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:22px;
+    font-weight:700;
+}
+
+
+.user-name{
+    font-size:18px;
+    font-weight:700;
+    color:#0B2447;
+}
+
+
+.user-username{
+    color:#64748b;
+    font-size:14px;
+}
+
+.user-card{
+    min-width:0;
+    overflow:hidden;
+}
+
+
+.user-card .user-username{
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+
+.user-info{
+    margin-top:20px;
+}
+
+
+.user-info-item{
+    margin-bottom:12px;
+    color:#475569;
+}
+
+
+.user-info-item strong{
+    color:#0B2447;
+}
+
+
+.user-card-actions{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+}
+
+
+.user-card-actions button{
+    flex:1;
+    min-width:90px;
+}
+
+
+.user-card-actions button,
+.user-card-actions a{
+    flex:1;
+}
+
+
+@media(max-width:1100px){
+
+    .user-card-grid{
+        grid-template-columns:repeat(2,1fr);
+    }
+
+}
+
+
+@media(max-width:700px){
+
+    .user-card-grid{
+        grid-template-columns:1fr;
+    }
+
+}
+
+.role-badge{
+    display:inline-block;
+    padding:5px 12px;
+    border-radius:999px;
+    font-size:12px;
+    font-weight:700;
+    margin-left:8px;
+}
+
+
+.role-badge.admin{
+    background:#fee2e2;
+    color:#dc2626;
+}
+
+
+.role-badge.staff{
+    background:#fef3c7;
+    color:#d97706;
+}
+
+
+.role-badge.guest{
+    background:#dcfce7;
+    color:#16a34a;
+}
+
+
+.booking-count{
+    display:inline-block;
+    margin-left:8px;
+    background:#dcfce7;
+    color:#16a34a;
+    padding:5px 12px;
+    border-radius:999px;
+    font-size:12px;
+    font-weight:700;
+}
+
+    
+
+/* PROFESSIONAL USER TABLE UI FIX */
+.professional-user-table-wrap{
+    width:100%;
+    overflow-x:auto;
+    border-radius:18px;
+    background:#fff;
+}
+.professional-user-table{
+    width:100%;
+    min-width:1200px;
+    table-layout:fixed;
+    border-collapse:separate;
+    border-spacing:0;
+}
+.professional-user-table th{
+    padding:16px 14px;
+    font-size:12px;
+    letter-spacing:.4px;
+    color:#0B2447;
+    background:#f8fafc;
+    white-space:nowrap;
+}
+.professional-user-table td{
+    padding:18px 14px;
+    vertical-align:middle;
+    height:80px;
+}
+.professional-user-table th:nth-child(1){width:45px}
+
+.professional-user-table th:nth-child(2){
+    width:170px;
+}
+
+.professional-user-table th:nth-child(3){
+    width:200px;
+}
+
+.professional-user-table th:nth-child(4){
+    width:260px;
+}
+
+.professional-user-table th:nth-child(5){width:110px}
+.professional-user-table th:nth-child(6){width:120px}
+.professional-user-table th:nth-child(7){width:130px}
+.professional-user-table th:nth-child(8){width:150px}
+
+.table-user{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    min-width:0;
+}
+.table-avatar{
+    width:42px;
+    height:42px;
+    flex:none;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#4DA6D9;
+    color:white;
+    font-weight:800;
+}
+.table-user strong{
+    display:block;
+    max-width:90px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+.email-cell{
+    word-break:break-word;
+    line-height:1.35;
+}
+
+.professional-user-table .role-badge{
+    margin:0;
+    min-width:72px;
+    text-align:center;
+    padding:7px 10px;
+    white-space:nowrap;
+}
+
+.professional-user-table .booking-count{
+    margin:0;
+    white-space:nowrap;
+}
+
+.table-actions{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:nowrap;
+}
+.table-actions .btn-sm{
+    width:42px;
+    height:42px;
+    padding:0;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:12px;
+}
+
+@media(max-width:1200px){
+    .professional-user-table{
+        min-width:1050px;
+    }
+}
+
+/* ===============================
+   USER TABLE ACTIONS
+================================ */
+
+.table-actions{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    justify-content:center;
+    flex-wrap:nowrap;
+}
+
+.user-action-btn{
+    width:42px;
+    height:38px;
+    padding:0;
+    border-radius:10px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    font-size:15px;
+    white-space:nowrap;
+}
+
+
+.table-actions{
+    display:flex;
+    gap:6px;
+    justify-content:center;
+}
+
+.actions-column{
+    white-space:nowrap;
+}
+
+
+.user-action-btn i{
+    font-size:13px;
+}
+
+
+.user-action-btn:hover{
+    transform:translateY(-2px);
+}
+
+
+.user-action-view{
+    background:#0ea5e9;
+    color:white;
+}
+
+
+.user-action-edit{
+    background:#f59e0b;
+    color:white;
+}
+
+
+.user-action-delete{
+    background:#ef4444;
+    color:white;
+}
+
+
+@media(max-width:900px){
+
+    .user-action-btn span{
+        display:none;
+    }
+
+    .user-action-btn{
+        width:38px;
+        padding:0;
+    }
+
+}
+
+/* USER TABLE ALIGNMENT FIX */
+
+.users-table{
+    width:100%;
+    table-layout:fixed;
+}
+
+
+.users-table th,
+.users-table td{
+    vertical-align:middle;
+}
+
+
+.users-table th:nth-child(1),
+.users-table td:nth-child(1){
+    width:50px;
+}
+
+
+.users-table th:nth-child(2),
+.users-table td:nth-child(2){
+    width:120px;
+}
+
+
+.users-table th:nth-child(3),
+.users-table td:nth-child(3){
+    width:180px;
+}
+
+
+.users-table th:nth-child(4),
+.users-table td:nth-child(4){
+    width:240px;
+}
+
+
+.users-table th:nth-child(5),
+.users-table td:nth-child(5){
+    width:110px;
+}
+
+
+.users-table th:nth-child(6),
+.users-table td:nth-child(6){
+    width:130px;
+}
+
+
+.users-table th:nth-child(7),
+.users-table td:nth-child(7){
+    width:130px;
+}
+
+
+.users-table th:nth-child(8),
+.users-table td:nth-child(8){
+    width:260px;
+}
+
+
+.users-table td{
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+
+
+.users-table td:nth-child(4){
+    word-break:break-word;
+}
+
+</style>
 </head>
 <body>
 
@@ -1165,7 +1904,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Reports</span></a></li>
+            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span><?php if($is_staff): ?><span class="nav-badge" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">View</span><?php endif; ?></a></li>
 
             <?php if($is_admin): ?>
@@ -1245,189 +1984,244 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <?php echo $error; ?></div>
         <?php endif; ?>
 
-        <div class="page-title-banner">
-            <div class="banner-content">
-                <h1><i class="fas fa-users-cog"></i> User Management</h1>
-                <div class="underline"></div>
+        
+
+       <div class="page-title-banner">
+    <div class="banner-content">
+        <h1>
+            <i class="fas fa-users-cog"></i>
+            User Management
+        </h1>
+
+        <p style="margin-top:8px;opacity:.85;">
+            Manage accounts, roles, and customer activity
+        </p>
+
+        <div class="underline"></div>
+    </div>
+</div>
+
+<div class="user-stats-grid">
+
+    <div class="user-stat-card">
+        <div class="user-stat-icon blue">
+            <i class="fas fa-users"></i>
+        </div>
+        <div>
+            <div class="user-stat-number">
+                <?php echo $total_users; ?>
+            </div>
+            <div class="user-stat-label">
+                Total Users
             </div>
         </div>
+    </div>
+
+
+    <div class="user-stat-card">
+        <div class="user-stat-icon green">
+            <i class="fas fa-user"></i>
+        </div>
+        <div>
+            <div class="user-stat-number">
+                <?php echo $total_guests; ?>
+            </div>
+            <div class="user-stat-label">
+                Guests
+            </div>
+        </div>
+    </div>
+
+
+    <div class="user-stat-card">
+        <div class="user-stat-icon yellow">
+            <i class="fas fa-user-tie"></i>
+        </div>
+        <div>
+            <div class="user-stat-number">
+                <?php echo $total_staff; ?>
+            </div>
+            <div class="user-stat-label">
+                Staff
+            </div>
+        </div>
+    </div>
+
+
+    <div class="user-stat-card">
+        <div class="user-stat-icon red">
+            <i class="fas fa-crown"></i>
+        </div>
+        <div>
+            <div class="user-stat-number">
+                <?php echo $total_admins; ?>
+            </div>
+            <div class="user-stat-label">
+                Administrators
+            </div>
+        </div>
+    </div>
+
+</div>
+
 
         <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-list"></i> Registered Users</h2>
-                <div class="header-actions">
-                    <form method="GET" class="search-box">
-                        <input type="text" name="search" placeholder="Search by name, username, or email..." value="<?php echo htmlspecialchars($search); ?>">
-                        <button type="submit"><i class="fas fa-search"></i> Search</button>
-                        <?php if($search): ?><a href="user-management.php" class="btn-clear"><i class="fas fa-times"></i> Clear</a><?php endif; ?>
-                    </form>
+           <div class="user-management-toolbar">
 
-                    <?php if($is_admin): ?>
-                        <button class="btn-sm btn-success" onclick="showModal('addUser')" style="white-space: nowrap;">
-                            <i class="fas fa-user-plus"></i> Add User
-                        </button>
-                    <?php else: ?>
-                        <span class="staff-restricted-badge" style="padding: 8px 15px; font-size: 12px;">
-                            <i class="fas fa-lock"></i> Add User (Admin Only)
-                        </span>
-                    <?php endif; ?>
-                </div>
-            </div>
+    <div class="user-toolbar-title">
+        <i class="fas fa-users"></i>
 
-            <!-- DESKTOP TABLE -->
-            <div class="table-responsive desktop-table">
-                <?php if(count($users) > 0): ?>
-                <table>
+        <div>
+            <h2>Registered Users</h2>
+            <small style="color:#64748b;">
+                Manage accounts and permissions
+            </small>
+        </div>
+    </div>
+
+
+    <div class="user-toolbar-actions">
+
+        <form method="GET" style="display:flex;gap:10px;">
+
+            <input 
+    type="text"
+    id="userSearchInput"
+    placeholder="Search users..."
+    autocomplete="off"
+>
+
+            <button class="user-search-btn">
+                <i class="fas fa-search"></i>
+                Search
+            </button>
+
+        </form>
+
+
+        <?php if($is_admin): ?>
+
+        <button 
+            class="user-add-btn"
+            onclick="showModal('addUser')">
+
+            <i class="fas fa-user-plus"></i>
+            Add User
+
+        </button>
+
+        <?php endif; ?>
+
+    </div>
+
+</div>
+
+            <!-- PROFESSIONAL USER TABLE -->
+            <div class="professional-user-table-wrap">
+                <table class="professional-user-table">
                     <thead>
                         <tr>
-                            <th>#</th><th>Username</th><th>Full Name</th><th>Email</th>
-                            <th>Role</th><th>Registered</th><th>Bookings</th><th>Actions</th>
+                            <th>#</th>
+                            <th>User</th>
+                            <th>Full Name</th>
+                            <th>Email</th>
+                            <th>Role</th>
+                            <th>Registered</th>
+                            <th>Bookings</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach($users as $user): ?>
-                        <tr>
-                            <td><strong><?php echo $user['id']; ?></strong></td>
-                            <td><strong><?php echo htmlspecialchars($user['username']); ?></strong></td>
-                            <td><?php echo htmlspecialchars($user['full_name']); ?></td>
-                            <td><?php echo htmlspecialchars($user['email']); ?></td>
+               <?php foreach($users as $index => $user): ?>
+
+<?php
+    $userId = $user['id'];
+    $bookings = $user_bookings_count[$userId] ?? 0;
+    $role = strtolower($user['role']);
+?>
+
+<tr class="user-row"
+    data-search="<?php echo strtolower(htmlspecialchars(
+        $user['username'].' '.
+        $user['full_name'].' '.
+        $user['email']
+    )); ?>">
+
+    <td><?php echo $index + 1; ?></td>
                             <td>
-                                <?php 
-                                $role_class = 'badge-guest';
-                                if($user['role'] == 'admin') $role_class = 'badge-admin';
-                                if($user['role'] == 'staff') $role_class = 'badge-staff';
-                                ?>
-                                <span class="badge <?php echo $role_class; ?>">
-                                    <i class="fas fa-<?php echo $user['role'] == 'admin' ? 'crown' : ($user['role'] == 'staff' ? 'user-tie' : 'user'); ?>"></i>
-                                    <?php echo ucfirst($user['role']); ?>
+                                <div class="table-user">
+                                    <div class="table-avatar"><?php echo strtoupper(substr($user['username'],0,1)); ?></div>
+                                    <div>
+                                        <strong><?php echo htmlspecialchars($user['username']); ?></strong>
+                                    </div>
+                                </div>
+                            </td>
+                            <td><?php echo htmlspecialchars($user['full_name'] ?? 'N/A'); ?></td>
+                            <td class="email-cell"><?php echo htmlspecialchars($user['email']); ?></td>
+                            <td>
+                                <span class="role-badge <?php echo $role; ?>">
+                                    <?php echo ucfirst($role); ?>
                                 </span>
                             </td>
                             <td><?php echo date('M d, Y', strtotime($user['created_at'])); ?></td>
-                            <td><span class="badge badge-success"><?php echo $user_bookings_count[$user['id']] ?? 0; ?> bookings</span></td>
+                            <td><span class="booking-count"><?php echo $bookings; ?> bookings</span></td>
                             <td>
-                                <button class="btn-sm btn-info" onclick="viewUser(<?php echo $user['id']; ?>)">
-                                    <i class="fas fa-eye"></i> View
-                                </button>
-                                <?php if($is_admin && $user['role'] != 'admin'): ?>
-                                    <button class="btn-sm btn-warning" onclick="editUser(<?php echo $user['id']; ?>)">
-                                        <i class="fas fa-edit"></i> Edit
-                                    </button>
-                                    <button class="btn-sm btn-danger"
-                                            onclick="openDeleteUserModal(<?php echo $user['id']; ?>, '<?php echo addslashes($user['username']); ?>', '<?php echo addslashes($user['email']); ?>')">
-                                        <i class="fas fa-trash"></i> Delete
-                                    </button>
-                                <?php elseif($is_admin && $user['role'] == 'admin'): ?>
-                                    <span class="btn-sm btn-disabled" title="Cannot edit or delete admin user">
-                                        <i class="fas fa-lock"></i> Admin
-                                    </span>
-                                <?php else: ?>
-                                    <span class="btn-sm btn-disabled" title="Staff cannot edit or delete users">
-                                        <i class="fas fa-lock"></i> Read Only
-                                    </span>
-                                <?php endif; ?>
+                                <div class="table-actions">
+
+
+<button
+class="user-action-btn user-action-view"
+onclick="viewUser(<?php echo $userId; ?>)"
+title="View user details">
+
+<i class="fas fa-eye"></i>
+
+</button>
+
+
+<?php if($is_admin): ?>
+
+
+<button
+class="user-action-btn user-action-edit"
+onclick="editUser(<?php echo $userId; ?>)"
+title="Edit user">
+
+<i class="fas fa-pen"></i>
+
+</button>
+
+
+<?php if($role !== 'admin'): ?>
+
+
+<button
+class="user-action-btn user-action-delete"
+onclick="openDeleteUserModal(
+<?php echo $userId; ?>,
+'<?php echo addslashes($user['username']); ?>',
+'<?php echo addslashes($user['email']); ?>'
+)"
+title="Delete user">
+
+<i class="fas fa-trash"></i>
+
+</button>
+
+
+<?php endif; ?>
+
+
+<?php endif; ?>
+
+
+</div>
                             </td>
                         </tr>
-                        <?php endforeach; ?>
+                    <?php endforeach; ?>
                     </tbody>
                 </table>
-                <?php else: ?>
-                <div class="empty-state">
-                    <i class="fas fa-users-slash"></i>
-                    <p>No users found.</p>
-                    <?php if($search): ?><p style="font-size: 14px; margin-top: 5px; color: #94a3b8;">Try adjusting your search criteria.</p><?php endif; ?>
-                </div>
-                <?php endif; ?>
             </div>
-
-            <!-- MOBILE CARDS -->
-            <div class="booking-cards-mobile">
-                <?php if(count($users) > 0): ?>
-                    <?php foreach($users as $user): 
-                        $role_class = 'badge-guest';
-                        $role_icon = 'user';
-                        if($user['role'] == 'admin') { $role_class = 'badge-admin'; $role_icon = 'crown'; }
-                        if($user['role'] == 'staff') { $role_class = 'badge-staff'; $role_icon = 'user-tie'; }
-                    ?>
-                    <div class="booking-card-mobile">
-                        <div class="card-top-row">
-                            <div class="card-ref">
-                                <i class="fas fa-user" style="color:#4DA6D9; font-size:11px;"></i>
-                                <?php echo htmlspecialchars($user['username']); ?>
-                            </div>
-                            <div class="card-badges">
-                                <span class="badge <?php echo $role_class; ?>">
-                                    <i class="fas fa-<?php echo $role_icon; ?>"></i>
-                                    <?php echo ucfirst($user['role']); ?>
-                                </span>
-                            </div>
-                        </div>
-
-                        <div class="card-row">
-                            <i class="fas fa-id-badge"></i>
-                            <span class="card-label">Name</span>
-                            <span class="card-value"><?php echo htmlspecialchars($user['full_name']); ?></span>
-                        </div>
-
-                        <div class="card-row">
-                            <i class="fas fa-envelope"></i>
-                            <span class="card-label">Email</span>
-                            <span class="card-value"><?php echo htmlspecialchars($user['email']); ?></span>
-                        </div>
-
-                        <div class="card-row">
-                            <i class="fas fa-calendar-alt"></i>
-                            <span class="card-label">Joined</span>
-                            <span class="card-value"><?php echo date('M d, Y', strtotime($user['created_at'])); ?></span>
-                        </div>
-
-                        <div class="card-row">
-                            <i class="fas fa-calendar-check"></i>
-                            <span class="card-label">Bookings</span>
-                            <span class="card-value">
-                                <span class="badge badge-success" style="font-size:10px;">
-                                    <?php echo $user_bookings_count[$user['id']] ?? 0; ?> total
-                                </span>
-                            </span>
-                        </div>
-
-                        <div class="card-actions">
-                            <button type="button" class="btn-card-action btn-view-mobile"
-                                    onclick="viewUser(<?php echo $user['id']; ?>)">
-                                <i class="fas fa-eye"></i> View
-                            </button>
-
-                            <?php if($is_admin && $user['role'] != 'admin'): ?>
-                                <button type="button" class="btn-card-action btn-edit-mobile"
-                                        onclick="editUser(<?php echo $user['id']; ?>)">
-                                    <i class="fas fa-edit"></i> Edit
-                                </button>
-                                <button type="button" class="btn-card-action btn-delete-mobile"
-                                        onclick="openDeleteUserModal(<?php echo $user['id']; ?>, '<?php echo addslashes($user['username']); ?>', '<?php echo addslashes($user['email']); ?>')">
-                                    <i class="fas fa-trash"></i> Delete
-                                </button>
-                            <?php elseif($is_admin && $user['role'] == 'admin'): ?>
-                                <span class="btn-card-action btn-disabled-mobile">
-                                    <i class="fas fa-lock"></i> Admin
-                                </span>
-                            <?php else: ?>
-                                <span class="btn-card-action btn-disabled-mobile">
-                                    <i class="fas fa-lock"></i> Read Only
-                                </span>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                    <?php endforeach; ?>
-                <?php else: ?>
-                    <div style="text-align: center; padding: 40px; color: #94a3b8; background:white; border-radius:14px; border:1px solid #e8f0fe;">
-                        <i class="fas fa-users-slash" style="display: block; font-size: 30px; margin-bottom: 10px; color: #cbd5e1;"></i>
-                        <p>No users found.</p>
-                        <?php if($search): ?>
-                            <p style="font-size: 13px; margin-top: 5px; color: #94a3b8;">Try adjusting your search criteria.</p>
-                        <?php endif; ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
 
         <div class="footer">
             <p>
@@ -2618,6 +3412,36 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+
+// LIVE USER SEARCH FILTER
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const searchInput = document.getElementById("userSearchInput");
+    const rows = document.querySelectorAll(".user-row");
+
+    if(!searchInput) return;
+
+    searchInput.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+        rows.forEach(row => {
+
+            const text = row.dataset.search;
+
+            if(text.includes(keyword)){
+                row.style.display = "";
+            }else{
+                row.style.display = "none";
+            }
+
+        });
+
+    });
+
+});
 </script>
 
 </body>

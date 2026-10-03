@@ -1241,7 +1241,7 @@ function getRatingText($rating) {
             <li class="nav-item">
                 <a href="reports.php" class="nav-link">
                     <i class="fas fa-file-alt"></i>
-                    <span>Reports</span>
+                    <span>Sales Report</span>
                 </a>
             </li>
 

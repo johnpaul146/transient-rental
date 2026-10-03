@@ -1084,7 +1084,12 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
     <title>My Dashboard - Transient House & Tours</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="assets/css/design-system.css">
+<link rel="stylesheet" href="assets/css/transient-theme.css">
+  
+  <style>
         /* ============================================================
            RESET & BASE
            ============================================================ */
@@ -1098,292 +1103,6 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
         img { max-width: 100%; height: auto; display: block; }
         button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
-        /* ============================================================
-           HEADER — logo sits right next to hamburger on mobile
-           ============================================================ */
-        .header {
-            background: #0B2447;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-            padding: 10px 0;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            border-bottom: 2px solid rgba(77, 166, 217, 0.2);
-        }
-        .header-content {
-            max-width: 1300px;
-            margin: 0 auto;
-            padding: 0 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-        }
-
-        /* Hamburger is part of the normal flex flow — no more position: fixed */
-        .menu-toggle {
-            display: none;
-            background: rgba(255,255,255,0.1);
-            color: white;
-            border: 1px solid rgba(77, 166, 217, 0.3);
-            border-radius: 10px;
-            width: 44px;
-            height: 44px;
-            font-size: 20px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            align-items: center;
-            justify-content: center;
-            flex-shrink: 0;
-        }
-        .menu-toggle:hover { background: rgba(77, 166, 217, 0.25); transform: scale(1.05); }
-        .menu-toggle .fa-bars { transition: transform 0.3s ease; }
-        .menu-toggle.active .fa-bars { transform: rotate(90deg); }
-        body.sidebar-open-mobile .menu-toggle {
-            opacity: 0;
-            visibility: hidden;
-            pointer-events: none;
-            transform: scale(0.8);
-        }
-
-        .logo-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            text-decoration: none;
-            flex-shrink: 1;
-            min-width: 0;
-            flex: 1;
-        }
-        .logo-wrapper .logo-image,
-        .logo-wrapper .logo-image-placeholder {
-            height: 50px;
-            width: 50px;
-            border-radius: 12px;
-            flex-shrink: 0;
-        }
-        .logo-wrapper .logo-image {
-            object-fit: cover;
-            border: 2px solid #4DA6D9;
-            padding: 2px;
-            background: white;
-            transition: transform 0.3s ease;
-        }
-        .logo-wrapper .logo-image:hover { transform: scale(1.05); }
-        .logo-wrapper .logo-image-placeholder {
-            background: linear-gradient(135deg, #4DA6D9, #7bb8f0);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 24px;
-            font-weight: 700;
-            border: 2px solid #4DA6D9;
-        }
-        .logo-wrapper .brand-text {
-            display: flex;
-            flex-direction: column;
-            line-height: 1.2;
-            min-width: 0;
-        }
-        .logo-wrapper .brand-text .brand-name {
-            font-size: 20px;
-            font-weight: 700;
-            color: white;
-            letter-spacing: -0.5px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .logo-wrapper .brand-text .brand-tagline {
-            font-size: 11px;
-            color: #7bb8f0;
-            font-weight: 500;
-            letter-spacing: 0.3px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .desktop-nav {
-            display: flex;
-            gap: 4px;
-            align-items: center;
-            flex-wrap: nowrap;
-            flex-shrink: 0;
-            min-width: 0;
-        }
-        .desktop-nav a {
-            padding: 8px 12px;
-            border-radius: 8px;
-            color: #b3d9ff;
-            text-decoration: none;
-            font-weight: 500;
-            transition: all 0.2s;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            white-space: nowrap;
-            flex-shrink: 0;
-            line-height: 1.2;
-        }
-        .desktop-nav a i { font-size: 13px; }
-        .desktop-nav a:hover { background: rgba(77, 166, 217, 0.2); color: white; }
-        .desktop-nav a.active-nav { background: rgba(77, 166, 217, 0.25); color: white; }
-        .desktop-nav .btn-logout {
-            background: #ef4444;
-            color: white;
-            border-radius: 8px;
-            padding: 8px 14px;
-        }
-        .desktop-nav .btn-logout:hover { background: #dc2626; }
-        .desktop-nav .btn-rate {
-            background: #F4B400;
-            color: #0B2447;
-            border-radius: 8px;
-            padding: 8px 14px;
-        }
-        .desktop-nav .btn-rate:hover { background: #e6a800; color: #0B2447; }
-
-        /* SIDEBAR */
-        .sidebar {
-            position: fixed;
-            top: 0;
-            left: -320px;
-            width: 300px;
-            height: 100vh;
-            background: #0B2447;
-            box-shadow: 4px 0 30px rgba(0,0,0,0.3);
-            padding: 25px 0;
-            transition: left 0.3s ease;
-            z-index: 1000;
-            overflow-y: auto;
-            border-right: 2px solid rgba(77, 166, 217, 0.15);
-        }
-        .sidebar.open { left: 0; }
-        .sidebar::-webkit-scrollbar { width: 5px; }
-        .sidebar::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
-        .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
-
-        .sidebar-header {
-            padding: 0 20px 25px;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-            margin-bottom: 20px;
-        }
-        .sidebar-header-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-        .sidebar-header .logo {
-            font-size: 22px;
-            font-weight: 700;
-            color: white;
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex: 1;
-            min-width: 0;
-        }
-        .sidebar-header .logo .logo-icon {
-            width: 48px;
-            height: 48px;
-            background: linear-gradient(135deg, #4DA6D9, #7bb8f0);
-            border-radius: 14px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 22px;
-            color: white;
-            flex-shrink: 0;
-            box-shadow: 0 4px 15px rgba(77, 166, 217, 0.3);
-        }
-        .sidebar-header .logo img {
-            width: 48px;
-            height: 48px;
-            border-radius: 14px;
-            object-fit: cover;
-            border: 2px solid #4DA6D9;
-            padding: 2px;
-            background: white;
-            flex-shrink: 0;
-            box-shadow: 0 4px 15px rgba(77, 166, 217, 0.3);
-        }
-        .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
-        .sidebar-header .logo .logo-text .main {
-            font-size: 18px;
-            font-weight: 700;
-            color: white;
-            letter-spacing: 0.5px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .sidebar-header .logo .logo-text .sub {
-            font-size: 10px;
-            color: #7bb8f0;
-            font-weight: 400;
-            letter-spacing: 0.3px;
-        }
-
-        .sidebar-close-btn {
-            display: none;
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.15);
-            color: #e0eeff;
-            width: 36px;
-            height: 36px;
-            border-radius: 10px;
-            font-size: 16px;
-            cursor: pointer;
-            flex-shrink: 0;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.2s;
-        }
-        .sidebar-close-btn:hover {
-            background: #ef4444;
-            border-color: #ef4444;
-            color: white;
-            transform: rotate(90deg);
-        }
-
-        .nav-menu { list-style: none; padding: 0; margin: 0; }
-        .nav-item { margin-bottom: 2px; position: relative; }
-        .nav-link {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-            padding: 12px 20px;
-            color: #b3d9ff;
-            text-decoration: none;
-            transition: all 0.3s;
-            border-left: 3px solid transparent;
-            font-weight: 500;
-            font-size: 14px;
-        }
-        .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
-        .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active-nav { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active-nav i { color: #7bb8f0; }
-        .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
-
-        .sidebar-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 999;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-        .sidebar-overlay.active { display: block; opacity: 1; }
 
         /* ============================================================
            RESPONSIVE HEADER
@@ -1464,16 +1183,41 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
         }
 
         /* HERO */
-        .hero {
-            <?php if($hero_exists): ?>
-            background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo $hero_path; ?>?<?php echo time(); ?>');
-            background-size: cover; background-position: center;
-            <?php else: ?>
-            background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
-            <?php endif; ?>
-            padding: 80px 0; color: white; text-align: center; position: relative;
-        }
-        .hero-content { max-width: 800px; margin: 0 auto; padding: 0 20px; position: relative; z-index: 1; }
+.hero {
+    <?php if($hero_exists): ?>
+    background: linear-gradient(
+        rgba(11, 36, 71, 0.55),
+        rgba(11, 36, 71, 0.65)
+    ),
+    url('<?php echo $hero_path; ?>?<?php echo time(); ?>');
+
+    background-size: 100% auto;
+background-position: center top;
+
+    <?php else: ?>
+    background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
+    <?php endif; ?>
+
+    height: 220px;
+    min-height: 220px;
+    padding: 0;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    color:white;
+    text-align:center;
+    position:relative;
+}
+
+.hero-content {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+    position: relative;
+    z-index: 1;
+}
         .hero h1 { font-size: 48px; font-weight: 700; margin-bottom: 20px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); word-wrap: break-word; }
         .hero h1 i { color: #7bb8f0; }
         .hero p { font-size: 18px; margin-bottom: 30px; opacity: 0.95; text-shadow: 0 1px 15px rgba(0,0,0,0.15); }
@@ -1493,6 +1237,52 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
         .stat-icon { width: 50px; height: 50px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 15px; color: white; font-size: 20px; border: 2px solid rgba(255,255,255,0.1); }
         .stat-number { font-size: 28px; font-weight: 700; color: white; word-break: break-word; }
         .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; }
+
+.featured-package{
+    background:linear-gradient(135deg,#0B2447,#4DA6D9);
+    color:white;
+    border-radius:20px;
+    padding:25px;
+    margin-bottom:30px;
+    box-shadow:0 15px 35px rgba(11,36,71,.18);
+}
+
+.package-title{
+    font-size:18px;
+    font-weight:700;
+    color:#ffffff;
+}
+
+
+.package-title i{
+    color:#F4B400;
+}
+
+
+.package-content{
+    display:flex;
+    align-items:center;
+    gap:20px;
+}
+
+
+.package-content h3{
+    margin:0;
+    font-size:24px;
+    color:#ffffff;
+    font-weight:800;
+}
+
+
+.package-content p{
+    margin:5px 0 0;
+    color:rgba(255,255,255,0.9);
+}
+
+.package-btn:hover{
+    color:#0B2447;
+    transform:translateY(-2px);
+}
 
         /* PROFILE GRID */
         .profile-grid { display: grid; grid-template-columns: 350px 1fr; gap: 30px; margin-top: 30px; align-items: start; }
@@ -1994,126 +1784,69 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
             .header-content, .main-container, .footer-content { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
             .footer { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
         }
+
+        /* PROFILE HERO OVERRIDE */
+/* PROFILE HERO FIX */
+.hero {
+    min-height:420px !important;
+    height:420px !important;
+    padding:0 !important;
+}
+
+.hero {
+    background-size:cover !important;
+    background-position:center center !important;
+}
+
+/* Vacation Package Banner Contrast Fix */
+.package-banner h1,
+.package-banner h2,
+.package-banner h3,
+.package-banner p {
+    color: #ffffff !important;
+}
+
+.package-banner .package-title {
+    color: #ffffff !important;
+}
+
+.package-banner .package-description {
+    color: rgba(255,255,255,0.9) !important;
+}
+
+/* PACKAGE BANNER TEXT OVERRIDE */
+.featured-package .package-content h3,
+.featured-package .package-content p,
+.featured-package .package-title {
+    color:#ffffff !important;
+}
+
+.featured-package .package-content p {
+    color:rgba(255,255,255,0.9) !important;
+}
     </style>
 </head>
 <body>
 
-<!-- SIDEBAR OVERLAY (mobile only) -->
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+<?php
+$nav_variant = 'solid';
+$nav_active = '';
 
-<!-- SIDEBAR NAVIGATION (mobile only) -->
-<div class="sidebar" id="sidebar">
-
-    <div class="sidebar-header">
-        <div class="sidebar-header-top">
-            <a href="index.php" class="logo">
-                <?php if($sidebar_logo_exists): ?>
-                    <img src="<?php echo htmlspecialchars($sidebar_logo); ?>?<?php echo time(); ?>" alt="Logo">
-                <?php else: ?>
-                    <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
-                <?php endif; ?>
-                <div class="logo-text">
-                    <span class="main">Transient House</span>
-                    <span class="sub">& Tours</span>
-                </div>
-            </a>
-            <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-    </div>
-
-    <ul class="nav-menu">
-        <li class="nav-item"><a href="index.php" class="nav-link"><i class="fas fa-home"></i><span>Home</span></a></li>
-        <li class="nav-item"><a href="houses.php" class="nav-link"><i class="fas fa-home"></i><span>Houses</span></a></li>
-        <li class="nav-item"><a href="tours.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tours</span></a></li>
-        <li class="nav-item"><a href="activities.php" class="nav-link"><i class="fas fa-water"></i><span>Activities</span></a></li>
-        <li class="nav-item"><a href="food.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food</span></a></li>
-        <li class="nav-item"><a href="packages.php" class="nav-link"><i class="fas fa-box-open"></i><span>My Package</span></a></li>
-        <li class="nav-item"><a href="profile.php?tab=packages" class="nav-link active-nav"><i class="fas fa-user"></i><span>Profile</span></a></li>
-
-        <?php if(isset($_SESSION['user_id'])): ?>
-            <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-cog"></i><span>Dashboard</span></a></li>
-            <?php else: ?>
-                <li class="nav-item">
-                    <a href="#" onclick="openOverallFeedbackModal(); return false;" class="nav-link"
-                       style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                        <i class="fas fa-star"></i>
-                        <span><?php echo $user_has_feedback ? 'Edit Review' : 'Rate Us'; ?></span>
-                    </a>
-                </li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item">
-                <a href="#" class="nav-link" onclick="openLogoutModal(event); return false;" style="color: #ef4444;">
-                    <i class="fas fa-sign-out-alt"></i><span>Logout</span>
-                </a>
-            </li>
-        <?php endif; ?>
-    </ul>
-</div>
-
-<!-- HEADER -->
-<div class="header">
-    <div class="header-content">
-        <!-- ✅ HAMBURGER IS FIRST → LOGO SITS RIGHT NEXT TO IT -->
-        <button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-            <i class="fas fa-bars"></i>
-        </button>
-
-        <a href="index.php" class="logo-wrapper">
-            <?php 
-            $logo_actual_path = $content['site_settings']['logo_path'] ?? 'uploads/logos/logo.png';
-            $logo_exists = !empty($logo_actual_path) && file_exists($logo_actual_path) && !is_dir($logo_actual_path);
-            if(!$logo_exists && file_exists('uploads/logos/logo.png')) {
-                $logo_exists = true; $logo_actual_path = 'uploads/logos/logo.png';
-            }
-            if($logo_exists): ?>
-                <img src="<?php echo htmlspecialchars($logo_actual_path); ?>?<?php echo time(); ?>" alt="Logo" class="logo-image">
-            <?php else: ?>
-                <div class="logo-image-placeholder"><i class="fas fa-home"></i></div>
-            <?php endif; ?>
-            <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
-                <span class="brand-tagline">Your Home Away From Home</span>
-            </div>
-        </a>
-
-        <div class="desktop-nav">
-            <a href="index.php"><i class="fas fa-home"></i> Home</a>
-            <a href="houses.php"><i class="fas fa-home"></i> Houses</a>
-            <a href="tours.php"><i class="fas fa-umbrella-beach"></i> Tours</a>
-            <a href="activities.php"><i class="fas fa-water"></i> Activities</a>
-            <a href="food.php"><i class="fas fa-utensils"></i> Food</a>
-            <a href="packages.php"><i class="fas fa-box-open"></i> My Package</a>
-            <a href="profile.php?tab=packages" class="active-nav"><i class="fas fa-user"></i> Profile</a>
-
-            <?php if(isset($_SESSION['user_id'])): ?>
-                <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                    <a href="admin-dashboard.php"><i class="fas fa-cog"></i> Dashboard</a>
-                <?php else: ?>
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(); return false;" class="btn-rate">
-                            <i class="fas fa-star"></i> <span class="rate-text">Edit</span>
-                        </a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(); return false;" class="btn-rate">
-                            <i class="fas fa-star"></i> <span class="rate-text">Rate Us</span>
-                        </a>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <a href="#" onclick="openLogoutModal(event); return false;" class="btn-logout"><i class="fas fa-sign-out-alt"></i> <span class="logout-text">Logout</span></a>
-            <?php endif; ?>
-        </div>
-    </div>
-</div>
+include 'components/navbar.php';
+?>
 
 <!-- HERO -->
 <div class="hero">
     <div class="hero-content">
-        <h1><i class="fas fa-user-circle"></i> Welcome back, <?php echo $guest ? htmlspecialchars($guest['full_name']) : htmlspecialchars($user['username']); ?>!</h1>
-        <p>Manage your bookings, view payment options, and track your reservations</p>
+      <h1>
+<i class="fas fa-umbrella-beach"></i>
+Welcome back, 
+<?php echo $guest ? htmlspecialchars($guest['full_name']) : htmlspecialchars($user['username']); ?>!
+</h1>
+
+<p>
+Your travel dashboard — manage trips, payments, and vacation plans in one place.
+</p>
     </div>
 </div>
 
@@ -2155,34 +1888,117 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
     <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <span><?php echo $upload_error; ?></span></div>
     <?php endif; ?>
     
-    <!-- STATS -->
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-home"></i></div>
-            <div class="stat-number"><?php echo count($house_bookings); ?></div>
-            <div class="stat-label">House Bookings</div>
+   <!-- DASHBOARD SUMMARY -->
+
+<div class="stats-grid">
+
+    <div class="stat-card">
+        <div class="stat-icon">
+            <i class="fas fa-suitcase"></i>
         </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-umbrella-beach"></i></div>
-            <div class="stat-number"><?php echo count($tour_bookings); ?></div>
-            <div class="stat-label">Tour Bookings</div>
+
+        <div class="stat-number">
+            <?php echo count($package_bookings); ?>
         </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-utensils"></i></div>
-            <div class="stat-number"><?php echo count($food_bookings); ?></div>
-            <div class="stat-label">Food Bookings</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-box-open"></i></div>
-            <div class="stat-number"><?php echo count($package_bookings); ?></div>
-            <div class="stat-label">Package Bookings</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fas fa-clock"></i></div>
-            <div class="stat-number"><?php echo $pending_count; ?></div>
-            <div class="stat-label">Pending</div>
+
+        <div class="stat-label">
+            My Packages
         </div>
     </div>
+
+
+    <div class="stat-card">
+        <div class="stat-icon">
+            <i class="fas fa-calendar-check"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo $total_bookings; ?>
+        </div>
+
+        <div class="stat-label">
+            Total Trips
+        </div>
+    </div>
+
+
+    <div class="stat-card">
+        <div class="stat-icon">
+            <i class="fas fa-clock"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo $pending_count; ?>
+        </div>
+
+        <div class="stat-label">
+            Pending Action
+        </div>
+    </div>
+
+
+    <div class="stat-card">
+        <div class="stat-icon">
+            <i class="fas fa-home"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo count($house_bookings); ?>
+        </div>
+
+        <div class="stat-label">
+            Stays
+        </div>
+    </div>
+
+
+    <div class="stat-card">
+        <div class="stat-icon">
+            <i class="fas fa-star"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo $user_has_feedback ? '✓' : '—'; ?>
+        </div>
+
+        <div class="stat-label">
+            Review
+        </div>
+    </div>
+
+</div> 
+
+<?php if(!empty($package_bookings)): ?>
+
+<div class="featured-package">
+
+    <div class="package-title">
+        <i class="fas fa-box-open"></i>
+        Your Vacation Package
+    </div>
+
+
+    <div class="package-content">
+
+        <div>
+            <h3>
+            <?php echo htmlspecialchars($package_bookings[0]['package_name'] ?? 'My Travel Package
+'); ?>
+            </h3>
+
+            <p>
+            Your accommodation, tours, and food reservations are combined into one convenient travel package.
+            </p>
+        </div>
+
+
+        
+
+    </div>
+
+</div>
+
+<?php endif; ?>
     
     <!-- PROFILE GRID -->
     <div class="profile-grid">
@@ -2297,12 +2113,29 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
         <!-- BOOKINGS SECTION -->
         <div class="bookings-section">
             <div class="section-tabs">
-                <div class="tab <?php echo $default_tab === 'houses' ? 'active' : ''; ?>" onclick="showTab('houses')">House Bookings</div>
-                <div class="tab <?php echo $default_tab === 'tours' ? 'active' : ''; ?>" onclick="showTab('tours')">Tour Bookings</div>
-                <div class="tab <?php echo $default_tab === 'food' ? 'active' : ''; ?>" onclick="showTab('food')">Food Bookings</div>
-                <div class="tab <?php echo $default_tab === 'packages' ? 'active' : ''; ?>" onclick="showTab('packages')">Package Bookings</div>
-                <div class="tab <?php echo $default_tab === 'rebooks' ? 'active' : ''; ?>" onclick="showTab('rebooks')">Rebooks</div>
-                <div class="tab <?php echo $default_tab === 'history' ? 'active' : ''; ?>" onclick="showTab('history')">History</div>
+               <div class="tab <?php echo $default_tab === 'houses' ? 'active' : ''; ?>" onclick="showTab('houses')">
+    My Stays
+</div>
+
+<div class="tab <?php echo $default_tab === 'tours' ? 'active' : ''; ?>" onclick="showTab('tours')">
+    My Tours
+</div>
+
+<div class="tab <?php echo $default_tab === 'food' ? 'active' : ''; ?>" onclick="showTab('food')">
+    Food Orders
+</div>
+
+<div class="tab <?php echo $default_tab === 'packages' ? 'active' : ''; ?>" onclick="showTab('packages')">
+    Vacation Packages
+</div>
+
+<div class="tab <?php echo $default_tab === 'rebooks' ? 'active' : ''; ?>" onclick="showTab('rebooks')">
+    Rebook
+</div>
+
+<div class="tab <?php echo $default_tab === 'history' ? 'active' : ''; ?>" onclick="showTab('history')">
+    Past Trips
+</div>
             </div>
             
             <!-- HOUSE BOOKINGS TAB -->

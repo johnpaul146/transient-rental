@@ -239,6 +239,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Activities - Huddled Islands</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         /* RESET & BASE */
@@ -1368,9 +1369,86 @@ $is_logged_in = isset($_SESSION['user_id']);
             .activity-card .price-tag { font-size: 20px; }
             .footer-map { height: 140px; }
         }
-    </style>
+    
+/* ACTIVITY CARD THEME FIX */
+.activity-card {
+    background:#ffffff !important;
+    border:1px solid #e8f0fe !important;
+    border-radius:24px !important;
+    box-shadow:0 15px 40px rgba(6,38,61,.08) !important;
+}
+.activity-card .activity-content h4 {
+    color:#06263D !important;
+    font-weight:800 !important;
+}
+.activity-card .activity-category {
+    color:#64748B !important;
+}
+.activity-card .activity-desc {
+    color:#475569 !important;
+}
+.activity-card .price-tag {
+    color:#0B7CC1 !important;
+    font-weight:800 !important;
+}
+.activity-card .price-tag small {
+    color:#64748B !important;
+}
+
+/* ============================================================
+   ACTIVITIES CARD LAYOUT FIX
+   ============================================================ */
+
+.activity-grid {
+    display:grid;
+    grid-template-columns:repeat(3, minmax(280px, 1fr));
+    gap:30px;
+    align-items:stretch;
+}
+
+.activity-card {
+    display:flex;
+    flex-direction:column;
+    height:100%;
+}
+
+.activity-card .activity-image-wrapper {
+    height:220px;
+}
+
+.activity-card .activity-content {
+    display:flex;
+    flex-direction:column;
+    flex:1;
+    padding:22px;
+}
+
+.activity-card .activity-desc {
+    min-height:65px;
+}
+
+.activity-card .price-tag {
+    margin-top:auto !important;
+    padding-top:18px;
+}
+
+/* responsive */
+@media(max-width:992px){
+    .activity-grid {
+        grid-template-columns:repeat(2,1fr);
+    }
+}
+
+@media(max-width:600px){
+    .activity-grid {
+        grid-template-columns:1fr;
+    }
+}
+
+</style>
 </head>
 <body>
+<?php include 'components/navbar.php'; ?>
 
 <!-- SIDEBAR OVERLAY -->
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
@@ -1846,85 +1924,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 </div>
 
 <!-- FOOTER -->
-<div class="footer">
-    <div class="footer-content">
-        <div class="footer-grid">
-            <div class="footer-col">
-                <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
-                <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
-                <div class="social-links">
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook"><i class="fab fa-facebook-f"></i></a>
-                </div>
-            </div>
-            
-            <div class="footer-col">
-                <h4><i class="fas fa-link"></i> Quick Links</h4>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
-                    <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Houses</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
-                    <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
-                    <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
-                    <li><a href="packages.php"><i class="fas fa-chevron-right"></i> My Package</a></li>
-                    <li><a href="reviews.php"><i class="fas fa-chevron-right"></i> Reviews</a></li>
-                    <?php if(isset($_SESSION['user_id'])): ?>
-                        <li><a href="profile.php"><i class="fas fa-chevron-right"></i> My Profile</a></li>
-                    <?php endif; ?>
-                </ul>
-            </div>
-            
-            <div class="footer-col">
-                <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                
-                <div class="footer-map">
-                    <iframe 
-                        src="<?php echo htmlspecialchars($map_embed); ?>" 
-                        width="100%" 
-                        height="100%" 
-                        style="border:0;" 
-                        allowfullscreen="" 
-                        loading="lazy" 
-                        referrerpolicy="no-referrer-when-downgrade">
-                    </iframe>
-                </div>
-                
-                <ul>
-                    <li>
-                        <i class="fas fa-map-marker-alt"></i>
-                        <?php if ($maps_url != '#'): ?>
-                            <a href="<?php echo $maps_url; ?>" target="_blank" rel="noopener noreferrer" style="color: #b3d9ff; text-decoration: none; transition: color 0.2s;">
-                                <?php echo htmlspecialchars($location_address); ?>
-                                <i class="fas fa-external-link-alt" style="font-size: 10px; margin-left: 4px; opacity: 0.6;"></i>
-                            </a>
-                        <?php else: ?>
-                            <?php echo htmlspecialchars($location_address); ?>
-                        <?php endif; ?>
-                    </li>
-                    <li>
-                        <i class="fas fa-phone"></i>
-                        <a href="tel:<?php echo preg_replace('/[^0-9+]/', '', $content['footer']['phone'] ?? '+639123456789'); ?>" style="color: #b3d9ff; text-decoration: none;">
-                            <?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?>
-                        </a>
-                    </li>
-                    <li>
-                        <i class="fas fa-envelope"></i>
-                        <a href="mailto:<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>" style="color: #b3d9ff; text-decoration: none;">
-                            <?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>
-                        </a>
-                    </li>
-                </ul>
-            </div>
-        </div>
-        
-        <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?></div>
-            <div class="footer-bottom-links">
-                <a onclick="reopenTermsModal('privacy'); return false;"><?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?></a>
-                <a onclick="reopenTermsModal('terms'); return false;"><?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?></a>
-            </div>
-        </div>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 <!-- JAVASCRIPT -->
 <script>

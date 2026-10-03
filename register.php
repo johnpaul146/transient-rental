@@ -89,20 +89,50 @@ function normalizePhone($phone) {
 }
 
 function validatePhoneNumber($phone) {
-    if (empty($phone)) return "Phone number is required";
+
+    if (empty($phone)) {
+        return "Phone number is required";
+    }
+
     $clean = normalizePhone($phone);
-    if (strlen($clean) < 7 || strlen($clean) > 15) return "Phone number must be between 7 and 15 digits";
-    if (!preg_match('/^[0-9]{7,15}$/', $clean)) return "Phone number must contain only numbers (0-9)";
+
+
+    if (strlen($clean) !== 10) {
+        return "Mobile number must be exactly 10 digits";
+    }
+
+
+    if (!preg_match('/^9[0-9]{9}$/', $clean)) {
+        return "Mobile number must start with 9";
+    }
+
+
     return null;
 }
 
 function validatePhoneNumberOptional($phone) {
-    if (empty($phone)) return null;
+
+    if (empty($phone)) {
+        return null;
+    }
+
     $clean = normalizePhone($phone);
-    if (strlen($clean) < 7 || strlen($clean) > 15) return "Emergency contact number must be between 7 and 15 digits";
-    if (!preg_match('/^[0-9]{7,15}$/', $clean)) return "Emergency contact number must contain only numbers (0-9)";
+
+
+    if (strlen($clean) !== 10) {
+        return "Mobile number must be exactly 10 digits";
+    }
+
+
+    if (!preg_match('/^9[0-9]{9}$/', $clean)) {
+        return "Mobile number must start with 9";
+    }
+
+
     return null;
 }
+
+
 
 function buildFullPhone($suffix, $number) {
     $clean_number = normalizePhone($number);
@@ -487,8 +517,7 @@ function hasError($field) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>Register — <?php echo htmlspecialchars($site_name); ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -586,6 +615,68 @@ function hasError($field) {
         }
 
         .register-body { padding: 40px; }
+
+        /* =========================
+   REGISTER WIZARD
+   ========================= */
+
+.wizard-steps{
+    display:flex;
+    justify-content:center;
+    gap:12px;
+    margin-bottom:35px;
+    flex-wrap:wrap;
+}
+
+.wizard-step-indicator{
+    padding:10px 18px;
+    border-radius:30px;
+    background:#eef4fb;
+    color:#64748b;
+    font-size:13px;
+    font-weight:700;
+    transition:.3s;
+}
+
+.wizard-step-indicator.active{
+    background:#0B7CC1;
+    color:white;
+}
+
+.wizard-panel{
+    display:none;
+}
+
+.wizard-panel.active{
+    display:block;
+}
+
+.wizard-buttons{
+    display:flex;
+    justify-content:flex-end;
+    gap:15px;
+    margin-top:40px;
+    padding-top:25px;
+    border-top:1px solid #E8F0FE;
+}
+
+.wizard-buttons button{
+    padding:14px 30px;
+    border:none;
+    border-radius:12px;
+    font-weight:700;
+    cursor:pointer;
+}
+
+.btn-prev{
+    background:#e2e8f0;
+    color:#06263D;
+}
+
+.btn-next{
+    background:#F4B400;
+    color:#06263D;
+}
 
         h4 {
             color: #0B2447;
@@ -1045,27 +1136,390 @@ function hasError($field) {
             .id-number-wrapper .form-control { padding-right: 60px; font-size: 13px; }
             .id-number-wrapper .id-char-count { font-size: 9px; padding: 2px 6px; right: 8px; }
         }
+/* ==========================================
+   REGISTER TYPOGRAPHY + COLOR CONSISTENCY
+   ========================================== */
+
+.register-container,
+.register-container * {
+    font-family:
+        'Inter',
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif !important;
+}
+
+
+/* Main text */
+.register-body {
+    color:#06263D;
+}
+
+
+/* Section titles */
+.register-body h4 {
+    color:#06263D !important;
+    font-weight:800 !important;
+}
+
+
+/* Section icons */
+.section-icon {
+    background:#0B7CC1 !important;
+}
+
+
+/* Divider */
+.section-divider {
+    background:
+    linear-gradient(
+        90deg,
+        #0B7CC1,
+        transparent
+    ) !important;
+}
+
+
+/* Labels */
+.register-body label {
+    color:#334155 !important;
+    font-weight:600 !important;
+}
+
+
+/* Inputs */
+.form-control,
+.form-select,
+.phone-suffix-select {
+
+    background:#FFFFFF !important;
+    color:#06263D !important;
+
+    border-color:#CBD5E1 !important;
+}
+
+
+/* Placeholder */
+.form-control::placeholder {
+    color:#94A3B8 !important;
+}
+
+
+/* Focus */
+.form-control:focus,
+.form-select:focus {
+
+    border-color:#0B7CC1 !important;
+
+    box-shadow:
+    0 0 0 4px rgba(11,124,193,.12) !important;
+}
+
+
+/* Helper text */
+.field-info {
+    color:#64748B !important;
+}
+
+
+/* Wizard text */
+.wizard-step-indicator {
+
+    font-family:'Inter',sans-serif !important;
+    font-weight:700 !important;
+}
+
+
+.wizard-step-indicator.active {
+
+    background:#0B7CC1 !important;
+}
+
+
+/* Buttons */
+.btn-prev,
+.btn-next,
+.btn-register {
+
+    font-family:'Inter',sans-serif !important;
+    font-weight:800 !important;
+}
+
+
+/* Login link */
+.login-link a {
+
+    color:#0B7CC1 !important;
+
+}
+
+/* =====================================
+   REGISTER WIZARD ACTION DESIGN
+   ===================================== */
+
+.wizard-buttons {
+    display:flex !important;
+    justify-content:space-between !important;
+    align-items:center;
+    gap:20px;
+    margin-top:40px !important;
+    padding-top:25px;
+    border-top:1px solid #E8F0FE;
+}
+
+
+/* Previous Button */
+
+.btn-prev {
+    min-width:150px;
+    height:48px;
+    padding:0 28px !important;
+
+    background:#F1F5F9 !important;
+    color:#06263D !important;
+
+    border:1px solid #CBD5E1 !important;
+    border-radius:14px !important;
+
+    font-size:15px !important;
+    font-weight:700 !important;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+
+    transition:.25s;
+}
+
+
+.btn-prev:hover {
+
+    background:#E2E8F0 !important;
+
+    transform:translateY(-2px);
+}
+
+
+
+/* Next Button */
+
+.btn-next {
+
+    min-width:150px;
+    height:48px;
+    padding:0 28px !important;
+
+    background:#F4B400 !important;
+    color:#06263D !important;
+
+    border:none !important;
+    border-radius:14px !important;
+
+    font-size:15px !important;
+    font-weight:800 !important;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+
+    box-shadow:
+    0 8px 20px rgba(244,180,0,.25);
+
+    transition:.25s;
+}
+
+
+.btn-next:hover {
+
+    background:#E5A900 !important;
+
+    transform:translateY(-2px);
+
+    box-shadow:
+    0 12px 28px rgba(244,180,0,.35);
+}
+
+
+
+/* Create Account final button */
+
+.btn-register {
+
+    height:52px !important;
+
+    border-radius:14px !important;
+
+    font-size:16px !important;
+
+    box-shadow:
+    0 10px 25px rgba(244,180,0,.3);
+}
+
+
+
+/* Login link redesign */
+
+.login-link {
+
+    margin-top:28px !important;
+
+    padding-top:20px;
+
+    border-top:1px solid #E8F0FE;
+
+    font-size:14px !important;
+
+    color:#64748B !important;
+
+}
+
+
+.login-link a {
+
+    display:inline-flex;
+
+    margin-left:5px;
+
+    padding:6px 14px;
+
+    background:#E8F4FC;
+
+    color:#0B7CC1 !important;
+
+    border-radius:20px;
+
+    font-weight:700 !important;
+
+    text-decoration:none !important;
+
+    transition:.25s;
+
+}
+
+
+.login-link a:hover {
+
+    background:#0B7CC1;
+
+    color:white !important;
+
+}
+
+/* Font Awesome rendering fix */
+i.fas,
+i.fa,
+i.far,
+i.fab {
+    font-style: normal !important;
+}
+
+.fa,
+.fas {
+    font-family: "Font Awesome 6 Free" !important;
+    font-weight: 900 !important;
+}
+
+.fab {
+    font-family: "Font Awesome 6 Brands" !important;
+}
+
+/* Header back home button */
+
+.header-back-home {
+
+    display:inline-flex;
+
+    align-items:center;
+
+    gap:8px;
+
+    margin-top:18px;
+
+    padding:8px 18px;
+
+    border-radius:20px;
+
+    background:rgba(255,255,255,.15);
+
+    border:1px solid rgba(255,255,255,.35);
+
+    color:white !important;
+
+    text-decoration:none;
+
+    font-size:13px;
+
+    font-weight:700;
+
+    transition:.25s;
+
+}
+
+
+.header-back-home:hover {
+
+    background:#F4B400;
+
+    color:#06263D !important;
+
+    transform:translateY(-2px);
+
+}
+        
     </style>
 </head>
 <body>
 
 <div class="register-container">
 
-    <div class="register-header">
-        <?php if($logo_exists && !is_dir($logo_path)): ?>
-            <img src="<?php echo htmlspecialchars($logo_path); ?>?<?php echo time(); ?>"
-                 alt="<?php echo htmlspecialchars($site_name); ?>"
-                 class="logo-image">
-        <?php else: ?>
-            <div class="logo-icon">
-                <i class="fas fa-umbrella-beach"></i>
-            </div>
-        <?php endif; ?>
-        <h1><i class="fas fa-user-plus"></i> Create Account</h1>
-        <p>Join <?php echo htmlspecialchars($site_name); ?> today</p>
-    </div>
+   <div class="register-header">
+
+    <?php if($logo_exists && !is_dir($logo_path)): ?>
+        <img src="<?php echo htmlspecialchars($logo_path); ?>?<?php echo time(); ?>"
+             alt="<?php echo htmlspecialchars($site_name); ?>"
+             class="logo-image">
+    <?php else: ?>
+        <div class="logo-icon">
+            <i class="fas fa-umbrella-beach"></i>
+        </div>
+    <?php endif; ?>
+
+    <h1>
+        <i class="fas fa-user-plus"></i>
+        Create Account
+    </h1>
+
+    <p>
+        Join <?php echo htmlspecialchars($site_name); ?> today
+    </p>
+
+
+    <a href="index.php" class="header-back-home">
+        <i class="fas fa-arrow-left"></i>
+        Back to Homepage
+    </a>
+
+</div>
 
     <div class="register-body">
+
+    <div class="wizard-steps">
+    <div class="wizard-step-indicator active" data-step-indicator="1">
+        Step 1: Personal Information
+    </div>
+
+    <div class="wizard-step-indicator" data-step-indicator="2">
+        Step 2: Verification
+    </div>
+
+    <div class="wizard-step-indicator" data-step-indicator="3">
+        Step 3: Account Setup
+    </div>
+</div>
 
     <?php if(!empty($errors)): ?>
         <div class="error-summary">
@@ -1081,6 +1535,8 @@ function hasError($field) {
     <?php endif; ?>
 
     <form method="POST" action="" id="registerForm" enctype="multipart/form-data">
+
+<div class="wizard-panel active" data-step="1">
 
         <!-- PROFILE PHOTO -->
         <h4>
@@ -1236,11 +1692,11 @@ function hasError($field) {
                                class="form-control <?php echo hasError('contact'); ?>" 
                                value="<?php echo value('contact'); ?>" 
                                placeholder="9123456789" 
-                               maxlength="15" 
+                               maxlength="10"
                                inputmode="numeric"
                                autocomplete="tel"
                                required>
-                        <span class="digit-count" id="contactDigitCount">0/15</span>
+                        <span class="digit-count" id="contactDigitCount">0/10</span>
                     </div>
                 </div>
                 <?php if(hasError('contact')): ?>
@@ -1339,7 +1795,9 @@ function hasError($field) {
                 </div>
             </div>
         </div>
+</div>
 
+<div class="wizard-panel" data-step="2">
         <!-- EMERGENCY CONTACT -->
         <h4>
             <span class="section-icon"><i class="fas fa-phone-alt"></i></span>
@@ -1381,10 +1839,10 @@ function hasError($field) {
                                class="form-control <?php echo hasError('emergency_number'); ?>" 
                                value="<?php echo value('emergency_number'); ?>" 
                                placeholder="9123456789" 
-                               maxlength="15" 
+                              maxlength="10"
                                inputmode="numeric"
                                autocomplete="tel">
-                        <span class="digit-count" id="emergencyDigitCount">0/15</span>
+                        <span class="digit-count" id="emergencyDigitCount">0/10</span>
                     </div>
                 </div>
                 <?php if(hasError('emergency_number')): ?>
@@ -1503,6 +1961,9 @@ function hasError($field) {
             </div>
         </div>
 
+        </div>
+
+<div class="wizard-panel" data-step="3">
         <!-- ACCOUNT INFORMATION -->
         <h4>
             <span class="section-icon"><i class="fas fa-lock"></i></span>
@@ -1559,8 +2020,21 @@ function hasError($field) {
             </div>
         </div>
 
-        <button type="submit" name="register" class="btn-register">
-            <i class="fas fa-user-plus"></i> Create Account
+        </div>
+
+<div class="wizard-buttons">
+
+    <button type="button" class="btn-prev" id="prevBtn">
+        Previous
+    </button>
+
+    <button type="button" class="btn-next" id="nextBtn">
+        Next
+    </button>
+
+</div>
+
+<button type="submit" name="register" class="btn-register" id="submitBtn">            <i class="fas fa-user-plus"></i> Create Account
         </button>
 
         <p class="login-link">
@@ -1623,34 +2097,87 @@ function togglePasswordVisibility(inputId, button) {
 }
 
 function setupPhoneInput(inputId, counterId) {
+
     const input = document.getElementById(inputId);
     const counter = document.getElementById(counterId);
+
     if (!input || !counter) return;
-    
+
+
     function update() {
-        let cleaned = input.value.replace(/[^0-9]/g, '');
-        if (cleaned.length > 15) cleaned = cleaned.slice(0, 15);
-        if (input.value !== cleaned) {
-            const cursorPos = input.selectionStart;
-            const removed = input.value.length - cleaned.length;
+
+        let cleaned = input.value.replace(/[^0-9]/g,'');
+
+
+        // PH mobile rule
+        if(cleaned.length > 0 && cleaned[0] !== '9') {
+
+            cleaned = cleaned.substring(1);
+        }
+
+
+        if(cleaned.length > 10){
+
+            cleaned = cleaned.slice(0,10);
+        }
+
+
+        if(input.value !== cleaned){
+
             input.value = cleaned;
-            try {
-                input.setSelectionRange(Math.max(0, cursorPos - removed), Math.max(0, cursorPos - removed));
-            } catch(e) {}
         }
-        counter.textContent = cleaned.length + '/15';
-        counter.classList.toggle('complete', cleaned.length >= 7);
+
+
+        counter.textContent = cleaned.length + '/10';
+
+
+        if(cleaned.length === 10){
+
+            counter.classList.add('complete');
+
+        } else {
+
+            counter.classList.remove('complete');
+
+        }
+
     }
-    
+
+
     input.addEventListener('input', update);
-    input.addEventListener('paste', function(e) { setTimeout(update, 0); });
-    input.addEventListener('keypress', function(e) {
+
+
+    input.addEventListener('keypress', function(e){
+
         const char = String.fromCharCode(e.which);
-        if (!/[0-9]/.test(char) && e.which !== 8 && e.which !== 0 && e.which !== 13) {
+
+
+        if(!/[0-9]/.test(char)){
+
             e.preventDefault();
+            return;
         }
+
+
+        // first digit must be 9
+        if(this.value.length === 0 && char !== '9'){
+
+            e.preventDefault();
+
+        }
+
+
+        if(this.value.length >= 10){
+
+            e.preventDefault();
+
+        }
+
     });
+
+
     update();
+
 }
 
 // ============================================================
@@ -2008,7 +2535,111 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+/* =========================
+   REGISTER WIZARD LOGIC
+   ========================= */
+
+let currentStep = 1;
+
+const panels = document.querySelectorAll('.wizard-panel');
+const indicators = document.querySelectorAll('.wizard-step-indicator');
+
+const nextBtn = document.getElementById('nextBtn');
+const prevBtn = document.getElementById('prevBtn');
+const submitBtn = document.getElementById('submitBtn');
+
+
+function showStep(step){
+
+    panels.forEach(panel=>{
+        panel.classList.remove('active');
+
+        if(panel.dataset.step == step){
+            panel.classList.add('active');
+        }
+    });
+
+
+    indicators.forEach(ind=>{
+        ind.classList.remove('active');
+
+        if(ind.dataset.stepIndicator == step){
+            ind.classList.add('active');
+        }
+    });
+
+
+    prevBtn.style.display = step === 1 ? 'none':'block';
+
+    nextBtn.style.display = step === 3 ? 'none':'block';
+
+    submitBtn.style.display = step === 3 ? 'flex':'none';
+}
+
+
+function validateStep(step){
+
+    let panel=document.querySelector(
+        `.wizard-panel[data-step="${step}"]`
+    );
+
+    let required=panel.querySelectorAll(
+        'input[required], select[required]'
+    );
+
+
+    for(let field of required){
+
+        if(!field.value.trim()){
+
+            field.focus();
+
+            alert(
+              "Please complete all required fields before continuing."
+            );
+
+            return false;
+        }
+    }
+
+
+    return true;
+}
+
+
+nextBtn.addEventListener('click',()=>{
+
+    if(!validateStep(currentStep)){
+        return;
+    }
+
+
+    if(currentStep < 3){
+
+        currentStep++;
+
+        showStep(currentStep);
+    }
+
+});
+
+
+prevBtn.addEventListener('click',()=>{
+
+    if(currentStep > 1){
+
+        currentStep--;
+
+        showStep(currentStep);
+    }
+
+});
+
+
+showStep(currentStep);
 </script>
+
 
 </body>
 </html>

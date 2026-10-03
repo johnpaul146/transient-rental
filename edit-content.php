@@ -1379,7 +1379,7 @@ $current_terms_version = substr(md5(
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Reports</span></a></li>
+            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
 
             <?php if($is_admin): ?>
             <li class="nav-item">

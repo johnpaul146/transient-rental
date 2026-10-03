@@ -107,123 +107,54 @@ if (class_exists('SystemLogger')) {
     <title>All Reviews - Transient House & Tours</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+   <link rel="stylesheet" href="assets/css/design-system.css">
+<link rel="stylesheet" href="assets/css/navbar.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #f0f7fb;
-            min-height: 100vh;
-        }
+       body {
+    min-height:100vh;
+}
 
-        /* ============================================================
-           HEADER
-           ============================================================ */
-        .header {
-            background: #0B2447;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-            padding: 12px 0;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            border-bottom: 2px solid rgba(77, 166, 217, 0.2);
-        }
-        
-        .header-content {
-            max-width: 1300px;
-            margin: 0 auto;
-            padding: 0 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .logo-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            text-decoration: none;
-        }
-        
-        .logo-wrapper .logo-image {
-            height: 50px;
-            width: 50px;
-            border-radius: 12px;
-            object-fit: cover;
-            border: 2px solid #4DA6D9;
-            padding: 2px;
-            background: white;
-            transition: transform 0.3s ease;
-        }
-        
-        .logo-wrapper .logo-image:hover { transform: scale(1.05); }
-        
-        .logo-wrapper .logo-image-placeholder {
-            height: 50px;
-            width: 50px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #4DA6D9, #7bb8f0);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 24px;
-            font-weight: 700;
-            border: 2px solid #4DA6D9;
-        }
-        
-        .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
-        .brand-text .brand-name { font-size: 20px; font-weight: 700; color: white; letter-spacing: -0.5px; }
-        .brand-text .brand-tagline { font-size: 11px; color: #7bb8f0; font-weight: 500; letter-spacing: 0.3px; }
-        
-        .nav-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-        
-        .nav-links a {
-            padding: 8px 16px;
-            border-radius: 8px;
-            color: #b3d9ff;
-            text-decoration: none;
-            font-weight: 500;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-        }
-        
-        .nav-links a:hover { background: rgba(77, 166, 217, 0.2); color: white; }
-        .nav-links a.active-nav { background: rgba(77, 166, 217, 0.25); color: white; }
-        .nav-links .btn-logout { background: #ef4444; color: white; border-radius: 8px; padding: 8px 16px; }
-        .nav-links .btn-logout:hover { background: #dc2626; }
+     
 
         /* ============================================================
            HERO BANNER - WITH HOMEPAGE PHOTO
            ============================================================ */
-        .hero {
-            <?php if($hero_exists): ?>
-            background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo htmlspecialchars($hero_path); ?>?<?php echo time(); ?>');
-            background-size: cover;
-            background-position: center;
-            <?php else: ?>
-            background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
-            <?php endif; ?>
-            padding: 80px 0;
-            color: white;
-            text-align: center;
-            position: relative;
-        }
+       .hero {
+    <?php if($hero_exists): ?>
+    background: linear-gradient(rgba(11,36,71,.55), rgba(11,36,71,.65)),
+                url('<?php echo htmlspecialchars($hero_path); ?>?<?php echo time(); ?>');
+    background-size: cover;
+    background-position: center;
+    <?php else: ?>
+    background: linear-gradient(135deg,#0B2447,#0B3D91,#4DA6D9);
+    <?php endif; ?>
+
+    height: 420px;
+    min-height: 420px;
+    padding: 0;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    color:white;
+    text-align:center;
+    position:relative;
+}
         
-        .hero-content {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 0 20px;
-            position: relative;
-            z-index: 1;
-        }
+      .hero-content {
+    max-width:800px;
+    margin:0 auto;
+    padding:80px 20px 0;
+    position:relative;
+    z-index:1;
+}
         
         .hero h1 {
-            font-size: 48px;
+            font-size: 42px;
             font-weight: 700;
             margin-bottom: 20px;
             text-shadow: 0 2px 25px rgba(0,0,0,0.25);
@@ -232,7 +163,7 @@ if (class_exists('SystemLogger')) {
         .hero h1 i { color: #F4B400; }
         
         .hero p {
-            font-size: 18px;
+            font-size: 16px;
             margin-bottom: 30px;
             opacity: 0.95;
             text-shadow: 0 1px 15px rgba(0,0,0,0.15);
@@ -501,25 +432,6 @@ if (class_exists('SystemLogger')) {
         
         .no-reviews p { font-size: 14px; }
 
-        /* ============================================================
-           FOOTER
-           ============================================================ */
-        .footer {
-            background: #0B2447;
-            color: #b3d9ff;
-            padding: 25px 0;
-            text-align: center;
-            font-size: 13px;
-            border-top: 2px solid rgba(77, 166, 217, 0.15);
-        }
-        
-        .footer i { color: #4DA6D9; }
-        
-        .footer .footer-content {
-            max-width: 1300px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
 
         /* ============================================================
            RESPONSIVE
@@ -564,40 +476,11 @@ if (class_exists('SystemLogger')) {
 </head>
 <body>
 
-<!-- HEADER -->
-<div class="header">
-    <div class="header-content">
-        <a href="index.php" class="logo-wrapper">
-            <?php if($logo_exists && !is_dir($logo_path)): ?>
-                <img src="<?php echo htmlspecialchars($logo_path); ?>?<?php echo time(); ?>" alt="Logo" class="logo-image">
-            <?php else: ?>
-                <div class="logo-image-placeholder"><i class="fas fa-umbrella-beach"></i></div>
-            <?php endif; ?>
-            <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
-                <span class="brand-tagline">Your Home Away From Home</span>
-            </div>
-        </a>
-
-        <div class="nav-links">
-            <a href="index.php"><i class="fas fa-home"></i> Home</a>
-            <a href="houses.php"><i class="fas fa-home"></i> Houses</a>
-            <a href="tours.php"><i class="fas fa-umbrella-beach"></i> Tours</a>
-            <a href="activities.php"><i class="fas fa-water"></i> Activities</a>
-            <a href="food.php"><i class="fas fa-utensils"></i> Food</a>
-            <?php if(isset($_SESSION['user_id'])): ?>
-                <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                    <a href="admin-dashboard.php"><i class="fas fa-cog"></i> Dashboard</a>
-                <?php else: ?>
-                    <a href="profile.php"><i class="fas fa-user"></i> Profile</a>
-                <?php endif; ?>
-                <a href="logout.php" class="btn-logout"><i class="fas fa-sign-out-alt"></i> Logout</a>
-            <?php else: ?>
-                <a href="login.php"><i class="fas fa-sign-in-alt"></i> Login</a>
-            <?php endif; ?>
-        </div>
-    </div>
-</div>
+<?php
+$nav_active = 'home';
+$nav_variant = 'floating';
+include 'components/navbar.php';
+?>
 
 <!-- HERO -->
 <div class="hero">
@@ -658,7 +541,7 @@ if (class_exists('SystemLogger')) {
                                 <div class="avatar anonymous-avatar">
                                     <i class="fas fa-user-secret"></i>
                                 </div>
-                                <span>Anonymous User</span>
+                                <span>Anonymous Guest</span>
                                 <span class="anonymous-badge"><i class="fas fa-user-secret"></i> Anonymous</span>
                             <?php else: ?>
                                 <div class="avatar"><?php echo strtoupper(substr($review['username'], 0, 1)); ?></div>
@@ -687,12 +570,7 @@ if (class_exists('SystemLogger')) {
 </div>
 
 <!-- FOOTER -->
-<div class="footer">
-    <div class="footer-content">
-        <i class="fas fa-umbrella-beach"></i>
-        &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 </body>
 </html>

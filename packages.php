@@ -967,6 +967,7 @@ $cart_data_js = [
     <title>Build Your Package - <?php echo htmlspecialchars($site_name); ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -1630,114 +1631,7 @@ $cart_data_js = [
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
-<div class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-        <div class="sidebar-header-top">
-            <a href="index.php" class="logo">
-                <?php if($sidebar_logo_exists): ?>
-                    <img src="<?php echo htmlspecialchars($sidebar_logo); ?>?<?php echo time(); ?>" alt="Logo">
-                <?php else: ?>
-                    <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
-                <?php endif; ?>
-                <div class="logo-text">
-                    <span class="main">Transient House</span>
-                    <span class="sub">& Tours</span>
-                </div>
-            </a>
-            <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-    </div>
-
-    <ul class="nav-menu">
-        <li class="nav-item"><a href="index.php" class="nav-link"><i class="fas fa-home"></i><span>Home</span></a></li>
-        <li class="nav-item"><a href="houses.php" class="nav-link"><i class="fas fa-home"></i><span>Houses</span></a></li>
-        <li class="nav-item"><a href="tours.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tours</span></a></li>
-        <li class="nav-item"><a href="activities.php" class="nav-link"><i class="fas fa-water"></i><span>Activities</span></a></li>
-        <li class="nav-item"><a href="food.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food</span></a></li>
-        <li class="nav-item"><a href="packages.php" class="nav-link active-nav"><i class="fas fa-box-open"></i><span>My Package</span></a></li>
-
-        <?php if(isset($_SESSION['user_id'])): ?>
-            <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-cog"></i><span>Dashboard</span></a></li>
-            <?php else: ?>
-                <li class="nav-item"><a href="profile.php?tab=packages" class="nav-link"><i class="fas fa-user"></i><span>Profile</span></a></li>
-                <li class="nav-item">
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Edit Review</span>
-                        </a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Rate Us</span>
-                        </a>
-                    <?php endif; ?>
-                </li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item">
-                <a href="#" onclick="openLogoutModal(event); return false;" class="nav-link" style="color: #ef4444;">
-                    <i class="fas fa-sign-out-alt"></i><span>Logout</span>
-                </a>
-            </li>
-        <?php endif; ?>
-    </ul>
-</div>
-
-<div class="header">
-    <div class="header-content">
-        <a href="index.php" class="logo-wrapper">
-            <?php if($sidebar_logo_exists): ?>
-                <img src="<?php echo htmlspecialchars($sidebar_logo); ?>?<?php echo time(); ?>" alt="Logo" class="logo-image">
-            <?php else: ?>
-                <div class="logo-image-placeholder"><i class="fas fa-home"></i></div>
-            <?php endif; ?>
-            <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
-                <span class="brand-tagline">Your Home Away From Home</span>
-            </div>
-        </a>
-
-        <div class="desktop-nav">
-            <a href="index.php"><i class="fas fa-home"></i> Home</a>
-            <a href="houses.php"><i class="fas fa-home"></i> Houses</a>
-            <a href="tours.php"><i class="fas fa-umbrella-beach"></i> Tours</a>
-            <a href="activities.php"><i class="fas fa-water"></i> Activities</a>
-            <a href="food.php"><i class="fas fa-utensils"></i> Food</a>
-            <a href="packages.php" class="active-nav btn-package"><i class="fas fa-box-open"></i> My Package</a>
-
-            <?php if(isset($_SESSION['user_id'])): ?>
-                <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                    <a href="admin-dashboard.php"><i class="fas fa-cog"></i> Dashboard</a>
-                <?php else: ?>
-                    <a href="profile.php?tab=packages"><i class="fas fa-user"></i> Profile</a>
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Edit</span></a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Rate Us</span></a>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <a href="#" onclick="openLogoutModal(event); return false;" class="btn-logout"><i class="fas fa-sign-out-alt"></i> <span class="logout-text">Logout</span></a>
-            <?php else: ?>
-                <a href="login.php"><i class="fas fa-sign-in-alt"></i> Login</a>
-            <?php endif; ?>
-        </div>
-    </div>
-</div>
-
-<div class="hero">
-    <div class="hero-content">
-        <h1><i class="fas fa-box-open"></i> Build Your Package</h1>
-        <p>Choose your items, review them, then book everything in one go.</p>
-    </div>
-</div>
+<?php include 'components/navbar.php'; ?>
 
 <div class="main-container">
 
@@ -1750,31 +1644,59 @@ $cart_data_js = [
 
 <?php if (!$has_any): ?>
 <div class="step-1">
-    <div style="text-align: center; margin-bottom: 30px;">
-        <h2 style="font-size: 24px; font-weight: 700; color: #0B2447; margin-bottom: 8px;">What would you like to book first?</h2>
-        <p style="color: #64748b; font-size: 15px;">Pick one to start. You can add more items later.</p>
+
+    <div style="text-align:center; margin-bottom:30px;">
+
+        <h2 style="font-size:24px; font-weight:800; color:#06263D; margin-bottom:8px;">
+            Build Your Island Vacation
+        </h2>
+
+        <p style="color:#64748b; font-size:15px;">
+            Start with your stay, then add tours and food to create your complete package.
+        </p>
+
     </div>
 
     <div class="choice-grid">
         <button type="button" class="choice-card" onclick="openModal('house')">
             <div class="choice-icon"><i class="fas fa-home"></i></div>
-            <h3>House</h3>
-            <p>Book a transient house stay</p>
-            <span class="btn-select"><i class="fas fa-plus"></i> Select House</span>
+       <h3>Stay</h3>
+
+<p>
+Choose your transient house accommodation first.
+</p>
+
+<span class="btn-select">
+    <i class="fas fa-home"></i>
+    Add Stay
+</span>
         </button>
 
         <button type="button" class="choice-card" onclick="openModal('food')">
             <div class="choice-icon" style="background: linear-gradient(135deg, #f59e0b, #d97706);"><i class="fas fa-utensils"></i></div>
-            <h3>Food</h3>
-            <p>Order food packages</p>
-            <span class="btn-select"><i class="fas fa-plus"></i> Select Food</span>
-        </button>
+           
+<h3>Food</h3>
 
+<p>
+Add meals and food packages to complete your trip.
+</p>
+
+<span class="btn-select">
+    <i class="fas fa-utensils"></i>
+    Add Food
+</span>
         <button type="button" class="choice-card" onclick="openModal('tour')">
             <div class="choice-icon" style="background: linear-gradient(135deg, #10b981, #059669);"><i class="fas fa-umbrella-beach"></i></div>
-            <h3>Tour</h3>
-            <p>Book a boat tour</p>
-            <span class="btn-select"><i class="fas fa-plus"></i> Select Tour</span>
+          <h3>Island Adventure</h3>
+
+<p>
+Add island tours and activities to your package.
+</p>
+
+<span class="btn-select">
+    <i class="fas fa-ship"></i>
+    Add Tour
+</span>
         </button>
     </div>
 </div>
@@ -1791,8 +1713,7 @@ $cart_data_js = [
 
     <p style="color: #64748b; font-size: 14px; margin-bottom: 25px; line-height: 1.5;">
         <i class="fas fa-info-circle" style="color: #4DA6D9;"></i>
-        Check everything below. You can still <strong>edit</strong>, <strong>view</strong>, or <strong>remove</strong> any item before confirming.
-    </p>
+Your package is almost ready. Add or adjust your stay, tours, and food before confirming your booking.    </p>
 
     <?php if ($has_house): $h = $cart['house']; ?>
     <div class="cart-item">
@@ -1970,7 +1891,7 @@ $cart_data_js = [
 
     <?php if (!$has_house || !$has_food || !$has_tour): ?>
     <div class="add-more-section">
-        <h3><i class="fas fa-plus-circle"></i> Add more to your package (optional)</h3>
+        <h3><i class="fas fa-plus-circle"></i> Complete Your Vacation Package</h3>
         <div class="add-buttons">
             <?php if (!$has_house): ?>
                 <button type="button" class="btn-add-more" onclick="openModal('house')">
@@ -3065,59 +2986,7 @@ $cart_data_js = [
 </div>
 
 <!-- FOOTER -->
-<div class="footer">
-    <div class="footer-content">
-        <div class="footer-grid">
-            <div class="footer-col">
-                <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
-                <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
-                <div class="social-links">
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook" rel="noopener">
-                        <i class="fab fa-facebook-f"></i>
-                    </a>
-                </div>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-link"></i> Quick Links</h4>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
-                    <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Houses</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
-                    <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
-                    <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
-                    <li><a href="packages.php"><i class="fas fa-chevron-right"></i> My Package</a></li>
-                    <li><a href="profile.php?tab=packages"><i class="fas fa-chevron-right"></i> My Bookings</a></li>
-                    <li><a href="reviews.php"><i class="fas fa-chevron-right"></i> Reviews</a></li>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                <div class="footer-map">
-                    <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                </div>
-                <ul>
-                    <li><i class="fas fa-map-marker-alt"></i>
-                        <?php if ($maps_url != '#'): ?>
-                            <a href="<?php echo $maps_url; ?>" target="_blank" rel="noopener noreferrer"><?php echo htmlspecialchars($location_address); ?></a>
-                        <?php else: ?>
-                            <?php echo htmlspecialchars($location_address); ?>
-                        <?php endif; ?>
-                    </li>
-                    <li><i class="fas fa-phone"></i><a href="tel:<?php echo preg_replace('/[^0-9+]/', '', $content['footer']['phone'] ?? '+639123456789'); ?>"><?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?></a></li>
-                    <li><i class="fas fa-envelope"></i><a href="mailto:<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>"><?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?></a></li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?></div>
-            <div class="footer-bottom-links">
-                <a href="privacy.php"><?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?></a>
-                <a href="terms.php"><?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?></a>
-            </div>
-        </div>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 <script>
 const HOUSE_BOOKED_DATES = <?php echo json_encode($house_booked_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;

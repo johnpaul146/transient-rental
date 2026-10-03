@@ -501,6 +501,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Food Menu - Transient House & Tours</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         /* ============================================================ */
@@ -1516,9 +1517,138 @@ $is_logged_in = isset($_SESSION['user_id']);
             .shopee-actions .btn-book { font-size: 15px; padding: 13px 18px; }
             .shopee-close-btn { width: 34px; height: 34px; font-size: 15px; top: 10px; right: 10px; }
         }
-    </style>
+    
+
+        /* ============================================================
+           FOOD CARD DESIGN SYSTEM OVERRIDE
+           ============================================================ */
+
+        .food-card {
+            background:#ffffff !important;
+            border:1px solid #E8F0FE !important;
+            border-radius:24px !important;
+            box-shadow:0 15px 40px rgba(6,38,61,.08) !important;
+            color:#06263D !important;
+        }
+
+        .food-card .food-content {
+            background:#ffffff !important;
+            color:#06263D !important;
+            padding:24px !important;
+        }
+
+        .food-card .food-content .food-name,
+        .food-card h3,
+        .food-card h4 {
+            color:#06263D !important;
+            font-weight:800 !important;
+        }
+
+        .food-card .food-category-label,
+        .food-card .food-description,
+        .food-card .food-desc {
+            color:#475569 !important;
+        }
+
+        .food-card .price,
+        .food-card .price-section .price,
+        .food-card .food-price,
+        .food-card .price-tag {
+            color:#0B7CC1 !important;
+            font-weight:800 !important;
+        }
+
+        .food-card .variations .variation-item,
+        .food-card .pax-badge {
+            color:#475569 !important;
+        }
+
+        .food-card .featured-badge,
+        .food-card .badge-featured,
+        .food-card .badge-special {
+            background:#F4B400 !important;
+            color:#06263D !important;
+        }
+
+        .food-card .actions .btn-order {
+            background:#F4B400 !important;
+            color:#06263D !important;
+        }
+
+        /* ============================================================
+   FOOD CARD FINAL LAYOUT FIX
+   ============================================================ */
+
+.food-grid {
+    align-items: stretch;
+}
+
+.food-card {
+    background:#FFFFFF !important;
+    border:1px solid #E8F0FE !important;
+    border-radius:24px !important;
+    box-shadow:0 15px 40px rgba(6,38,61,.08) !important;
+    display:flex !important;
+    flex-direction:column !important;
+    height:auto !important;
+}
+
+.food-card .food-content {
+    background:#FFFFFF !important;
+    padding:22px !important;
+    display:flex !important;
+    flex-direction:column !important;
+    flex:1;
+}
+
+.food-card .food-name {
+    color:#06263D !important;
+    font-weight:800 !important;
+}
+
+.food-card .food-category-label {
+    color:#64748B !important;
+}
+
+.food-card .food-description {
+    color:#475569 !important;
+}
+
+.food-card .inclusions {
+    background:#F8FAFC !important;
+    color:#475569 !important;
+}
+
+.food-card .price-section {
+    margin-top:auto !important;
+    padding-top:20px;
+}
+
+.food-card .price {
+    color:#0B7CC1 !important;
+    font-weight:800 !important;
+}
+
+.food-card .variations .variation-item {
+    color:#475569 !important;
+}
+
+.food-card .variations .var-price {
+    color:#0B7CC1 !important;
+}
+
+.food-card .actions {
+    margin-top:20px !important;
+}
+
+.food-card .btn-order {
+    background:#F4B400 !important;
+    color:#06263D !important;
+}
+</style>
 </head>
 <body>
+<?php include 'components/navbar.php'; ?>
 
 <!-- SIDEBAR OVERLAY -->
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>

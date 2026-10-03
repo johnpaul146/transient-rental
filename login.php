@@ -539,9 +539,13 @@ $termsVersion = $termsGate->getCurrentVersion();
         }
 
         .login-header {
-            background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
-            color: white;
-            padding: 35px 30px;
+ background:
+    linear-gradient(
+        135deg,
+        #06263D,
+        #0B7CC1
+    );            color: white;
+    padding:40px 35px;
             text-align: center;
             position: relative;
             overflow: hidden;
@@ -715,10 +719,10 @@ $termsVersion = $termsGate->getCurrentVersion();
             width: 100%;
             min-height: 48px;
             padding: 14px;
-            background: #F4B400;
-            color: #0B2447;
+    background:#F4B400;
+    color:#0B2447;
             border: none;
-            border-radius: 10px;
+    border-radius:10px;
             font-weight: 700;
             font-size: 16px;
             cursor: pointer;
@@ -945,6 +949,200 @@ $termsVersion = $termsGate->getCurrentVersion();
                 transition-duration: 0.01ms !important;
             }
         }
+
+        /* =====================================
+   LOGIN CARD SIZE ADJUSTMENT
+   ===================================== */
+
+.login-card {
+
+    width:100% !important;
+
+    max-width:390px !important;
+
+    border-radius:24px !important;
+
+}
+
+
+/* Header */
+
+.login-header {
+
+    padding:30px 25px !important;
+
+}
+
+
+.login-header .logo-image {
+
+    width:70px !important;
+    height:70px !important;
+
+}
+
+
+.login-header h1 {
+
+    font-size:23px !important;
+
+}
+
+
+
+/* Body */
+
+.login-body {
+
+    padding:25px !important;
+
+}
+
+
+/* Inputs */
+
+.form-control {
+
+    padding:12px 14px !important;
+
+    min-height:46px !important;
+
+}
+
+
+/* Button */
+
+.btn-login {
+
+    min-height:48px !important;
+
+    padding:12px !important;
+
+}
+
+
+/* Security notice */
+
+.device-hint {
+
+    padding:10px 12px !important;
+
+    font-size:12px !important;
+
+}
+
+/* =====================================
+   LOGIN FULL SCREEN NO SCROLL
+   ===================================== */
+
+html,
+body {
+    height:100%;
+    overflow:hidden;
+}
+
+
+body {
+    padding:10px !important;
+}
+
+
+.login-card {
+
+    max-width:390px !important;
+
+    max-height:calc(100vh - 20px);
+
+    display:flex;
+
+    flex-direction:column;
+
+}
+
+
+/* Header tighter */
+
+.login-header {
+
+    padding:22px 25px !important;
+
+}
+
+
+.login-header .logo-image {
+
+    width:60px !important;
+    height:60px !important;
+
+    margin-bottom:8px !important;
+}
+
+
+.login-header h1 {
+
+    font-size:21px !important;
+
+    margin-bottom:3px !important;
+}
+
+
+
+/* Content */
+
+.login-body {
+
+    padding:18px 22px !important;
+
+}
+
+
+
+/* Reduce spacing */
+
+.device-hint {
+
+    margin-bottom:12px !important;
+
+}
+
+
+.form-group {
+
+    margin-bottom:10px !important;
+
+}
+
+
+.form-control {
+
+    min-height:42px !important;
+
+    padding:10px 12px !important;
+
+}
+
+
+.btn-login {
+
+    min-height:44px !important;
+
+}
+
+
+/* Links */
+
+.login-links {
+
+    margin-top:10px !important;
+
+}
+
+
+.login-links .forgot {
+
+    padding:6px !important;
+
+}
     </style>
 </head>
 <body>

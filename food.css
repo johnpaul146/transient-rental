@@ -724,3 +724,38 @@ body {
         font-size: 20px;
     }
 }
+
+/* Food page migration overrides */
+.food-card,
+.food-item-card,
+.menu-card {
+    min-height: unset !important;
+    height: auto !important;
+    display: flex;
+    flex-direction: column;
+}
+
+.food-card .food-content,
+.food-card .card-body {
+    flex: 1;
+    padding: 24px;
+}
+
+.food-card h3,
+.food-card h4,
+.food-card .food-name {
+    color:#06263D !important;
+    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif !important;
+    font-weight:800 !important;
+}
+
+.food-card .price,
+.food-card .food-price {
+    color:#0B7CC1 !important;
+    font-weight:800 !important;
+}
+
+.food-card .btn,
+.food-card button {
+    border-radius:999px !important;
+}

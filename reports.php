@@ -400,7 +400,7 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>Reports - <?php echo $is_admin ? 'Admin' : 'Staff'; ?></title>
+    <title>Sales Report - <?php echo $is_admin ? 'Admin' : 'Staff'; ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -962,7 +962,7 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link active"><i class="fas fa-file-alt"></i><span>Reports</span></a></li>
+            <li class="nav-item"><a href="reports.php" class="nav-link active"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
 
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>

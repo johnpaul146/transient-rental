@@ -776,7 +776,7 @@ unset($base_qs['page'], $base_qs['export']);
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Reports</span></a></li>
+            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span> Sales Report</span></a></li>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
 
             <!-- ✅ SYSTEM LOGS — badge = failed only -->

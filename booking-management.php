@@ -1442,7 +1442,7 @@ function formatGuestNames($guest_names) {
             <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span>
                 <?php if($pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $pending_reviews; ?></span><?php endif; ?>
             </a></li>
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Reports</span></a></li>
+            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
             <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span>

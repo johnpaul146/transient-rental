@@ -1,0 +1,27 @@
+/* Transient House & Tours - reference design system */
+:root{--navy:#06263d;--blue:#0b7cc1;--sky:#38bdf8;--bg:#f8fafc;--text:#10233f;--radius:24px}
+*{box-sizing:border-box}
+body{font-family:Inter,Arial,sans-serif!important;background:var(--bg)!important;color:var(--text)!important}
+.container{max-width:1240px!important}
+.header,.navbar{background:rgba(255,255,255,.96)!important;border-radius:0 0 24px 24px;box-shadow:0 15px 40px rgba(6,38,61,.08)!important}
+.hero.migration-hero{min-height:760px!important;border-radius:0 0 48px 48px;overflow:hidden;background-size:cover!important}
+.hero:before{background:linear-gradient(90deg,rgba(6,38,61,.82),rgba(6,38,61,.25))!important}
+.hero-content h1{font-size:clamp(42px,6vw,78px)!important;font-weight:800!important;line-height:1.02!important;letter-spacing:-2px!important}
+.hero-content p{font-size:20px!important;line-height:1.6}
+.migration-hero-content{max-width:720px!important}
+.hero .btn{border-radius:999px!important;padding:15px 28px!important;font-weight:700}
+.section-title h2{font-weight:800!important;font-size:clamp(32px,4vw,48px)!important;letter-spacing:-1px}
+.section-title .underline{width:70px!important;height:5px!important;border-radius:99px!important;background:var(--blue)!important}
+.card,.house-card,.tour-card,.activity-card,.food-card,.package-card,.review-card{background:#fff!important;border:0!important;border-radius:24px!important;overflow:hidden!important;box-shadow:0 15px 45px rgba(6,38,61,.08)!important;transition:.25s ease}
+.card:hover,.house-card:hover,.tour-card:hover{transform:translateY(-6px)}
+.card img,.house-card img,.tour-card img,.activity-card img,.food-card img{height:260px;object-fit:cover}
+.badge,.status-badge{border-radius:999px!important;padding:7px 14px!important;font-weight:700!important}
+.btn-primary,.view-btn{background:var(--navy)!important;border-color:var(--navy)!important;border-radius:999px!important;padding:12px 24px!important}
+.cta-section{border-radius:32px!important;background:linear-gradient(110deg,var(--navy),var(--blue))!important;padding:70px!important;overflow:hidden}
+.footer{background:#041b2d!important}
+.footer-content{padding-top:60px;padding-bottom:40px}
+/* dashboard shared language */
+.dashboard-card,.stat-card,.summary-card{background:#fff;border:0;border-radius:22px;box-shadow:0 15px 40px rgba(6,38,61,.08)}
+.sidebar{background:var(--navy)!important}
+.table{background:#fff;border-radius:18px;overflow:hidden}
+@media(max-width:768px){.hero.migration-hero{min-height:620px}.cta-section{padding:35px 20px!important}.hero-content h1{font-size:42px!important}}
