@@ -10,6 +10,7 @@ $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
 
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 if (file_exists('includes/SystemLogger.php')) require_once 'includes/SystemLogger.php';
 
 // AUTO-ADD columns if they don't exist (duration + length)
@@ -60,45 +61,8 @@ $admin_initial      = strtoupper(substr($user_info['fullname'] ?? $user_info['us
 $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User';
 
 // SIDEBAR BADGE COUNTS
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
 
-$pending_bookings = 0;
-try {
-    $hb_count = 0; $tb_count = 0; $fb_count = 0;
 
-    $has_hb = $pdo->query("SHOW COLUMNS FROM house_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_hb)) {
-        $hb_count = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    $has_tb = $pdo->query("SHOW COLUMNS FROM tour_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_tb)) {
-        $tb_count = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    try {
-        $has_fb = $pdo->query("SHOW COLUMNS FROM food_bookings LIKE 'booking_status'")->fetchAll();
-        if (!empty($has_fb)) {
-            $fb_count = (int)$pdo->query("SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending'")->fetchColumn();
-        }
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $hb_count + $tb_count + $fb_count;
-} catch(PDOException $e) {}
-
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
 
 // Get all activities
 $activities = [];
@@ -570,6 +534,67 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             .logout-modal-actions { flex-direction: column-reverse; }
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
+
+        /* ACTIVITY SEARCH */
+
+.section-subtitle{
+    margin-top:5px;
+    color:#64748b;
+    font-size:13px;
+}
+
+
+.activity-toolbar{
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+
+.activity-search{
+    height:45px;
+    width:350px;
+
+    display:flex;
+    align-items:center;
+    gap:10px;
+
+    padding:0 15px;
+
+    background:white;
+    border:2px solid #e8f0fe;
+    border-radius:12px;
+}
+
+
+.activity-search i{
+    color:#4DA6D9;
+}
+
+
+.activity-search input{
+    border:none;
+    outline:none;
+    width:100%;
+    font-size:14px;
+}
+
+
+
+@media(max-width:768px){
+
+    .activity-toolbar{
+        flex-direction:column;
+        align-items:stretch;
+    }
+
+
+    .activity-search{
+        width:100%;
+    }
+
+}
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
 </head>
 <body>
@@ -623,15 +648,14 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
 
             <li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i><span>Food Management</span>
-                </a>
+                    <i class="fas fa-utensils"></i><span>Food Management</span></a>
             </li>
 
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -641,8 +665,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -655,8 +679,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -737,23 +761,44 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             </div>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon"><i class="fas fa-water"></i></div>
-                <div class="stat-number"><?php echo $total_activities; ?></div>
-                <div class="stat-label">Total Activities</div>
-            </div>
-        </div>
 
         <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-list"></i> Manage Activities</h2>
-                <div class="header-actions">
-                    <button class="btn btn-primary" onclick="showModal('addActivity')">
-                        <i class="fas fa-plus"></i> Add New Activity
-                    </button>
-                </div>
-            </div>
+           <div class="card-header">
+
+    <div>
+        <h2>
+            <i class="fas fa-list"></i>
+            Manage Activities
+        </h2>
+
+        <p class="section-subtitle">
+            Manage activity packages, prices, availability, and details
+        </p>
+    </div>
+
+
+    <div class="activity-toolbar">
+
+        <div class="activity-search">
+            <i class="fas fa-search"></i>
+
+            <input 
+                type="text"
+                id="activitySearch"
+                placeholder="Search activities..."
+                autocomplete="off"
+            >
+        </div>
+
+
+        <button class="btn btn-primary" onclick="showModal('addActivity')">
+            <i class="fas fa-plus"></i>
+            Add New Activity
+        </button>
+
+    </div>
+
+</div>
 
             <?php if(empty($activities)): ?>
                 <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
@@ -776,7 +821,13 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                             $has_duration = !empty($activity['duration']);
                             $has_length = !empty($activity['length_value']);
                         ?>
-                        <tr>
+                        <tr class="activity-row"
+    data-search="<?php echo strtolower(htmlspecialchars(
+        ($activity['name'] ?? '') . ' ' .
+        ($activity['description'] ?? '') . ' ' .
+        ($activity['category'] ?? '') . ' ' .
+        ($activity['status'] ?? '')
+    )); ?>">
                             <td class="image-cell">
                                 <?php if($main_image): ?>
                                     <img src="<?php echo htmlspecialchars($main_image); ?>?<?php echo time(); ?>" alt="<?php echo htmlspecialchars($activity['name']); ?>">
@@ -1354,6 +1405,40 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+// LIVE ACTIVITY SEARCH
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const searchInput = document.getElementById("activitySearch");
+    const rows = document.querySelectorAll(".activity-row");
+
+
+    if(!searchInput) return;
+
+
+    searchInput.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+
+        rows.forEach(row => {
+
+            const data = row.dataset.search;
+
+
+            if(data.includes(keyword)){
+                row.style.display = "";
+            }
+            else{
+                row.style.display = "none";
+            }
+
+        });
+
+    });
+
+});
 </script>
 
 </body>

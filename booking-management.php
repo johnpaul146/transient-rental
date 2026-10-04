@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
+
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 
@@ -10,13 +12,55 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 // Check if user is logged in and is admin or staff
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
+if(!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', ['admin', 'staff'], true)) {
     header("Location: index.php");
     exit();
 }
 
-$is_admin = ($_SESSION['role'] == 'admin');
-$is_staff = ($_SESSION['role'] == 'staff');
+// ============================================================
+// ✅ ROLE-BASED PERMISSIONS (Booking Management)
+//    STAFF = daily operations   |   ADMIN = management + oversight
+// ============================================================
+$is_admin = (($_SESSION['role'] ?? '') === 'admin');
+$is_staff = (($_SESSION['role'] ?? '') === 'staff');
+
+// Daily operations (Staff + Admin): view, approve/confirm/reject bookings,
+// check/approve/reject payment, handle rebooks, update operational status.
+$can_manage_booking   = ($is_admin || $is_staff);
+
+// Management + oversight (Admin only)
+$can_delete_booking   = $is_admin;   // delete bookings / permanent removal
+$can_override_booking = $is_admin;   // override booking decisions
+$can_view_reports     = $is_admin;   // reports
+$can_view_logs        = $is_admin;   // system logs
+$can_manage_users     = $is_admin;   // user management
+$can_manage_system    = $is_admin;   // system configuration
+
+/**
+ * Stop the request with HTTP 403 (used for server-side permission enforcement).
+ */
+if (!function_exists('denyBookingPermission')) {
+    function denyBookingPermission(string $message = 'You do not have permission to perform this action.'): void {
+        http_response_code(403);
+        exit(htmlspecialchars($message, ENT_QUOTES, 'UTF-8'));
+    }
+}
+
+// Server-side guard: admin-only actions can never be run by staff, even if the
+// request is crafted by hand (hiding a button is not security).
+foreach (['delete_booking', 'permanent_delete_booking', 'override_booking', 'override_status'] as $adminOnlyAction) {
+    if ((isset($_POST[$adminOnlyAction]) || isset($_GET[$adminOnlyAction]))
+        && !($can_delete_booking && $can_override_booking)) {
+        denyBookingPermission('This action is restricted to administrators.');
+    }
+}
+
+// Server-side guard: every booking operation requires booking-management permission.
+foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment'] as $bookingAction) {
+    if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
+        denyBookingPermission();
+    }
+}
 
 // ============================================================
 // ✅ DUPLICATE REQUEST GUARD
@@ -297,7 +341,7 @@ try {
 // ============================================================
 // Handle Confirm Rebook
 // ============================================================
-if(isset($_POST['confirm_rebook']) && ($is_admin || $is_staff)) {
+if(isset($_POST['confirm_rebook']) && $can_manage_booking) {
     try {
         $booking_id = (int)$_POST['booking_id'];
         if (isDuplicateBookingRequest('confirm_rebook', $booking_id)) {
@@ -329,7 +373,7 @@ if(isset($_POST['confirm_rebook']) && ($is_admin || $is_staff)) {
 // ============================================================
 // ✅ Handle REJECT REBOOK
 // ============================================================
-if(isset($_POST['reject_rebook']) && ($is_admin || $is_staff)) {
+if(isset($_POST['reject_rebook']) && $can_manage_booking) {
     try {
         $booking_id    = (int)($_POST['booking_id'] ?? 0);
         $reject_reason = trim($_POST['reject_reason'] ?? '');
@@ -389,7 +433,7 @@ if(isset($_POST['reject_rebook']) && ($is_admin || $is_staff)) {
 // ============================================================
 // ✅ Handle ADMIN CANCEL BOOKING
 // ============================================================
-if(isset($_POST['admin_cancel_booking']) && ($is_admin || $is_staff)) {
+if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
     try {
         $booking_type  = $_POST['booking_type'] ?? '';
         $booking_id    = (int)($_POST['booking_id'] ?? 0);
@@ -461,7 +505,7 @@ if(isset($_POST['admin_cancel_booking']) && ($is_admin || $is_staff)) {
 // ============================================================
 // Handle Confirm Payment — WITH AUTO-BLOCK
 // ============================================================
-if(isset($_POST['confirm_payment']) && ($is_admin || $is_staff)) {
+if(isset($_POST['confirm_payment']) && $can_manage_booking) {
     try {
         $booking_type = $_POST['booking_type'];
         $booking_id = (int)$_POST['booking_id'];
@@ -538,9 +582,11 @@ if(isset($_POST['confirm_payment']) && ($is_admin || $is_staff)) {
 }
 
 // ============================================================
-// ✅ Handle Reject Payment
+// ✅ Handle Reject Payment (Staff + Admin)
+//    Soft reject: the booking record, payment proof and audit trail are KEPT.
+//    Permanent deletion is an admin-only management action (not done here).
 // ============================================================
-if(isset($_POST['reject_payment']) && ($is_admin || $_SESSION['role'] == 'staff')) {
+if(isset($_POST['reject_payment']) && $can_manage_booking) {
     try {
         $booking_type = $_POST['booking_type'] ?? '';
         $booking_id   = (int)($_POST['booking_id'] ?? 0);
@@ -563,27 +609,73 @@ if(isset($_POST['reject_payment']) && ($is_admin || $_SESSION['role'] == 'staff'
         if (!empty($reject_notes)) $final_reason .= ' — Notes: ' . $reject_notes;
 
         $table = $allowed_tables[$booking_type];
-        $stmt = $pdo->prepare("SELECT reference_number, total_amount, payment_proof FROM `$table` WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT reference_number, payment_status, booking_status, payment_proof, " . ($booking_type === 'package' ? 'grand_total' : 'total_amount') . " AS amount FROM `$table` WHERE id = ?");
         $stmt->execute([$booking_id]);
         $row = $stmt->fetch();
         if (!$row) throw new Exception("Booking not found.");
+        if ($row['booking_status'] === 'cancelled') throw new Exception("This booking is already cancelled/rejected.");
 
-        $rejected_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Administrator';
+        $rejected_by_id   = (int)$_SESSION['user_id'];
+        $rejected_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Staff';
+
+        // Release any auto-blocked dates (same behaviour as cancelling a booking)
+        if ($booking_type === 'house') {
+            try {
+                $hb = $pdo->prepare("SELECT house_id FROM house_bookings WHERE id = ?");
+                $hb->execute([$booking_id]);
+                $hrow = $hb->fetch();
+                if ($hrow && $hrow['house_id']) {
+                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND reason LIKE ?")
+                        ->execute([$hrow['house_id'], 'Auto-blocked from booking #' . $row['reference_number'] . '%']);
+                }
+            } catch (PDOException $e) {}
+        } elseif ($booking_type === 'tour') {
+            try {
+                $tb = $pdo->prepare("SELECT tour_id FROM tour_bookings WHERE id = ?");
+                $tb->execute([$booking_id]);
+                $trow = $tb->fetch();
+                if ($trow && $trow['tour_id']) {
+                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'tour' AND item_id = ? AND reason LIKE ?")
+                        ->execute([$trow['tour_id'], 'Auto-blocked from booking #' . $row['reference_number'] . '%']);
+                }
+            } catch (PDOException $e) {}
+        }
+
+        if ($booking_type === 'package') {
+            // package_bookings has no reject_* columns and its payment_status enum has no
+            // 'cancelled' (DB structure must not change), so use the existing cancel columns.
+            $pdo->prepare("UPDATE `$table` SET booking_status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ? WHERE id = ?")
+                ->execute(['Payment rejected by ' . $rejected_by_name . ': ' . $final_reason, $booking_id]);
+        } else {
+            $pdo->prepare("UPDATE `$table`
+                           SET payment_status = 'cancelled',
+                               booking_status = 'cancelled',
+                               cancelled_at = NOW(),
+                               cancellation_reason = ?,
+                               reject_reason = ?,
+                               reject_notes = ?,
+                               rejected_by = ?,
+                               rejected_at = NOW()
+                           WHERE id = ?")
+                ->execute([
+                    'Payment rejected: ' . $final_reason,
+                    substr($reject_reason === 'Other' ? $reject_reason_other : $reject_reason, 0, 255),
+                    ($reject_notes !== '' ? $reject_notes : null),
+                    $rejected_by_id,
+                    $booking_id
+                ]);
+        }
+
         try {
             EmailNotifications::sendPaymentRejected($booking_id, $booking_type, $pdo, $final_reason, $rejected_by_name);
         } catch (Throwable $mailEx) { error_log("Reject email failed: " . $mailEx->getMessage()); }
 
-        if (!empty($row['payment_proof'])) {
-            $proofPath = 'uploads/payments/' . $row['payment_proof'];
-            if (file_exists($proofPath)) { @unlink($proofPath); }
-        }
-
+        // NOTE: the uploaded payment proof file is intentionally kept as audit evidence.
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'reject_payment', 'booking', "Rejected {$booking_type} booking {$row['reference_number']} — Reason: {$final_reason}", $booking_id, 'booking', ['reference' => $row['reference_number'], 'amount' => $row['total_amount']], ['reason' => $final_reason, 'rejected_by' => $rejected_by_name], 'warning');
+            SystemLogger::log($pdo, 'reject_payment', 'booking', "Rejected payment for {$booking_type} booking {$row['reference_number']} — Reason: {$final_reason}", $booking_id, 'booking', ['reference' => $row['reference_number'], 'amount' => $row['amount'], 'payment_status' => $row['payment_status'], 'booking_status' => $row['booking_status']], ['reason' => $final_reason, 'rejected_by' => $rejected_by_name, 'rejected_by_id' => $rejected_by_id, 'rejected_at' => date('Y-m-d H:i:s')], 'warning');
         }
 
-        $pdo->prepare("DELETE FROM `$table` WHERE id = ?")->execute([$booking_id]);
-        $success = "Payment rejected. Reason sent to guest via email. Booking #{$row['reference_number']} has been removed.";
+        $success = "Payment rejected. Reason sent to guest via email. Booking #{$row['reference_number']} was marked as cancelled and kept in the records.";
     } catch(Exception $e) {
         $error = "Failed to reject payment: " . $e->getMessage();
     }
@@ -821,32 +913,6 @@ $total_active = count($active_house) + count($active_tour) + count($active_food)
 $pending_count = $pending_house + $pending_tour + $pending_food + $pending_package;
 $paid_count = $paid_house + $paid_tour + $paid_food + $paid_package;
 
-// ============================================================
-// ✅ NAVIGATION BADGE COUNTS — Booking + Rebook combined
-// ============================================================
-$booking_nav_badge = $pending_count + $rebook_pending_count;
-
-// Reviews badge — PENDING only
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
-
-// System Logs badge — failed only
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
-
-// Food badge — total food items
-$total_food = 0;
-try { $total_food = $pdo->query("SELECT COUNT(*) FROM food_items")->fetchColumn(); } catch(PDOException $e) {}
 
 // ============================================================
 // Prepare calendar events (active only) — WITH TIMES
@@ -1116,12 +1182,55 @@ function formatGuestNames($guest_names) {
 
     /* STATS */
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; margin-bottom: 30px; }
-    .stat-card { background: #4DA6D9; border-radius: 16px; padding: 22px 20px; transition: transform 0.3s, box-shadow 0.3s; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(77, 166, 217, 0.2); text-decoration: none; color: white; display: block; }
-    .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77, 166, 217, 0.3); }
+.stat-card{
+
+    background:white;
+
+    border-radius:22px;
+
+    padding:24px 20px;
+
+    transition:.25s ease;
+
+    border:1px solid #e8f0fe;
+
+    box-shadow:
+    0 12px 30px rgba(6,38,61,.08);
+
+    text-decoration:none;
+
+    color:#0B2447;
+
+    display:block;
+
+}
+
+
+.stat-card:hover{
+
+    transform:translateY(-6px);
+
+    box-shadow:
+    0 20px 45px rgba(6,38,61,.15);
+
+}    .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77, 166, 217, 0.3); }
     .stat-icon { width: 44px; height: 44px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
-    .stat-number { font-size: 26px; font-weight: 700; color: white; margin-top: 8px; }
-    .stat-label { color: rgba(255,255,255,0.9); font-size: 12px; font-weight: 500; margin-top: 2px; }
-    @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; } .stat-card { padding: 16px 14px; border-radius: 12px; } .stat-number { font-size: 20px; } .stat-icon { width: 36px; height: 36px; font-size: 14px; } .stat-label { font-size: 11px; } }
+.stat-number{
+    font-size:36px;
+    font-weight:800;
+    color:#0B2447;
+    margin-top:18px;
+}
+
+
+.stat-label{
+    color:#334155;
+    font-size:14px;
+    font-weight:700;
+    margin-top:5px;
+}
+    @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; } 
+    .stat-card { padding: 16px 14px; border-radius: 12px; } .stat-number { font-size: 20px; } .stat-icon { width: 36px; height: 36px; font-size: 14px; } .stat-label { font-size: 11px; } }
 
     /* FILTERS */
     .view-toggle { background: white; border-radius: 16px; padding: 15px 20px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: 1px solid #e8f0fe; }
@@ -1153,6 +1262,10 @@ function formatGuestNames($guest_names) {
     #calendar { min-height: 600px; padding: 10px; }
     .fc { font-family: 'Inter', sans-serif !important; }
     .fc-event { cursor: pointer; border-radius: 10px !important; padding: 6px 10px !important; font-size: 12px !important; border: none !important; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .fc-modern-event { line-height: 1.25; font-size: 11px; padding: 4px 6px; white-space: normal; }
+    .fc-modern-event strong { font-size: 10px; letter-spacing: .4px; }
+    .fc-modern-event.blocked { color: #334155; }
+
     .fc-daygrid-day { min-height: 80px !important; }
     .fc-button-primary { background: #4DA6D9 !important; border: none !important; }
     .calendar-legend { display: flex; gap: 15px; flex-wrap: wrap; padding: 10px 0; }
@@ -1385,6 +1498,53 @@ function formatGuestNames($guest_names) {
         .pkg-gcash-card { flex-wrap: wrap; gap: 10px; }
         .pkg-copy-btn { width: 100%; justify-content: center; }
     }
+    /* BOOKING STAT COLORS */
+
+.active-card .stat-icon{
+    background:#dcfce7;
+    color:#16a34a;
+}
+
+
+.pending-card .stat-icon{
+    background:#fef3c7;
+    color:#d97706;
+}
+
+
+.rebook-card .stat-icon{
+    background:#ede9fe;
+    color:#7c3aed;
+}
+
+
+.paid-card .stat-icon{
+    background:#dbeafe;
+    color:#0284c7;
+}
+
+
+.blocked-card .stat-icon{
+    background:#e2e8f0;
+    color:#475569;
+}
+
+
+/* Better status emphasis */
+
+.pending-card:hover{
+    box-shadow:0 20px 40px rgba(245,158,11,.25);
+}
+
+
+.rebook-card:hover{
+    box-shadow:0 20px 40px rgba(139,92,246,.25);
+}
+
+
+.active-card:hover{
+    box-shadow:0 20px 40px rgba(16,185,129,.25);
+}
     </style>
 </head>
 <body>
@@ -1431,22 +1591,20 @@ function formatGuestNames($guest_names) {
             <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
             <li class="nav-item"><a href="food-dashboard.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food Management</span>
-                <?php if($total_food > 0): ?><span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $total_food; ?></span><?php endif; ?>
             </a></li>
             <li class="nav-item"><a href="booking-management.php" class="nav-link active"><i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                <?php if($booking_nav_badge > 0): ?><span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $booking_nav_badge; ?></span><?php endif; ?>
+                <?php if($sidebar_pending_bookings > 0): ?><span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span><?php endif; ?>
             </a></li>
             <li class="nav-item"><a href="blocked-dates.php" class="nav-link"><i class="fas fa-ban"></i><span>Blocked Dates</span>
-                <?php if($total_blocked > 0): ?><span class="nav-badge blocked"><i class="fas fa-lock"></i> <?php echo $total_blocked; ?></span><?php endif; ?>
             </a></li>
             <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span>
-                <?php if($pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $pending_reviews; ?></span><?php endif; ?>
+                <?php if($sidebar_pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $sidebar_pending_reviews; ?></span><?php endif; ?>
             </a></li>
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
             <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span>
-                <?php if($log_stats['failed'] > 0): ?><span class="nav-badge"><?php echo $log_stats['failed']; ?></span><?php endif; ?>
+                <?php if($sidebar_failed_logs > 0): ?><span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span><?php endif; ?>
             </a></li>
             <?php endif; ?>
             <div class="nav-divider"></div>
@@ -1508,7 +1666,7 @@ function formatGuestNames($guest_names) {
                 <div class="underline"></div>
                 <p>
                     Manage all house, tour, food, and package bookings, verify payments, and update status
-                    <?php if($is_staff): ?><br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span><?php endif; ?>
+                    <?php if($is_staff): ?><br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Daily Operations</span><?php endif; ?>
                 </p>
             </div>
         </div>
@@ -1535,27 +1693,24 @@ function formatGuestNames($guest_names) {
         <?php endif; ?>
 
         <div class="stats-grid">
-            <a href="?status=all&view=<?php echo $view; ?>" class="stat-card">
-                <div class="stat-top"><div class="stat-icon"><i class="fas fa-calendar-alt"></i></div></div>
+<a href="?status=all&view=<?php echo $view; ?>" class="stat-card active-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-calendar-alt"></i></div></div>
                 <div class="stat-number"><?php echo $total_active; ?></div>
                 <div class="stat-label">Active Bookings</div>
             </a>
-            <a href="?status=pending&view=<?php echo $view; ?>" class="stat-card">
-                <div class="stat-top"><div class="stat-icon"><i class="fas fa-clock"></i></div></div>
+<a href="?status=pending&view=<?php echo $view; ?>" class="stat-card pending-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-clock"></i></div></div>
                 <div class="stat-number"><?php echo $pending_count; ?></div>
                 <div class="stat-label">Pending Payment</div>
             </a>
-            <a href="javascript:void(0)" onclick="showBookingType('rebook')" class="stat-card <?php echo $rebook_pending_count > 0 ? 'rebook-stat-alert' : ''; ?>">
+            <a href="javascript:void(0)" onclick="showBookingType('rebook')" class="stat-card rebook-card <?php echo $rebook_pending_count > 0 ? 'rebook-stat-alert' : ''; ?>">
                 <div class="stat-top"><div class="stat-icon" style="background: rgba(139, 92, 246, 0.15); color: #8b5cf6;"><i class="fas fa-redo"></i></div></div>
                 <div class="stat-number"><?php echo $rebook_pending_count; ?></div>
                 <div class="stat-label">Pending Rebooks</div>
             </a>
-            <a href="?status=paid&view=<?php echo $view; ?>" class="stat-card">
-                <div class="stat-top"><div class="stat-icon"><i class="fas fa-check-circle"></i></div></div>
+<a href="?status=paid&view=<?php echo $view; ?>" class="stat-card paid-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-check-circle"></i></div></div>
                 <div class="stat-number"><?php echo $paid_count; ?></div>
                 <div class="stat-label">Paid</div>
             </a>
-            <a href="blocked-dates.php" class="stat-card" style="background: linear-gradient(135deg, #64748b, #475569);">
+            <a href="blocked-dates.php" class="stat-card blocked-card">
                 <div class="stat-top"><div class="stat-icon" style="background: rgba(255,255,255,0.2);"><i class="fas fa-ban"></i></div></div>
                 <div class="stat-number"><?php echo $total_blocked; ?></div>
                 <div class="stat-label">Blocked Dates</div>
@@ -1581,15 +1736,18 @@ function formatGuestNames($guest_names) {
                 <a href="?status=cancelled&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'cancelled' ? 'active' : ''; ?>">Cancelled</a>
                 <a href="?status=history&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'history' ? 'active' : ''; ?>">History</a>
             </div>
-            <form method="GET" class="search-box">
-                <input type="hidden" name="status" value="<?php echo $status_filter; ?>">
+<div class="search-box">                <input type="hidden" name="status" value="<?php echo $status_filter; ?>">
                 <input type="hidden" name="view" value="<?php echo $view; ?>">
-                <input type="text" name="search" placeholder="Search by reference, guest, or item..." value="<?php echo htmlspecialchars($search); ?>">
-                <button type="submit"><i class="fas fa-search"></i></button>
+<input 
+    type="text" 
+    id="bookingSearch"
+    placeholder="Search by reference, guest, or item..."
+    autocomplete="off"
+>                <button type="button"><i class="fas fa-search"></i></button>
                 <?php if($search): ?>
                     <a href="?status=<?php echo $status_filter; ?>&view=<?php echo $view; ?>" class="btn-clear"><i class="fas fa-times"></i> Clear</a>
                 <?php endif; ?>
-            </form>
+          </div>
         </div>
 
         <?php if($view == 'calendar'): ?>
@@ -1598,8 +1756,12 @@ function formatGuestNames($guest_names) {
                 <h2><i class="fas fa-calendar-alt"></i> Booking Calendar</h2>
                 <div class="calendar-legend">
                     <span class="legend-item"><span class="legend-color paid"></span> Paid</span>
-                    <span class="legend-item"><span class="legend-color pending"></span> Pending</span>
+                    <span class="legend-item"><span class="legend-color pending"></span> Pending Payment</span>
                     <span class="legend-item"><span class="legend-color blocked"></span> Blocked</span>
+                    <span class="legend-item">🏠 House</span>
+                    <span class="legend-item">🏖 Tour</span>
+                    <span class="legend-item">🍽 Food</span>
+                    <span class="legend-item">📦 Package</span>
                 </div>
             </div>
             <div id="calendar"></div>
@@ -1656,8 +1818,14 @@ function formatGuestNames($guest_names) {
                                 $is_row_rebook = (!empty($booking['rebooked_at']) || (!empty($booking['rebook_count']) && (int)$booking['rebook_count'] > 0));
                                 $is_row_pending_rebook = $is_row_rebook && ((!empty($booking['rebooked_at']) && empty($booking['rebook_confirmed_at'])) || $booking['booking_status'] == 'pending');
                             ?>
-                            <tr style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">
-                                <td>
+<tr 
+class="booking-row"
+data-search="<?php echo strtolower(htmlspecialchars(
+    $booking['reference_number'].' '.
+    $booking['guest_name'].' '.
+    $booking['house_name']
+)); ?>"
+style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">                                <td>
                                     <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong>
                                     <?php if($is_row_rebook): ?>
                                         <span class="rebook-badge"><i class="fas fa-redo"></i> #<?php echo $booking['rebook_count'] ?: 1; ?>/2</span>
@@ -2199,7 +2367,7 @@ function formatGuestNames($guest_names) {
                                         <button class="btn-view-booking" onclick='viewBooking("package", <?php echo htmlspecialchars(json_encode($pkg), ENT_QUOTES, "UTF-8"); ?>)'>
                                             <i class="fas fa-eye"></i> View Package
                                         </button>
-                                        <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof'])): ?>
+                                        <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof']) && $pkg['booking_status'] != 'cancelled'): ?>
                                         <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo $pkg['grand_total']; ?>)">
                                             <i class="fas fa-check"></i> Confirm
                                         </button>
@@ -2276,7 +2444,7 @@ function formatGuestNames($guest_names) {
                                 <button type="button" class="btn-card-action btn-more" onclick='viewBooking("package", <?php echo htmlspecialchars(json_encode($pkg), ENT_QUOTES, "UTF-8"); ?>)'>
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
-                                <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof'])): ?>
+                                <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof']) && $pkg['booking_status'] != 'cancelled'): ?>
                                     <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo $pkg['grand_total']; ?>)">
                                         <i class="fas fa-check"></i> Confirm
                                     </button>
@@ -2572,7 +2740,7 @@ function formatGuestNames($guest_names) {
                     <i class="fas fa-times"></i> Cancel
                 </button>
                 <button type="submit" name="reject_payment" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
-                    <i class="fas fa-trash"></i> Reject &amp; Delete
+                    <i class="fas fa-times-circle"></i> Reject Payment
                 </button>
             </div>
         </form>
@@ -3633,6 +3801,16 @@ document.addEventListener('DOMContentLoaded', function() {
             initialView: 'dayGridMonth',
             headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,dayGridWeek' },
             events: <?php echo json_encode($calendar_events); ?>,
+            eventContent: function(arg) {
+                var props = arg.event.extendedProps || {};
+                if (props.type === 'blocked') {
+                    return { html: '<div class="fc-modern-event blocked"><strong>🚫 BLOCKED</strong><br><span>' + (props.item_name || 'Date blocked') + '</span></div>' };
+                }
+                var status = (props.payment || props.status || 'pending').toString().toLowerCase();
+                var icon = props.type === 'house' ? '🏠' : props.type === 'tour' ? '🏖' : props.type === 'food' ? '🍽' : '📦';
+                var statusText = status === 'paid' ? 'PAID' : 'PENDING';
+                return { html: '<div class="fc-modern-event"><strong>' + icon + ' ' + statusText + '</strong><br><span>' + (props.guest_name || arg.event.title) + '</span></div>' };
+            },
             eventClick: function(info) {
                 var props = info.event.extendedProps;
 
@@ -3664,6 +3842,86 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     <?php endif; ?>
 });
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const search = document.getElementById("bookingSearch");
+
+    const rows = document.querySelectorAll(".booking-row");
+
+
+    if(!search) return;
+
+
+    search.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+
+        rows.forEach(row => {
+
+            const text = row.dataset.search;
+
+
+            if(text.includes(keyword)){
+
+                row.style.display = "";
+
+            }else{
+
+                row.style.display = "none";
+
+            }
+
+        });
+
+    });
+
+});
+document.addEventListener("DOMContentLoaded", function(){
+
+const search = document.getElementById("bookingSearch");
+const rows = document.querySelectorAll(".booking-row");
+
+search.addEventListener("input", function(){
+
+    let keyword = this.value.toLowerCase();
+
+    rows.forEach(row=>{
+
+        if(row.dataset.search.includes(keyword)){
+            row.style.display="";
+        }else{
+            row.style.display="none";
+        }
+
+    });
+
+});
+
+});
+
+document.addEventListener("DOMContentLoaded", function(){
+
+const search = document.getElementById("bookingSearch");
+
+search.addEventListener("input", function(){
+
+let keyword = this.value.toLowerCase();
+
+document.querySelectorAll(".booking-row").forEach(row=>{
+
+row.style.display =
+row.dataset.search.includes(keyword)
+? ""
+: "none";
+
+});
+
+});
+
+});
+
 </script>
 
 </body>

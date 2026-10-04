@@ -4,6 +4,8 @@ session_start();
 date_default_timezone_set('Asia/Manila');
 
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
+
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -108,47 +110,6 @@ try {
     $today_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= CURDATE()")->fetchColumn();
     $house_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'house'")->fetchColumn();
     $tour_blocked   = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'tour'")->fetchColumn();
-} catch (PDOException $e) {}
-
-// ============================================================
-// ✅ NAV BADGES — ACCURATE COUNTS
-// ============================================================
-$pending_bookings = 0;
-try {
-    $pending_houses = 0;
-    $pending_tours = 0;
-
-    try {
-        $pending_houses = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE payment_status = 'pending'")->fetchColumn();
-    } catch(PDOException $e) {}
-
-    try {
-        $pending_tours = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE payment_status = 'pending'")->fetchColumn();
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $pending_houses + $pending_tours;
-} catch(PDOException $e) {
-    $pending_bookings = 0;
-}
-
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
-
-$log_stats = ['total' => 0, 'today' => 0, 'failed' => 0, 'week' => 0];
-
-try {
-    $log_stats['total']  = (int)$pdo->query("SELECT COUNT(*) FROM system_logs")->fetchColumn();
-    $log_stats['today']  = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE DATE(created_at) = CURDATE()")->fetchColumn();
-    $log_stats['week']   = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)")->fetchColumn();
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
 } catch (PDOException $e) {}
 
 // Recent bookings
@@ -390,19 +351,178 @@ function getBookingStatusLabel($payment_status) {
         @media (max-width: 900px)  { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 600px)  { .stats-grid { grid-template-columns: 1fr; } }
 
-        .stat-card {
-            background: #4DA6D9;
-            border-radius: 16px;
-            padding: 22px 20px;
-            text-decoration: none;
-            color: white;
-            display: block;
-            position: relative;
-            overflow: hidden;
-            border: 1px solid rgba(255,255,255,0.15);
-            transition: transform 0.3s;
-            min-height: 180px;
-        }
+     .stat-card{
+
+    background:white;
+
+    border-radius:22px;
+
+    padding:24px;
+
+    text-decoration:none;
+
+    color:#0B2447;
+
+    min-height:180px;
+
+    border:1px solid #e8f0fe;
+
+    box-shadow:
+    0 12px 30px rgba(6,38,61,.08);
+
+    position:relative;
+
+    overflow:hidden;
+
+    transition:.25s ease;
+
+}
+
+
+.stat-card:hover{
+
+    transform:translateY(-6px);
+
+    box-shadow:
+    0 20px 45px rgba(6,38,61,.15);
+
+}
+
+
+
+.stat-icon{
+
+    width:55px;
+
+    height:55px;
+
+    border-radius:18px;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:center;
+
+    font-size:24px;
+
+    background:#e8f5ff;
+
+    color:#4DA6D9;
+
+}
+
+
+
+.stat-number{
+
+    margin-top:18px;
+
+    font-size:36px;
+
+    font-weight:800;
+
+    color:#0B2447;
+
+}
+
+
+
+.stat-label{
+
+    font-size:15px;
+
+    font-weight:700;
+
+    color:#334155;
+
+}
+
+
+
+.stat-small{
+
+    margin-top:10px;
+
+    font-size:12px;
+
+    color:#64748b;
+
+}
+.stat-card:nth-child(1) .stat-icon{
+    background:#dbeafe;
+    color:#2563eb;
+}
+
+
+.stat-card:nth-child(2) .stat-icon{
+    background:#cffafe;
+    color:#0891b2;
+}
+
+
+.stat-card:nth-child(3) .stat-icon{
+    background:#ede9fe;
+    color:#7c3aed;
+}
+
+
+.stat-card:nth-child(4) .stat-icon{
+    background:#dcfce7;
+    color:#16a34a;
+}
+
+
+.stat-card:nth-child(5) .stat-icon{
+    background:#fef3c7;
+    color:#d97706;
+}
+
+
+.stat-card:nth-child(6) .stat-icon{
+    background:#fef9c3;
+    color:#ca8a04;
+}
+
+
+.stat-card:nth-child(7) .stat-icon{
+    background:#ffedd5;
+    color:#ea580c;
+}
+
+
+.stat-card:nth-child(8) .stat-icon{
+    background:#e2e8f0;
+    color:#475569;
+}
+
+/* FIX DASHBOARD STAT TEXT COLORS */
+
+.stat-number{
+    color:#0B2447 !important;
+    font-size:36px;
+    font-weight:800;
+    margin-top:18px;
+}
+
+
+.stat-label{
+    color:#334155 !important;
+    font-size:15px;
+    font-weight:700;
+}
+
+
+.stat-small{
+    color:#64748b !important;
+    font-size:12px;
+}
+
+
+.stat-small.warning{
+    color:#f59e0b !important;
+}
+
         .stat-card:hover { transform: translateY(-5px); }
         .stat-icon { width: 48px; height: 48px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 20px; }
         .stat-number { font-size: 28px; font-weight: 700; color: white; margin-top: 10px; }
@@ -685,6 +805,7 @@ function getBookingStatusLabel($payment_status) {
     min-height:0;
 }
 
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
     
 </head>
@@ -760,16 +881,15 @@ function getBookingStatusLabel($payment_status) {
             <li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
                     <i class="fas fa-utensils"></i>
-                    <span>Food Management</span>
-                </a>
+                    <span>Food Management</span></a>
             </li>
 
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i>
                     <span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -777,16 +897,15 @@ function getBookingStatusLabel($payment_status) {
             <li class="nav-item">
                 <a href="blocked-dates.php" class="nav-link">
                     <i class="fas fa-ban"></i>
-                    <span>Blocked Dates</span>
-                </a>
+                    <span>Blocked Dates</span></a>
             </li>
 
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i>
                     <span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -810,8 +929,8 @@ function getBookingStatusLabel($payment_status) {
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i>
                     <span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -916,14 +1035,7 @@ function getBookingStatusLabel($payment_status) {
                         <div class="stat-small"><i class="fas fa-check-circle"></i> <?php echo $available_tours; ?> available</div>
                     </a>
 
-                    <?php if($is_admin): ?>
-                    <a href="user-management.php" class="stat-card">
-                        <div class="stat-icon"><i class="fas fa-users"></i></div>
-                        <div class="stat-number"><?php echo $total_users; ?></div>
-                        <div class="stat-label">Registered Users</div>
-                        <div class="stat-small"><i class="fas fa-user"></i> Active guests</div>
-                    </a>
-                    <?php endif; ?>
+              
 
                     <a href="booking-management.php" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-calendar-check"></i></div>
@@ -936,12 +1048,46 @@ function getBookingStatusLabel($payment_status) {
                         </div>
                     </a>
 
+                     <a href="blocked-dates.php" class="stat-card" style="background: linear-gradient(135deg, #64748b, #475569);">
+                        <div class="stat-icon"><i class="fas fa-ban"></i></div>
+                        <div class="stat-number"><?php echo $total_blocked; ?></div>
+                        <div class="stat-label">Blocked Dates</div>
+                        <div class="stat-small">
+                            <i class="fas fa-home"></i> <?php echo $house_blocked; ?> houses
+                            <span style="margin: 0 4px;">|</span>
+                            <i class="fas fa-umbrella-beach"></i> <?php echo $tour_blocked; ?> tours
+                        </div>
+                    </a>
+
                     <a href="booking-management.php?status=pending" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-clock"></i></div>
-                        <div class="stat-number"><?php echo $pending_bookings; ?></div>
+                        <div class="stat-number"><?php echo $sidebar_pending_bookings; ?></div>
                         <div class="stat-label">Pending Bookings</div>
                         <div class="stat-small warning"><i class="fas fa-exclamation-triangle"></i> Need attention</div>
                     </a>
+
+                          <?php if($is_admin): ?>
+                 <a href="booking-management.php?status=pending" class="stat-card">
+
+    <div class="stat-icon">
+        <i class="fas fa-clock"></i>
+    </div>
+
+    <div class="stat-number">
+        <?php echo $sidebar_pending_bookings; ?>
+    </div>
+
+    <div class="stat-label">
+        Pending Payment
+    </div>
+
+    <div class="stat-small warning">
+        <i class="fas fa-exclamation-circle"></i>
+        Need verification
+    </div>
+
+</a>
+                    <?php endif; ?>
 
                     <a href="reviews-management.php" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-star"></i></div>
@@ -957,16 +1103,7 @@ function getBookingStatusLabel($payment_status) {
                         <div class="stat-small"><i class="fas fa-check-circle"></i> <?php echo $available_food; ?> available</div>
                     </a>
 
-                    <a href="blocked-dates.php" class="stat-card" style="background: linear-gradient(135deg, #64748b, #475569);">
-                        <div class="stat-icon"><i class="fas fa-ban"></i></div>
-                        <div class="stat-number"><?php echo $total_blocked; ?></div>
-                        <div class="stat-label">Blocked Dates</div>
-                        <div class="stat-small">
-                            <i class="fas fa-home"></i> <?php echo $house_blocked; ?> houses
-                            <span style="margin: 0 4px;">|</span>
-                            <i class="fas fa-umbrella-beach"></i> <?php echo $tour_blocked; ?> tours
-                        </div>
-                    </a>
+                   
                 </div>
             </section>
         </div>

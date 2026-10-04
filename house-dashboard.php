@@ -10,6 +10,7 @@ $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
 
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 
 // ============================================================
 // ✅ NEW: Load SystemLogger
@@ -568,46 +569,6 @@ try {
     $content = [];
 }
 
-// ============================================================
-// ✅ ACCURATE BADGE COUNTS
-// ============================================================
-// ✅ Reviews: only UNREAD by admin (using session tracking)
-$total_reviews = 0;
-try {
-    $total_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback")->fetchColumn();
-
-    $viewed_reviews = $_SESSION['viewed_reviews_count'] ?? 0;
-    $total_reviews = max(0, $total_reviews - $viewed_reviews);
-} catch(PDOException $e) {}
-
-// ✅ Bookings: only NEW bookings (pending status + not yet viewed)
-$total_bookings_pending = 0;
-try {
-    $stmt = $pdo->query("
-        SELECT 
-            (SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending') +
-            (SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending') +
-            (SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending') AS total
-    ");
-    $total_bookings_pending = (int)$stmt->fetchColumn();
-
-    $viewed_bookings = $_SESSION['viewed_bookings_count'] ?? 0;
-    $total_bookings_pending = max(0, $total_bookings_pending - $viewed_bookings);
-} catch(PDOException $e) {}
-
-// ✅ System Logs: only failed logs not yet viewed
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-
-    $viewed_logs = $_SESSION['viewed_logs_count'] ?? 0;
-    $log_stats['failed'] = max(0, $log_stats['failed'] - $viewed_logs);
-} catch (PDOException $e) {}
-
-// Food count (no badge needed but kept for safety)
-$total_food = 0;
-try { $total_food = $pdo->query("SELECT COUNT(*) FROM food_items")->fetchColumn(); } catch(PDOException $e) {}
-
 $gallery_count = [];
 foreach($houses as $house) {
     $gallery_count[$house['id']] = count($house_gallery[$house['id']] ?? []);
@@ -651,6 +612,70 @@ function getHouseMainImagePath($house, $gallery) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        /* HOUSE TOOLBAR */
+
+.house-header{
+    flex-direction:column;
+    align-items:stretch;
+}
+
+
+.section-subtitle{
+    margin-top:5px;
+    color:#64748b;
+    font-size:13px;
+}
+
+
+.house-toolbar{
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+
+.house-search{
+    height:45px;
+    width:350px;
+
+    display:flex;
+    align-items:center;
+    gap:10px;
+
+    padding:0 15px;
+
+    background:white;
+    border:2px solid #e8f0fe;
+    border-radius:12px;
+}
+
+
+.house-search i{
+    color:#4DA6D9;
+}
+
+
+.house-search input{
+    width:100%;
+    border:none;
+    outline:none;
+    font-size:14px;
+}
+
+
+@media(max-width:768px){
+
+    .house-toolbar{
+        flex-direction:column;
+        align-items:stretch;
+    }
+
+    .house-search{
+        width:100%;
+    }
+
+}
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -1171,23 +1196,61 @@ function getHouseMainImagePath($house, $gallery) {
             box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
         }
 
-        .desktop-table {
-            display: block;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            border-radius: 12px;
-            border: 1px solid #e8f0fe;
-        }
+        .desktop-table{
+    width:100%;
+    overflow-x:auto;
+    overflow-y:hidden;
+    padding-bottom:12px;
+    -webkit-overflow-scrolling:touch;
+    border-radius:12px;
+    border:1px solid #e8f0fe;
+}
+
+.manage-table th:last-child,
+.manage-table td:last-child{
+    position:static;
+}
+
+
+.manage-table thead th:last-child{
+    background:#f8fafc;
+}
+
+
+.action-buttons{
+    min-width:180px;
+}
 
         .house-grid.mobile-only {
             display: none;
         }
 
-        .manage-table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 900px;
-        }
+       .manage-table{
+    width:100%;
+    border-collapse:collapse;
+    min-width:1050px;
+    table-layout:auto;
+}
+
+.manage-table th:nth-child(1),
+.manage-table td:nth-child(1){
+    width:90px;
+}
+
+.manage-table th:nth-child(2),
+.manage-table td:nth-child(2){
+    min-width:220px;
+}
+
+.manage-table th:nth-child(6),
+.manage-table td:nth-child(6){
+    width:120px;
+}
+
+.manage-table th:nth-child(7),
+.manage-table td:nth-child(7){
+    width:180px;
+}
 
         .manage-table thead {
             background: #f8fafc;
@@ -1350,12 +1413,14 @@ function getHouseMainImagePath($house, $gallery) {
             font-size: 13px;
         }
 
-        .action-buttons {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-wrap: nowrap;
-        }
+        .action-buttons{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    justify-content:flex-start;
+    flex-wrap:nowrap;
+    min-width:170px;
+}
 
         .action-buttons .btn-action {
             padding: 8px 16px;
@@ -1370,6 +1435,8 @@ function getHouseMainImagePath($house, $gallery) {
             gap: 6px;
             text-decoration: none;
             white-space: nowrap;
+            
+min-width:75px;
         }
 
         .action-buttons .btn-edit {
@@ -1537,6 +1604,7 @@ function getHouseMainImagePath($house, $gallery) {
             .logout-modal-actions { flex-direction: column-reverse; }
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
 </head>
 <body>
@@ -1586,16 +1654,15 @@ function getHouseMainImagePath($house, $gallery) {
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
             <li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i><span>Food Management</span>
-                </a>
+                    <i class="fas fa-utensils"></i><span>Food Management</span></a>
             </li>
 
             <!-- ✅ Booking Management — badge lang sa PENDING bookings -->
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($total_bookings_pending > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $total_bookings_pending; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1603,16 +1670,15 @@ function getHouseMainImagePath($house, $gallery) {
             <!-- ✅ Block Dates nav item -->
             <li class="nav-item">
                 <a href="blocked-dates.php" class="nav-link">
-                    <i class="fas fa-ban"></i><span>Block Dates</span>
-                </a>
+                    <i class="fas fa-ban"></i><span>Block Dates</span></a>
             </li>
 
             <!-- ✅ Reviews Management — badge lang kung may BAGONG reviews -->
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($total_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $total_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1624,8 +1690,8 @@ function getHouseMainImagePath($house, $gallery) {
             <li class="nav-item">
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1710,14 +1776,46 @@ function getHouseMainImagePath($house, $gallery) {
         </div>
         
         <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-list"></i> Manage Houses</h2>
-                <div class="header-actions">
-                    <button class="btn btn-primary" onclick="showModal('addHouse')">
-                        <i class="fas fa-plus"></i> Add New House
-                    </button>
-                </div>
-            </div>
+            <div class="card-header house-header">
+
+    <div>
+        <h2>
+            <i class="fas fa-list"></i>
+            Manage Houses
+        </h2>
+
+        <p class="section-subtitle">
+            Manage house listings, prices, availability, and details
+        </p>
+    </div>
+
+
+    <div class="house-toolbar">
+
+        <div class="house-search">
+
+            <i class="fas fa-search"></i>
+
+            <input 
+                type="text"
+                id="houseSearch"
+                placeholder="Search houses..."
+                autocomplete="off"
+            >
+
+        </div>
+
+
+        <button class="btn btn-primary" onclick="showModal('addHouse')">
+
+            <i class="fas fa-plus"></i>
+            Add New House
+
+        </button>
+
+    </div>
+
+</div>
             
             <?php if(count($houses) > 0): ?>
 

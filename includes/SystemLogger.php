@@ -22,7 +22,8 @@ class SystemLogger
 
     private const ALLOWED_MODULES = [
         'auth', 'user', 'house', 'tour', 'activity', 'food',
-        'booking', 'review', 'content', 'system', 'report', 'settings', 'profile'
+        'booking', 'review', 'content', 'system', 'report', 'settings', 'profile',
+        'blocked_dates'
     ];
 
     // ────────────────────────────────────────────────

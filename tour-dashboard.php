@@ -10,6 +10,7 @@ $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
 
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 if (file_exists('includes/SystemLogger.php')) require_once 'includes/SystemLogger.php';
 
 $user_info = [];
@@ -44,49 +45,8 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 // ✅ SIDEBAR BADGE COUNTS — Booking, Reviews, System Logs
 // ============================================================
 
-// ✅ Booking Management — pending bookings (house + tour + food)
-$pending_bookings = 0;
-try {
-    $hb_count = 0; $tb_count = 0; $fb_count = 0;
 
-    $has_hb = $pdo->query("SHOW COLUMNS FROM house_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_hb)) {
-        $hb_count = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
 
-    $has_tb = $pdo->query("SHOW COLUMNS FROM tour_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_tb)) {
-        $tb_count = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    try {
-        $has_fb = $pdo->query("SHOW COLUMNS FROM food_bookings LIKE 'booking_status'")->fetchAll();
-        if (!empty($has_fb)) {
-            $fb_count = (int)$pdo->query("SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending'")->fetchColumn();
-        }
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $hb_count + $tb_count + $fb_count;
-} catch(PDOException $e) {}
-
-// ✅ Reviews — PENDING only (auto-detect column)
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
-
-// ✅ System Logs — failed only
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
 
 $tours = [];
 try {
@@ -412,17 +372,6 @@ if (isset($_SESSION['flash_success'])) {
     unset($_SESSION['flash_success']);
 }
 
-$tour_bookings = [];
-try {
-    $stmt = $pdo->query("SELECT b.*, u.fullname as guest_name, t.tour_name 
-                         FROM tour_bookings b 
-                         LEFT JOIN guests g ON b.guest_id = g.id 
-                         LEFT JOIN users u ON g.user_id = u.id 
-                         LEFT JOIN tours t ON b.tour_id = t.id 
-                         ORDER BY b.created_at DESC LIMIT 20");
-    $tour_bookings = $stmt->fetchAll();
-} catch(PDOException $e) {}
-
 $content = [];
 try {
     $stmt = $pdo->query("SELECT section_name, content_key, content_value FROM site_content");
@@ -557,7 +506,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             .page-title-banner h1 { font-size: 22px; }
         }
 
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; max-width: 250px; }
         .stat-card { background: #4DA6D9; border-radius: 16px; padding: 22px 20px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(77, 166, 217, 0.2); transition: transform 0.3s, box-shadow 0.3s; }
         .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77, 166, 217, 0.3); }
         .stat-icon { width: 48px; height: 48px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 20px; }
@@ -565,7 +513,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; margin-top: 2px; }
 
         @media (max-width: 768px) {
-            .stats-grid { max-width: 100%; grid-template-columns: repeat(2, 1fr); gap: 12px; }
             .stat-card { padding: 16px 14px; border-radius: 12px; }
             .stat-number { font-size: 22px; }
             .stat-icon { width: 40px; height: 40px; font-size: 16px; }
@@ -970,6 +917,69 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             .logout-modal-actions { flex-direction: column-reverse; }
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
+
+        .tour-header{
+    flex-direction:column;
+    align-items:stretch;
+}
+
+
+.section-subtitle{
+    margin-top:5px;
+    color:#64748b;
+    font-size:13px;
+}
+
+
+.tour-toolbar{
+    display:flex;
+    gap:12px;
+    align-items:center;
+    justify-content:space-between;
+}
+
+
+.tour-search{
+    flex:1;
+    max-width:450px;
+    height:45px;
+    background:white;
+    border:2px solid #e8f0fe;
+    border-radius:12px;
+    display:flex;
+    align-items:center;
+    padding:0 15px;
+    gap:10px;
+}
+
+
+.tour-search i{
+    color:#4DA6D9;
+}
+
+
+.tour-search input{
+    border:none;
+    outline:none;
+    width:100%;
+    font-size:14px;
+}
+
+
+@media(max-width:768px){
+
+    .tour-toolbar{
+        flex-direction:column;
+        align-items:stretch;
+    }
+
+
+    .tour-search{
+        max-width:none;
+    }
+
+}
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
 </head>
 <body>
@@ -1016,20 +1026,17 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item"><a href="house-dashboard.php" class="nav-link"><i class="fas fa-home"></i><span>House Management</span></a></li>
             <li class="nav-item"><a href="tour-dashboard.php" class="nav-link active"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
-
-            <!-- FOOD — walang badge -->
-            <li class="nav-item">
+<li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i><span>Food Management</span>
-                </a>
+                    <i class="fas fa-utensils"></i><span>Food Management</span></a>
             </li>
 
             <!-- ✅ BOOKING — badge = pending bookings -->
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1040,8 +1047,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1054,8 +1061,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1131,23 +1138,42 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             </div>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon"><i class="fas fa-umbrella-beach"></i></div>
-                <div class="stat-number"><?php echo $total_tours; ?></div>
-                <div class="stat-label">Total Tours</div>
-            </div>
-        </div>
 
         <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-list"></i> Manage Tours</h2>
-                <div class="header-actions">
-                    <button class="btn btn-primary" onclick="showModal('addTour')">
-                        <i class="fas fa-plus"></i> Add New Tour
-                    </button>
-                </div>
-            </div>
+           <div class="card-header tour-header">
+
+    <div>
+        <h2>
+            <i class="fas fa-list"></i>
+            Manage Tours
+        </h2>
+
+        <p class="section-subtitle">
+            Manage tour packages, prices, availability, and destinations
+        </p>
+    </div>
+
+
+    <div class="tour-toolbar">
+
+        <div class="tour-search">
+            <i class="fas fa-search"></i>
+            <input 
+                type="text" 
+                id="tourSearch"
+                placeholder="Search tours..."
+            >
+        </div>
+
+
+        <button class="btn btn-primary" onclick="showModal('addTour')">
+            <i class="fas fa-plus"></i>
+            Add New Tour
+        </button>
+
+    </div>
+
+</div>
 
             <?php if(count($tours) > 0): ?>
 
@@ -1168,7 +1194,12 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                             $main_image = getTourMainImage($tour);
                             $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
                         ?>
-                        <tr>
+                        <tr class="tour-row"
+    data-search="<?php echo strtolower(htmlspecialchars(
+        ($tour['tour_name'] ?? '') . ' ' .
+        ($tour['description'] ?? '') . ' ' .
+        ($tour['status'] ?? '')
+    )); ?>">
                             <td>
                                 <?php if($main_image): ?>
                                     <img src="<?php echo htmlspecialchars($main_image); ?>" class="tour-thumb"
@@ -1339,94 +1370,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <?php endif; ?>
         </div>
 
-        <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-calendar-check"></i> Recent Tour Bookings</h2>
-                <a href="booking-management.php">View All →</a>
-            </div>
-
-            <?php if(count($tour_bookings) > 0): ?>
-
-            <div class="table-responsive desktop-table">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Ref #</th><th>Guest</th><th>Tour</th><th>Date</th>
-                            <th>Guests</th><th>Total</th><th>Payment</th><th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach($tour_bookings as $booking): ?>
-                        <tr>
-                            <td><strong><?php echo htmlspecialchars($booking['reference_number'] ?? 'N/A'); ?></strong></td>
-                            <td><?php echo htmlspecialchars($booking['guest_name'] ?? 'N/A'); ?></td>
-                            <td><?php echo htmlspecialchars($booking['tour_name'] ?? 'N/A'); ?></td>
-                            <td><?php echo isset($booking['booking_date']) ? date('M d, Y', strtotime($booking['booking_date'])) : 'N/A'; ?></td>
-                            <td><?php echo $booking['number_of_guests'] ?? 0; ?></td>
-                            <td>₱<?php echo number_format($booking['total_amount'] ?? 0); ?></td>
-                            <td>
-                                <span class="badge <?php echo ($booking['payment_status'] ?? 'pending') == 'paid' ? 'badge-success' : 'badge-warning'; ?>">
-                                    <?php echo ucfirst($booking['payment_status'] ?? 'pending'); ?>
-                                </span>
-                            </td>
-                            <td>
-                                <span class="badge badge-info"><?php echo ucfirst($booking['booking_status'] ?? 'confirmed'); ?></span>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="booking-cards-mobile">
-                <?php foreach($tour_bookings as $booking): ?>
-                <div class="booking-card-mobile">
-                    <div class="card-top-row">
-                        <div class="card-ref">
-                            <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                            <?php echo htmlspecialchars($booking['reference_number'] ?? 'N/A'); ?>
-                        </div>
-                        <div class="card-badges">
-                            <span class="badge <?php echo ($booking['payment_status'] ?? 'pending') == 'paid' ? 'badge-success' : 'badge-warning'; ?>">
-                                <?php echo ucfirst($booking['payment_status'] ?? 'pending'); ?>
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="card-row">
-                        <i class="fas fa-user"></i>
-                        <span class="card-label">Guest</span>
-                        <span class="card-value"><?php echo htmlspecialchars($booking['guest_name'] ?? 'N/A'); ?></span>
-                    </div>
-
-                    <div class="card-row">
-                        <i class="fas fa-umbrella-beach"></i>
-                        <span class="card-label">Tour</span>
-                        <span class="card-value"><?php echo htmlspecialchars($booking['tour_name'] ?? 'N/A'); ?></span>
-                    </div>
-
-                    <div class="card-row">
-                        <i class="fas fa-calendar-alt"></i>
-                        <span class="card-label">Date</span>
-                        <span class="card-value"><?php echo isset($booking['booking_date']) ? date('M d, Y', strtotime($booking['booking_date'])) : 'N/A'; ?></span>
-                    </div>
-
-                    <div class="card-row">
-                        <i class="fas fa-money-bill"></i>
-                        <span class="card-label">Total</span>
-                        <span class="card-value">₱<?php echo number_format($booking['total_amount'] ?? 0); ?></span>
-                    </div>
-                </div>
-                <?php endforeach; ?>
-            </div>
-
-            <?php else: ?>
-            <div style="text-align: center; padding: 40px; color: #94a3b8;">
-                <i class="fas fa-inbox" style="display: block; font-size: 30px; margin-bottom: 10px; color: #cbd5e1;"></i>
-                <p>No tour bookings yet.</p>
-            </div>
-            <?php endif; ?>
-        </div>
+     
 
         <div class="footer">
             <p>
@@ -2002,6 +1946,39 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+// LIVE TOUR SEARCH
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const searchInput = document.getElementById("tourSearch");
+    const rows = document.querySelectorAll(".tour-row");
+
+    if(!searchInput) return;
+
+
+    searchInput.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+
+        rows.forEach(row => {
+
+            const data = row.dataset.search;
+
+
+            if(data.includes(keyword)){
+                row.style.display = "";
+            }
+            else{
+                row.style.display = "none";
+            }
+
+        });
+
+    });
+
+});
 </script>
 
 </body>

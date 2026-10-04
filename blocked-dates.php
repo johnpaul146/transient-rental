@@ -1,6 +1,8 @@
 <?php
 session_start();
+date_default_timezone_set('Asia/Manila'); // same timezone as the other admin pages
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 
 // ✅ Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {
@@ -16,7 +18,7 @@ $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
 
 // ============================================================
-// AUTO-CREATE blocked_dates TABLE — ✅ kasama na ang 'food'
+// AUTO-CREATE blocked_dates TABLE (unchanged schema)
 // ============================================================
 try {
     $pdo->exec("CREATE TABLE IF NOT EXISTS blocked_dates (
@@ -33,10 +35,216 @@ try {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 } catch(PDOException $e) {}
 
-// ✅ Alter existing table kung luma pa (walang 'food' sa ENUM)
+// ✅ Older installs: add 'food' to the ENUM — only if it's actually missing
+//    (previously this ALTER ran on every page load)
 try {
-    $pdo->exec("ALTER TABLE blocked_dates MODIFY COLUMN item_type ENUM('house', 'tour', 'food') NOT NULL");
+    $col = $pdo->query("SHOW COLUMNS FROM blocked_dates LIKE 'item_type'")->fetch();
+    if ($col && stripos((string)$col['Type'], "'food'") === false) {
+        $pdo->exec("ALTER TABLE blocked_dates MODIFY COLUMN item_type ENUM('house', 'tour', 'food') NOT NULL");
+    }
 } catch(PDOException $e) {}
+
+// ============================================================
+// BLOCKING RULES / RESOURCE REGISTRY
+// Resource *types* map 1:1 to the blocked_dates.item_type ENUM.
+// The actual resources (houses, tours, food items) are always
+// loaded from the database — nothing is hardcoded.
+// ============================================================
+const BD_AUTO_PREFIX = 'Auto-blocked from booking #'; // written by booking-management.php
+const BD_MAX_DATES   = 366;
+
+function bd_resources(): array {
+    return [
+        'house' => [
+            'label' => 'House', 'plural' => 'Houses', 'icon' => 'home',
+            'table' => 'houses', 'name_col' => 'house_name',
+            'b_table' => 'house_bookings', 'b_fk' => 'house_id',
+            'b_start' => 'check_in_date', 'b_end' => 'check_out_date',
+        ],
+        'tour' => [
+            'label' => 'Tour', 'plural' => 'Tours', 'icon' => 'umbrella-beach',
+            'table' => 'tours', 'name_col' => 'tour_name',
+            'b_table' => 'tour_bookings', 'b_fk' => 'tour_id',
+            'b_start' => 'booking_date', 'b_end' => null,
+        ],
+        'food' => [
+            'label' => 'Food', 'plural' => 'Food Items', 'icon' => 'utensils',
+            'table' => 'food_items', 'name_col' => 'name',
+            'b_table' => 'food_bookings', 'b_fk' => 'food_id',
+            'b_start' => 'preferred_date', 'b_end' => null,
+        ],
+    ];
+}
+
+// DB enum value => label shown in the UI
+function bd_reasons(): array {
+    return [
+        'walk_in'          => ['label' => 'Walk-in',       'icon' => 'walking'],
+        'maintenance'      => ['label' => 'Maintenance',   'icon' => 'tools'],
+        'owner_use'        => ['label' => 'Owner Use',     'icon' => 'crown'],
+        'special_occasion' => ['label' => 'Special Event', 'icon' => 'gift'],
+        'other'            => ['label' => 'Other',         'icon' => 'ellipsis-h'],
+    ];
+}
+
+// Block types STAFF may unblock (operational). Everything else = admin only.
+function bd_staff_unblock_types(): array {
+    return ['walk_in', 'maintenance', 'special_occasion', 'other'];
+}
+
+function bd_is_booking_linked(array $b): bool {
+    return strpos((string)($b['reason'] ?? ''), BD_AUTO_PREFIX) === 0;
+}
+
+function bd_can_unblock(array $b, bool $is_admin): bool {
+    if ($is_admin) return true;
+    if (bd_is_booking_linked($b)) return false; // managed from Booking Management
+    return in_array($b['block_type'] ?? '', bd_staff_unblock_types(), true);
+}
+
+function bd_unblock_denied_reason(array $b): string {
+    if (bd_is_booking_linked($b)) return 'This date is held by a booking. It is released automatically when the booking is cancelled or rescheduled in Booking Management.';
+    return 'Only an administrator can unblock this type of restriction.';
+}
+
+function bd_fmt_date(string $d): string {
+    return date('M d, Y', strtotime($d));
+}
+
+function bd_flash_set(string $type, string $html): void {
+    $_SESSION['bd_flash'] = ['type' => $type, 'msg' => $html];
+}
+
+// Redirect target after a POST (whitelisted keys only — no open redirect)
+function bd_return_url(): string {
+    $allowed = ['tab', 'cal_type', 'cal_id', 'filter_type', 'filter_status', 'filter_month', 'search', 'page'];
+    $in = [];
+    parse_str((string)($_POST['return_qs'] ?? ''), $in);
+    $qs = [];
+    foreach ($allowed as $k) {
+        if (isset($in[$k]) && is_scalar($in[$k]) && (string)$in[$k] !== '') $qs[$k] = (string)$in[$k];
+    }
+    return 'blocked-dates.php' . ($qs ? '?' . http_build_query($qs) : '');
+}
+
+// JSON string of Y-m-d dates → sorted, de-duplicated, validated array
+function bd_parse_dates($raw): array {
+    $arr = json_decode((string)$raw, true);
+    if (!is_array($arr) || empty($arr)) throw new Exception("No dates selected.");
+    $out = [];
+    foreach ($arr as $d) {
+        $dt = is_string($d) ? DateTime::createFromFormat('!Y-m-d', $d) : false;
+        if (!$dt || $dt->format('Y-m-d') !== $d) throw new Exception("One or more dates are invalid.");
+        $out[$d] = true;
+    }
+    $out = array_keys($out);
+    sort($out);
+    if (count($out) > BD_MAX_DATES) throw new Exception("You can block at most " . BD_MAX_DATES . " dates at a time.");
+    return $out;
+}
+
+// Active bookings that overlap the given dates → [ 'Y-m-d' => ['REF', ...] ]
+// "Active" uses the same definition as the calendar: not cancelled / completed.
+function bd_booking_conflicts(PDO $pdo, string $type, int $id, array $dates): array {
+    if (empty($dates)) return [];
+    $cfg   = bd_resources()[$type];
+    $start = $cfg['b_start'];
+    $end   = $cfg['b_end'] ?: $start;
+    $min   = $dates[0];
+    $max   = $dates[count($dates) - 1];
+
+    $sql = "SELECT * FROM `{$cfg['b_table']}`
+            WHERE `{$cfg['b_fk']}` = ?
+              AND booking_status NOT IN ('cancelled', 'completed')
+              AND `{$start}` <= ? AND `{$end}` >= ?";
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute([$id, $max, $min]);
+        $rows = $st->fetchAll();
+    } catch (PDOException $e) {
+        if ($e->getCode() === '42S02') return []; // bookings table doesn't exist → nothing booked
+        throw $e;                                  // anything else: fail closed
+    }
+
+    $conf = [];
+    foreach ($rows as $r) {
+        $s   = $r[$start];
+        $e   = $r[$end];
+        $ref = $r['reference_number'] ?? ('#' . $r['id']);
+        foreach ($dates as $d) {
+            if ($d >= $s && $d <= $e) $conf[$d][] = $ref;
+        }
+    }
+    return $conf;
+}
+
+// Classify every requested date
+function bd_analyze(PDO $pdo, string $type, int $id, array $dates, string $today): array {
+    $past = []; $future = [];
+    foreach ($dates as $d) { if ($d < $today) $past[] = $d; else $future[] = $d; }
+
+    $existing = [];
+    $st = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = ? AND item_id = ? AND block_date BETWEEN ? AND ?");
+    $st->execute([$type, $id, $dates[0], $dates[count($dates) - 1]]);
+    foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $d) $existing[$d] = true;
+
+    $conflicts = bd_booking_conflicts($pdo, $type, $id, $future);
+
+    $blockable = []; $dups = []; $conf_out = [];
+    foreach ($future as $d) {
+        if (isset($conflicts[$d]))    $conf_out[$d] = $conflicts[$d];
+        elseif (isset($existing[$d])) $dups[] = $d;
+        else                          $blockable[] = $d;
+    }
+
+    return [
+        'past'      => $past,
+        'duplicates'=> $dups,
+        'conflicts' => $conf_out,
+        'blockable' => $blockable,
+        'can_save'  => empty($past) && empty($conf_out) && !empty($blockable),
+    ];
+}
+
+// Shared validation for preview + save
+function bd_validate_request(PDO $pdo, array $post, string $today): array {
+    $resources = bd_resources();
+    $type = (string)($post['item_type'] ?? '');
+    $id   = (int)($post['item_id'] ?? 0);
+    if (!isset($resources[$type])) throw new Exception("Please choose a valid resource type.");
+    if ($id <= 0) throw new Exception("Please choose a resource.");
+
+    $cfg = $resources[$type];
+    $st = $pdo->prepare("SELECT `{$cfg['name_col']}` FROM `{$cfg['table']}` WHERE id = ?");
+    $st->execute([$id]);
+    $name = $st->fetchColumn();
+    if ($name === false) throw new Exception("That {$cfg['label']} no longer exists.");
+
+    $dates = bd_parse_dates($post['dates_json'] ?? '[]');
+
+    $reasons    = bd_reasons();
+    $block_type = (string)($post['block_type'] ?? '');
+    if (!isset($reasons[$block_type])) throw new Exception("Please choose a reason.");
+
+    $note = trim((string)($post['note'] ?? ''));
+    if (mb_strlen($note) > 255) throw new Exception("The note is too long (255 characters max).");
+    if ($block_type === 'other' && $note === '') throw new Exception("Please describe the reason when choosing “Other”.");
+    if (stripos($note, BD_AUTO_PREFIX) === 0) throw new Exception("That note is reserved for system-generated blocks.");
+
+    return [
+        'type' => $type, 'id' => $id, 'cfg' => $cfg, 'name' => (string)$name,
+        'dates' => $dates, 'block_type' => $block_type, 'note' => $note,
+        'analysis' => bd_analyze($pdo, $type, $id, $dates, $today),
+    ];
+}
+
+$today = date('Y-m-d');
+
+// CSRF token for this page's forms
+if (empty($_SESSION['bd_csrf'])) {
+    $_SESSION['bd_csrf'] = bin2hex(random_bytes(16));
+}
+$bd_csrf = $_SESSION['bd_csrf'];
 
 // ============================================================
 // GET DYNAMIC CONTENT
@@ -63,76 +271,171 @@ try {
 $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User';
 
 // ============================================================
-// ✅ HANDLE MULTI-BLOCK (Multiple selected dates from calendar)
+// ✅ ACTION HANDLERS (preview / block / unblock)
 // ============================================================
-if(isset($_POST['multi_block_action']) && ($is_admin || $is_staff)) {
-    try {
-        $item_type = $_POST['multi_item_type'] ?? '';
-        $item_id = (int)($_POST['multi_item_id'] ?? 0);
-        $dates_json = $_POST['multi_dates_json'] ?? '[]';
-        $reason = trim($_POST['multi_reason'] ?? '');
-        $block_type = $_POST['multi_block_type'] ?? 'walk_in';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
+    $act = (string)$_POST['bd_action'];
 
-        $dates = json_decode($dates_json, true);
-        if (!is_array($dates) || empty($dates)) {
-            throw new Exception("No dates selected.");
+    // ---------- PREVIEW (AJAX → JSON, nothing is saved) ----------
+    if ($act === 'preview') {
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page.");
+            $v = bd_validate_request($pdo, $_POST, $today);
+            echo json_encode(array_merge(
+                ['ok' => true, 'resource_name' => $v['name'], 'type_label' => $v['cfg']['label']],
+                $v['analysis']
+            ));
+        } catch (PDOException $e) {
+            error_log('blocked-dates preview failed: ' . $e->getMessage());
+            echo json_encode(['ok' => false, 'error' => 'A database error occurred while checking these dates.']);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
+        exit();
+    }
 
-        if (!in_array($item_type, ['house', 'tour', 'food'])) throw new Exception("Invalid item type.");
-        if ($item_id <= 0) throw new Exception("Please select an item.");
+    // ---------- BLOCK ----------
+    if ($act === 'block') {
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please try again.");
+            $v = bd_validate_request($pdo, $_POST, $today);
+            $a = $v['analysis'];
 
-        $today = date('Y-m-d');
-        $blocked_count = 0;
-        $skipped_count = 0;
+            if (!empty($a['past'])) {
+                throw new Exception("Past dates can't be blocked (" . count($a['past']) . " selected).");
+            }
+            if (!empty($a['conflicts'])) {
+                $parts = [];
+                foreach ($a['conflicts'] as $d => $refs) {
+                    $parts[] = bd_fmt_date($d) . ' (' . htmlspecialchars(implode(', ', array_unique($refs))) . ')';
+                }
+                if (class_exists('SystemLogger')) {
+                    SystemLogger::log($pdo, 'error', 'blocked_dates',
+                        "Block rejected — active bookings on {$v['cfg']['label']} \"{$v['name']}\": " . implode(', ', array_keys($a['conflicts'])),
+                        $v['id'], 'blocked_dates', null,
+                        ['item_type' => $v['type'], 'item_id' => $v['id'], 'conflicts' => $a['conflicts']], 'warning');
+                }
+                throw new Exception("Can't block — active booking(s) on: " . implode('; ', array_slice($parts, 0, 5)) . (count($parts) > 5 ? '…' : '') . ". Cancel or reschedule the booking first.");
+            }
+            if (empty($a['blockable'])) {
+                throw new Exception("Nothing to block — every selected date is already blocked.");
+            }
 
-        $stmt = $pdo->prepare("INSERT IGNORE INTO blocked_dates (item_type, item_id, block_date, reason, block_type, blocked_by) VALUES (?, ?, ?, ?, ?, ?)");
+            $inserted = [];
+            $raced    = 0;
+            $pdo->beginTransaction();
+            try {
+                // re-check inside the transaction to narrow the race window
+                $again = bd_booking_conflicts($pdo, $v['type'], $v['id'], $a['blockable']);
+                if (!empty($again)) throw new Exception("A booking was just made on one of these dates. Please review and try again.");
 
-        foreach ($dates as $date) {
-            if ($date < $today) { $skipped_count++; continue; }
+                $ins = $pdo->prepare("INSERT INTO blocked_dates (item_type, item_id, block_date, reason, block_type, blocked_by) VALUES (?, ?, ?, ?, ?, ?)");
+                foreach ($a['blockable'] as $d) {
+                    try {
+                        $ins->execute([$v['type'], $v['id'], $d, $v['note'] !== '' ? $v['note'] : null, $v['block_type'], $_SESSION['user_id']]);
+                        $inserted[] = $d;
+                    } catch (PDOException $e) {
+                        if ($e->getCode() === '23000') { $raced++; continue; } // duplicate (unique_block)
+                        throw $e;
+                    }
+                }
+                $pdo->commit();
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
+            }
 
-            $stmt->execute([$item_type, $item_id, $date, $reason ?: null, $block_type, $_SESSION['user_id']]);
-            if ($stmt->rowCount() > 0) $blocked_count++;
-            else $skipped_count++;
+            $skipped = count($a['duplicates']) + $raced;
+            $n = count($inserted);
+            $range = $n > 0 ? (bd_fmt_date($inserted[0]) . ($n > 1 ? ' – ' . bd_fmt_date($inserted[$n - 1]) : '')) : '';
+
+            if (class_exists('SystemLogger')) {
+                $reasons = bd_reasons();
+                SystemLogger::created($pdo, 'blocked_dates',
+                    "Blocked {$v['cfg']['label']} \"{$v['name']}\" — {$n} date(s)" . ($range ? " ({$range})" : '') .
+                    " · " . $reasons[$v['block_type']]['label'] . ($skipped ? " · {$skipped} already blocked" : ''),
+                    $v['id'],
+                    [
+                        'item_type' => $v['type'], 'item_id' => $v['id'], 'item_name' => $v['name'],
+                        'dates' => $inserted, 'block_type' => $v['block_type'], 'note' => $v['note'],
+                        'skipped_duplicates' => $skipped,
+                    ]);
+            }
+
+            $msg = "Blocked <strong>" . htmlspecialchars($v['name']) . "</strong> for <strong>{$n}</strong> date(s)";
+            if ($range) $msg .= " (" . htmlspecialchars($range) . ")";
+            $msg .= ". These dates are now unavailable for online booking.";
+            if ($skipped > 0) $msg .= " <span style='color:#b45309;'>{$skipped} date(s) were already blocked and skipped.</span>";
+            bd_flash_set('success', $msg);
+        } catch (PDOException $e) {
+            error_log('blocked-dates block failed: ' . $e->getMessage());
+            bd_flash_set('danger', 'A database error occurred. Nothing was saved.');
+        } catch (Exception $e) {
+            bd_flash_set('danger', ($e->getMessage() === '' ? 'Something went wrong.' : $e->getMessage()));
         }
+        header('Location: ' . bd_return_url());
+        exit();
+    }
 
-        if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'multi_block', 'blocked_dates',
-                "Multi-blocked {$item_type} #{$item_id} — {$blocked_count} dates blocked, {$skipped_count} skipped",
-                $item_id, 'blocked_dates');
-        }
+    // ---------- UNBLOCK ----------
+    if ($act === 'unblock') {
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please try again.");
+            $id = (int)($_POST['block_id'] ?? 0);
+            if ($id <= 0) throw new Exception("Invalid block ID.");
 
-        $success = "✅ Blocked <strong>$blocked_count</strong> date(s) successfully!";
-        if ($skipped_count > 0) {
-            $success .= " <span style='color: #f59e0b;'>($skipped_count date(s) skipped — already blocked or past)</span>";
+            $stmt = $pdo->prepare("SELECT * FROM blocked_dates WHERE id = ?");
+            $stmt->execute([$id]);
+            $block = $stmt->fetch();
+            if (!$block) throw new Exception("That blocked date no longer exists (it may already have been unblocked).");
+
+            if (!bd_can_unblock($block, $is_admin)) {
+                if (class_exists('SystemLogger')) {
+                    SystemLogger::log($pdo, 'error', 'blocked_dates',
+                        "Unblock denied for {$block['item_type']} #{$block['item_id']} on {$block['block_date']} ({$block['block_type']})",
+                        $id, 'blocked_dates', $block, null, 'warning');
+                }
+                throw new Exception(bd_unblock_denied_reason($block));
+            }
+
+            $cfgs = bd_resources();
+            $label = $cfgs[$block['item_type']]['label'] ?? ucfirst($block['item_type']);
+            $rname = '';
+            if (isset($cfgs[$block['item_type']])) {
+                $c = $cfgs[$block['item_type']];
+                $q = $pdo->prepare("SELECT `{$c['name_col']}` FROM `{$c['table']}` WHERE id = ?");
+                $q->execute([$block['item_id']]);
+                $rname = (string)$q->fetchColumn();
+            }
+
+            $pdo->prepare("DELETE FROM blocked_dates WHERE id = ?")->execute([$id]);
+
+            if (class_exists('SystemLogger')) {
+                SystemLogger::deleted($pdo, 'blocked_dates',
+                    "Unblocked {$label}" . ($rname !== '' ? " \"{$rname}\"" : " #{$block['item_id']}") . " on {$block['block_date']}",
+                    $id, array_merge($block, ['item_name' => $rname]));
+            }
+
+            bd_flash_set('success', "Date <strong>" . bd_fmt_date($block['block_date']) . "</strong> unblocked" .
+                ($rname !== '' ? " for <strong>" . htmlspecialchars($rname) . "</strong>" : '') . ". It is available for online booking again.");
+        } catch (PDOException $e) {
+            error_log('blocked-dates unblock failed: ' . $e->getMessage());
+            bd_flash_set('danger', 'A database error occurred. Nothing was changed.');
+        } catch (Exception $e) {
+            bd_flash_set('danger', $e->getMessage());
         }
-    } catch(Exception $e) {
-        $error = "Failed: " . $e->getMessage();
+        header('Location: ' . bd_return_url());
+        exit();
     }
 }
 
-// ============================================================
-// ✅ HANDLE UNBLOCK DATE
-// ============================================================
-if(isset($_POST['unblock_date_action']) && ($is_admin || $is_staff)) {
-    try {
-        $id = (int)($_POST['block_id'] ?? 0);
-        if ($id <= 0) throw new Exception("Invalid block ID.");
-
-        $stmt = $pdo->prepare("SELECT * FROM blocked_dates WHERE id = ?");
-        $stmt->execute([$id]);
-        $block = $stmt->fetch();
-        if (!$block) throw new Exception("Blocked date not found.");
-
-        $pdo->prepare("DELETE FROM blocked_dates WHERE id = ?")->execute([$id]);
-
-        if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'unblock_date', 'blocked_dates', "Unblocked {$block['item_type']} #{$block['item_id']} on {$block['block_date']}", $id, 'blocked_dates');
-        }
-
-        $success = "✅ Date " . date('M d, Y', strtotime($block['block_date'])) . " unblocked! Now available for online booking.";
-    } catch(Exception $e) {
-        $error = "Failed to unblock: " . $e->getMessage();
-    }
+// Flash message (set by the handlers above, shown once after redirect)
+$success = null; $error = null;
+if (!empty($_SESSION['bd_flash'])) {
+    if ($_SESSION['bd_flash']['type'] === 'success') $success = $_SESSION['bd_flash']['msg'];
+    else $error = $_SESSION['bd_flash']['msg'];
+    unset($_SESSION['bd_flash']);
 }
 
 // ============================================================
@@ -148,231 +451,106 @@ if(isset($_GET['logout'])) {
 }
 
 // ============================================================
-// GET FILTERS
+// FILTERS
 // ============================================================
-$filter_type = $_GET['filter_type'] ?? 'all';
-$filter_month = $_GET['filter_month'] ?? '';
-$search = trim($_GET['search'] ?? '');
-$cal_type = $_GET['cal_type'] ?? '';
-$cal_id = (int)($_GET['cal_id'] ?? 0);
+$type_keys     = array_keys(bd_resources());
+$current_tab = 'list';
+$filter_type   = in_array($_GET['filter_type'] ?? 'all', array_merge(['all'], $type_keys), true) ? ($_GET['filter_type'] ?? 'all') : 'all';
+$filter_status = in_array($_GET['filter_status'] ?? 'current', ['current', 'past', 'all'], true) ? ($_GET['filter_status'] ?? 'current') : 'current';
+$filter_month  = preg_match('/^\d{4}-\d{2}$/', (string)($_GET['filter_month'] ?? '')) ? $_GET['filter_month'] : '';
+$search        = trim((string)($_GET['search'] ?? ''));
+$page          = max(1, (int)($_GET['page'] ?? 1));
+$per_page      = 20;
 
-// Get houses, tours, and food items
-$houses = $pdo->query("SELECT id, house_name FROM houses ORDER BY house_name")->fetchAll();
-$tours = $pdo->query("SELECT id, tour_name FROM tours ORDER BY tour_name")->fetchAll();
 
-// ✅ Food items — adjust columns as needed
-$foods = [];
-try {
-    $foods = $pdo->query("SELECT id, name FROM food_items ORDER BY name")->fetchAll();
-} catch(PDOException $e) {
-    $foods = [];
+// Resources, loaded dynamically per type
+$resource_lists = [];
+foreach (bd_resources() as $t => $cfg) {
+    try {
+        $resource_lists[$t] = $pdo->query("SELECT id, `{$cfg['name_col']}` AS name FROM `{$cfg['table']}` ORDER BY `{$cfg['name_col']}`")->fetchAll();
+    } catch (PDOException $e) {
+        $resource_lists[$t] = [];
+    }
 }
 
-// ============================================================
-// GET BLOCKED DATES (with filters)
-// ============================================================
-$where = [];
-$params = [];
-if ($filter_type !== 'all') { $where[] = "bd.item_type = ?"; $params[] = $filter_type; }
-if ($filter_month) { $where[] = "DATE_FORMAT(bd.block_date, '%Y-%m') = ?"; $params[] = $filter_month; }
-if ($search) { $where[] = "(bd.reason LIKE ? OR bd.block_date LIKE ?)"; $params[] = "%$search%"; $params[] = "%$search%"; }
-$where_sql = !empty($where) ? "WHERE " . implode(" AND ", $where) : "";
+// Shared SQL fragments: resource name + who blocked it
+$bd_joins = ''; $bd_name_parts = [];
+foreach (bd_resources() as $t => $cfg) {
+    $alias = "r_{$t}";
+    $bd_joins .= " LEFT JOIN `{$cfg['table']}` {$alias} ON bd.item_type = '{$t}' AND {$alias}.id = bd.item_id";
+    $bd_name_parts[] = "{$alias}.`{$cfg['name_col']}`";
+}
+$bd_joins .= " LEFT JOIN users bu ON bu.id = bd.blocked_by";
+$bd_name_expr = 'COALESCE(' . implode(', ', $bd_name_parts) . ')';
 
-$stmt = $pdo->prepare("SELECT bd.*, 
-    CASE 
-        WHEN bd.item_type = 'house' THEN (SELECT house_name FROM houses WHERE id = bd.item_id)
-        WHEN bd.item_type = 'tour' THEN (SELECT tour_name FROM tours WHERE id = bd.item_id)
-        WHEN bd.item_type = 'food' THEN (SELECT name FROM food_items WHERE id = bd.item_id)
-    END as item_name
-    FROM blocked_dates bd
-    $where_sql
-    ORDER BY bd.block_date ASC, bd.item_type, bd.item_id");
+// ============================================================
+// BLOCKED DATES LIST (filtered + paginated)
+// ============================================================
+$where = []; $params = [];
+if ($filter_type !== 'all')      { $where[] = "bd.item_type = ?"; $params[] = $filter_type; }
+if ($filter_status === 'current'){ $where[] = "bd.block_date >= ?"; $params[] = $today; }
+if ($filter_status === 'past')   { $where[] = "bd.block_date < ?";  $params[] = $today; }
+if ($filter_month)               { $where[] = "DATE_FORMAT(bd.block_date, '%Y-%m') = ?"; $params[] = $filter_month; }
+if ($search !== '') {
+    $where[] = "(bd.reason LIKE ? OR bd.block_date LIKE ? OR {$bd_name_expr} LIKE ?)";
+    $params[] = "%$search%"; $params[] = "%$search%"; $params[] = "%$search%";
+}
+$where_sql = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates bd {$bd_joins} {$where_sql}");
+$stmt->execute($params);
+$list_total  = (int)$stmt->fetchColumn();
+$total_pages = max(1, (int)ceil($list_total / $per_page));
+$page        = min($page, $total_pages);
+$offset      = ($page - 1) * $per_page;
+$order_dir   = ($filter_status === 'past') ? 'DESC' : 'ASC';
+
+$stmt = $pdo->prepare("SELECT bd.*, {$bd_name_expr} AS item_name, COALESCE(bu.fullname, bu.username) AS blocked_by_name
+    FROM blocked_dates bd {$bd_joins}
+    {$where_sql}
+    ORDER BY bd.block_date {$order_dir}, bd.item_type, bd.item_id
+    LIMIT {$per_page} OFFSET {$offset}");
 $stmt->execute($params);
 $blocked_dates = $stmt->fetchAll();
 
-// Stats
-$total_blocks = $pdo->query("SELECT COUNT(*) FROM blocked_dates")->fetchColumn();
-$total_house_blocks = $pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'house'")->fetchColumn();
-$total_tour_blocks = $pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'tour'")->fetchColumn();
-$total_food_blocks = $pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'food'")->fetchColumn();
-$today_blocks = $pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= CURDATE()")->fetchColumn();
-
 // ============================================================
-// GET CALENDAR EVENTS FOR SELECTED ITEM
+// OVERVIEW
 // ============================================================
-$calendar_events = [];
-$cal_item_name = '';
+$total_blocks    = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates")->fetchColumn();
+$upcoming_blocks = 0; $next7_blocks = 0; $resources_affected = 0;
+$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= ?");
+$st->execute([$today]);
+$upcoming_blocks = (int)$st->fetchColumn();
+$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE block_date BETWEEN ? AND ?");
+$st->execute([$today, date('Y-m-d', strtotime('+6 days'))]);
+$next7_blocks = (int)$st->fetchColumn();
+$st = $pdo->prepare("SELECT COUNT(DISTINCT item_type, item_id) FROM blocked_dates WHERE block_date >= ?");
+$st->execute([$today]);
+$resources_affected = (int)$st->fetchColumn();
 
-if ($cal_type && $cal_id > 0) {
-    // ---------- HOUSE ----------
-    if ($cal_type === 'house') {
-        $stmt = $pdo->prepare("SELECT house_name FROM houses WHERE id = ?");
-        $stmt->execute([$cal_id]);
-        $cal_item_name = $stmt->fetchColumn() ?: 'Unknown House';
-
-        $stmt = $pdo->prepare("SELECT hb.*, 
-            COALESCE(u.fullname, u.username, 'Guest') as guest_name
-            FROM house_bookings hb 
-            LEFT JOIN guests g ON hb.guest_id = g.id 
-            LEFT JOIN users u ON g.user_id = u.id 
-            WHERE hb.house_id = ? 
-              AND hb.booking_status NOT IN ('cancelled', 'completed')
-            ORDER BY hb.check_in_date ASC");
-        $stmt->execute([$cal_id]);
-        $bookings = $stmt->fetchAll();
-
-        foreach ($bookings as $b) {
-            $isPaid = $b['payment_status'] === 'paid';
-            $check_out = new DateTime($b['check_out_date']);
-            $check_out->modify('+1 day');
-
-            $calendar_events[] = [
-                'id' => 'booking_' . $b['id'],
-                'title' => ($isPaid ? '💰 ' : '⏳ ') . $b['guest_name'] . ' (' . $b['reference_number'] . ')',
-                'start' => $b['check_in_date'],
-                'end' => $check_out->format('Y-m-d'),
-                'color' => $isPaid ? '#10b981' : '#f59e0b',
-                'textColor' => '#ffffff',
-                'extendedProps' => [
-                    'event_type' => 'booking',
-                    'booking_type' => 'house',
-                    'booking_id' => $b['id'],
-                    'reference' => $b['reference_number'],
-                    'guest_name' => $b['guest_name'],
-                    'payment_status' => $b['payment_status'],
-                    'check_in' => $b['check_in_date'],
-                    'check_out' => $b['check_out_date'],
-                    'guests' => $b['number_of_guests'],
-                    'total' => $b['total_amount']
-                ]
-            ];
-        }
-
-    // ---------- TOUR ----------
-    } elseif ($cal_type === 'tour') {
-        $stmt = $pdo->prepare("SELECT tour_name FROM tours WHERE id = ?");
-        $stmt->execute([$cal_id]);
-        $cal_item_name = $stmt->fetchColumn() ?: 'Unknown Tour';
-
-        $stmt = $pdo->prepare("SELECT tb.*, 
-            COALESCE(u.fullname, u.username, tb.guest_name, 'Guest') as guest_name
-            FROM tour_bookings tb 
-            LEFT JOIN guests g ON tb.guest_id = g.id 
-            LEFT JOIN users u ON g.user_id = u.id 
-            WHERE tb.tour_id = ? 
-              AND tb.booking_status NOT IN ('cancelled', 'completed')
-            ORDER BY tb.booking_date ASC");
-        $stmt->execute([$cal_id]);
-        $bookings = $stmt->fetchAll();
-
-        foreach ($bookings as $b) {
-            $isPaid = $b['payment_status'] === 'paid';
-            $end = new DateTime($b['booking_date']);
-            $end->modify('+1 day');
-
-            $calendar_events[] = [
-                'id' => 'booking_' . $b['id'],
-                'title' => ($isPaid ? '💰 ' : '⏳ ') . $b['guest_name'] . ' (' . $b['reference_number'] . ')',
-                'start' => $b['booking_date'],
-                'end' => $end->format('Y-m-d'),
-                'color' => $isPaid ? '#10b981' : '#f59e0b',
-                'textColor' => '#ffffff',
-                'extendedProps' => [
-                    'event_type' => 'booking',
-                    'booking_type' => 'tour',
-                    'booking_id' => $b['id'],
-                    'reference' => $b['reference_number'],
-                    'guest_name' => $b['guest_name'],
-                    'payment_status' => $b['payment_status'],
-                    'check_in' => $b['booking_date'],
-                    'check_out' => $b['booking_date'],
-                    'guests' => $b['number_of_guests'],
-                    'total' => $b['total_amount']
-                ]
-            ];
-        }
-
-    // ---------- FOOD ----------
-    } elseif ($cal_type === 'food') {
-        $stmt = $pdo->prepare("SELECT name FROM food_items WHERE id = ?");
-        $stmt->execute([$cal_id]);
-        $cal_item_name = $stmt->fetchColumn() ?: 'Unknown Food Item';
-
-        // ✅ Food bookings — adjust table/column names kung iba sa'yo
-        try {
-            $stmt = $pdo->prepare("SELECT fb.*, 
-                COALESCE(u.fullname, u.username, fb.guest_name, 'Guest') as guest_name
-                FROM food_bookings fb 
-                LEFT JOIN guests g ON fb.guest_id = g.id 
-                LEFT JOIN users u ON g.user_id = u.id 
-                WHERE fb.food_id = ? 
-                  AND fb.booking_status NOT IN ('cancelled', 'completed')
-                ORDER BY fb.preferred_date ASC");
-            $stmt->execute([$cal_id]);
-            $bookings = $stmt->fetchAll();
-
-            foreach ($bookings as $b) {
-                $isPaid = ($b['payment_status'] ?? '') === 'paid';
-                $end = new DateTime($b['preferred_date']);
-                $end->modify('+1 day');
-
-                $calendar_events[] = [
-                    'id' => 'booking_' . $b['id'],
-                    'title' => ($isPaid ? '💰 ' : '⏳ ') . $b['guest_name'] . ' (' . ($b['reference_number'] ?? '') . ')',
-                    'start' => $b['preferred_date'],
-                    'end' => $end->format('Y-m-d'),
-                    'color' => $isPaid ? '#10b981' : '#f59e0b',
-                    'textColor' => '#ffffff',
-                    'extendedProps' => [
-                        'event_type' => 'booking',
-                        'booking_type' => 'food',
-                        'booking_id' => $b['id'],
-                        'reference' => $b['reference_number'] ?? '',
-                        'guest_name' => $b['guest_name'],
-                        'payment_status' => $b['payment_status'] ?? 'pending',
-                        'check_in' => $b['preferred_date'],
-                        'check_out' => $b['preferred_date'],
-                        'guests' => $b['quantity'] ?? 1,
-                        'total' => $b['total_amount'] ?? 0
-                    ]
-                ];
-            }
-        } catch(PDOException $e) {
-            // Food bookings table not found — skip bookings, still show blocks
-        }
-    }
-
-    // ---------- BLOCKS (for all types) ----------
-    if (in_array($cal_type, ['house', 'tour', 'food'])) {
-        $stmt = $pdo->prepare("SELECT * FROM blocked_dates WHERE item_type = ? AND item_id = ? ORDER BY block_date ASC");
-        $stmt->execute([$cal_type, $cal_id]);
-        $blocks = $stmt->fetchAll();
-
-        foreach ($blocks as $bd) {
-            $blockTypeLabel = ucwords(str_replace('_', ' ', $bd['block_type']));
-            $end = new DateTime($bd['block_date']);
-            $end->modify('+1 day');
-
-            $calendar_events[] = [
-                'id' => 'blocked_' . $bd['id'],
-                'title' => '🚫 BLOCKED - ' . $blockTypeLabel,
-                'start' => $bd['block_date'],
-                'end' => $end->format('Y-m-d'),
-                'color' => '#64748b',
-                'textColor' => '#ffffff',
-                'extendedProps' => [
-                    'event_type' => 'blocked',
-                    'block_id' => $bd['id'],
-                    'block_type' => $bd['block_type'],
-                    'block_type_label' => $blockTypeLabel,
-                    'reason' => $bd['reason'] ?? '',
-                    'block_date' => $bd['block_date']
-                ]
-            ];
-        }
-    }
+$by_type = [];
+foreach ($pdo->query("SELECT item_type, COUNT(*) c FROM blocked_dates GROUP BY item_type")->fetchAll() as $r) {
+    $by_type[$r['item_type']] = (int)$r['c'];
 }
+
+// Recent restrictions: one row per blocking action (same resource + reason + minute + user)
+$recent_blocks = [];
+try {
+    $recent_blocks = $pdo->query("SELECT bd.item_type, bd.item_id, bd.block_type,
+            MIN(bd.block_date) AS first_date, MAX(bd.block_date) AS last_date, COUNT(*) AS day_count,
+            MAX(bd.reason) AS reason, MAX(bd.created_at) AS created_at,
+            MAX({$bd_name_expr}) AS item_name, MAX(COALESCE(bu.fullname, bu.username)) AS blocked_by_name
+        FROM blocked_dates bd {$bd_joins}
+        GROUP BY bd.item_type, bd.item_id, bd.block_type, bd.blocked_by, DATE_FORMAT(bd.created_at, '%Y-%m-%d %H:%i')
+        ORDER BY MAX(bd.created_at) DESC, MAX(bd.id) DESC
+        LIMIT 5")->fetchAll();
+} catch (PDOException $e) {
+    $recent_blocks = [];
+}
+
 ?>
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -382,7 +560,6 @@ if ($cal_type && $cal_id > 0) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; }
@@ -413,6 +590,7 @@ if ($cal_type && $cal_id > 0) {
         .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
         .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
         .nav-link.active { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
+        .nav-link .nav-badge { margin-left: auto; background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 1px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; }
         .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
 
         .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 99; opacity: 0; }
@@ -453,6 +631,75 @@ if ($cal_type && $cal_id > 0) {
         .stat-number { font-size: 26px; font-weight: 700; color: white; }
         .stat-label { color: rgba(255,255,255,0.9); font-size: 12px; font-weight: 500; margin-top: 2px; }
 
+/* BLOCKED DATE STAT CARD - MATCH ADMIN STYLE */
+
+.blocked-stats .stat-card {
+    background: white !important;
+    min-height: 170px;
+    padding: 22px 20px;
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+    border: 1px solid #e8f0fe;
+    color: #0B2447;
+}
+
+
+.blocked-stats .stat-icon {
+    margin-bottom: 14px;
+    color: white;
+}
+
+
+/* Icon colors */
+
+.blocked-stats .stat-total .stat-icon {
+    background: rgba(11,36,71,0.15);
+    color: #0B2447;
+}
+
+.blocked-stats .stat-house .stat-icon {
+    background: rgba(14,165,233,0.15);
+    color: #0284c7;
+}
+
+.blocked-stats .stat-tour .stat-icon {
+    background: rgba(16,185,129,0.15);
+    color: #10b981;
+}
+
+.blocked-stats .stat-food .stat-icon {
+    background: rgba(245,158,11,0.15);
+    color: #f59e0b;
+}
+
+.blocked-stats .stat-upcoming .stat-icon {
+    background: rgba(139,92,246,0.15);
+    color: #8b5cf6;
+}
+
+
+/* Text */
+
+.blocked-stats .stat-number {
+    color: #0B2447;
+    font-size: 30px;
+    font-weight: 800;
+}
+
+
+.blocked-stats .stat-label {
+    color: #0B2447;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+
+.blocked-stats .stat-description {
+    color: #64748b;
+    font-size: 12px;
+    margin-top: 6px;
+}
+        
         /* ALERTS */
         .alert { padding: 15px 20px; border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; animation: slideDown 0.3s ease; }
         @keyframes slideDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
@@ -519,151 +766,14 @@ if ($cal_type && $cal_id > 0) {
         .tab-btn.active { background: #4DA6D9; color: white; border-color: #4DA6D9; }
         .tab-btn.calendar-tab.active { background: #8b5cf6; border-color: #8b5cf6; }
 
-        /* CALENDAR ITEM SELECTOR */
-        .calendar-item-selector {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 15px;
-            padding: 20px;
-            background: linear-gradient(135deg, #f0f7fb 0%, #e8f4fc 100%);
-            border-radius: 16px;
-            border: 2px dashed #4DA6D9;
-            margin-bottom: 25px;
-        }
-        .calendar-item-selector .selector-group { display: flex; flex-direction: column; gap: 8px; }
-        .calendar-item-selector .selector-label { font-size: 12px; font-weight: 700; text-transform: uppercase; color: #4a6a8c; letter-spacing: 0.5px; }
-        .calendar-item-selector select { padding: 12px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; background: white; font-weight: 500; }
-        .calendar-item-selector select:focus { outline: none; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
-
-        /* CALENDAR */
-        #itemCalendar { min-height: 600px; padding: 10px; background: white; border-radius: 16px; }
-        .fc { font-family: 'Inter', sans-serif !important; }
-
-        .fc-daygrid-day { min-height: 90px !important; background: white; transition: background 0.15s; }
-        .fc-daygrid-day-frame { min-height: 90px !important; }
-        .fc-daygrid-day-top { display: flex !important; flex-direction: row !important; }
-
-        .fc-daygrid-day-number {
-            color: #0B2447 !important;
-            font-weight: 700 !important;
-            font-size: 14px !important;
-            padding: 6px 8px !important;
-            transition: all 0.15s;
-            z-index: 5 !important;
-            position: relative;
-            text-decoration: none !important;
-        }
-        .fc-daygrid-day-number:hover { background: rgba(77, 166, 217, 0.15); border-radius: 6px; }
-
-        .fc-day-today { background: #fff8e1 !important; }
-        .fc-day-today .fc-daygrid-day-number {
-            background: #F4B400 !important;
-            color: #0B2447 !important;
-            border-radius: 6px;
-            font-weight: 800 !important;
-        }
-
-        .fc-day-other { background: #fafafa !important; }
-        .fc-day-other .fc-daygrid-day-number { color: #cbd5e1 !important; }
-
-        .fc-day-sat, .fc-day-sun { background: #fef9f3; }
-        .fc-day-sat .fc-daygrid-day-number,
-        .fc-day-sun .fc-daygrid-day-number { color: #b45309 !important; }
-
-        .fc-daygrid-day-events { margin-top: 28px !important; }
-        .fc-daygrid-day-bottom { padding: 2px 4px !important; }
-
-        .fc-event {
-            cursor: pointer;
-            border-radius: 8px !important;
-            padding: 4px 8px !important;
-            font-size: 11px !important;
-            border: none !important;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
-            font-weight: 600;
-            line-height: 1.3 !important;
-        }
-        .fc-event-title { font-weight: 700 !important; }
-        .fc-daygrid-event-dot { display: none; }
-        .fc-event-time { font-weight: 600; margin-right: 4px; }
-
-        .fc-button-primary { background: #4DA6D9 !important; border: none !important; font-weight: 600 !important; }
-        .fc-button-primary:hover { background: #3a8bbf !important; }
-        .fc-button-active { background: #0B2447 !important; }
-        .fc-toolbar-title { font-size: 20px !important; font-weight: 700 !important; color: #0B2447 !important; }
-
-        /* MULTI-SELECT DATE STYLING */
-        .fc-daygrid-day.selected-date {
-            background: #dbeafe !important;
-            box-shadow: inset 0 0 0 3px #0ea5e9;
-        }
-        .fc-daygrid-day.selected-date .fc-daygrid-day-number {
-            color: #0369a1 !important;
-            font-weight: 800 !important;
-            background: white !important;
-            border-radius: 50% !important;
-            width: 26px !important;
-            height: 26px !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            margin: 4px !important;
-            padding: 0 !important;
-            box-shadow: 0 2px 6px rgba(14, 165, 233, 0.4);
-            border: 2px solid #0ea5e9 !important;
-        }
-
-        .fc-daygrid-day.fc-day-past { background: #f8fafc; cursor: not-allowed !important; }
-        .fc-daygrid-day.fc-day-past .fc-daygrid-day-number { color: #94a3b8 !important; opacity: 0.7; }
-        .fc-daygrid-day.fc-day-past:hover { background: #f1f5f9 !important; }
-
-        .calendar-legend { display: flex; gap: 20px; flex-wrap: wrap; padding: 15px 0; justify-content: center; margin-top: 15px; border-top: 2px solid #e8f0fe; }
-        .calendar-legend .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #475569; font-weight: 500; }
-        .calendar-legend .legend-color { width: 20px; height: 20px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
-        .calendar-legend .legend-color.paid { background: #10b981; }
-        .calendar-legend .legend-color.pending { background: #f59e0b; }
-        .calendar-legend .legend-color.blocked { background: #64748b; }
-
-        .calendar-hint { background: linear-gradient(135deg, #fef3c7, #fffbeb); border-left: 4px solid #f59e0b; border-radius: 10px; padding: 14px 18px; margin-bottom: 20px; font-size: 13px; color: #92400e; display: flex; align-items: flex-start; gap: 12px; line-height: 1.6; }
-        .calendar-hint i { color: #f59e0b; font-size: 18px; flex-shrink: 0; margin-top: 2px; }
-        .calendar-hint strong { color: #78350f; }
-
-        /* FLOATING ACTION BAR */
-        .selection-toolbar {
-            position: fixed;
-            bottom: 24px;
-            left: 50%;
-            transform: translateX(-50%) translateY(120px);
-            background: #0B2447;
-            color: white;
-            padding: 14px 20px;
-            border-radius: 16px;
-            box-shadow: 0 20px 50px rgba(11, 36, 71, 0.5);
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            z-index: 2500;
-            transition: transform 0.3s ease;
-            border: 1px solid rgba(77, 166, 217, 0.3);
-            max-width: 95%;
-            flex-wrap: wrap;
-            justify-content: center;
-        }
-        .selection-toolbar.show { transform: translateX(-50%) translateY(0); }
-        .selection-toolbar .selection-info { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
-        .selection-toolbar .selection-info .count-badge { background: #4DA6D9; color: white; padding: 4px 12px; border-radius: 20px; font-weight: 800; font-size: 14px; min-width: 32px; text-align: center; }
+     
         .selection-toolbar .toolbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-        .selection-toolbar button { padding: 9px 16px; border: none; border-radius: 10px; font-weight: 700; font-size: 13px; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
         .selection-toolbar .btn-clear-selection { background: rgba(255,255,255,0.15); color: white; }
         .selection-toolbar .btn-clear-selection:hover { background: rgba(255,255,255,0.25); }
         .selection-toolbar .btn-block-selected { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.4); }
         .selection-toolbar .btn-block-selected:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(239, 68, 68, 0.6); }
 
-        @media (max-width: 600px) {
-            .selection-toolbar { padding: 12px 14px; gap: 10px; bottom: 16px; }
-            .selection-toolbar .selection-info { font-size: 13px; }
-            .selection-toolbar button { padding: 8px 12px; font-size: 12px; }
-        }
+       
 
         /* MODAL */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); z-index: 3000; align-items: center; justify-content: center; }
@@ -724,6 +834,129 @@ if ($cal_type && $cal_id > 0) {
             .sidebar { width: 85%; max-width: 300px; }
             .stats-grid { grid-template-columns: 1fr; }
         }
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
+
+        /* =====================================================
+           RESERVATION-STYLE WORKFLOW (overview / list / wizard)
+           ===================================================== */
+        .page-title-banner.banner-flex { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
+        .btn-block-availability { display: inline-flex; align-items: center; gap: 10px; padding: 13px 24px; background: white; color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,0.18); transition: all 0.2s; font-family: inherit; }
+        .btn-block-availability i { color: #4DA6D9; }
+        .btn-block-availability:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,0.25); }
+
+        .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #4a6a8c; margin: 0 0 12px; }
+        .blocked-stats { margin-bottom: 22px; }
+        .blocked-stats .stat-card { min-height: 0; }
+
+        .overview-grid { display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 8px; }
+
+        .recent-list { list-style: none; margin: 0; padding: 0; }
+        .recent-item { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-bottom: 1px solid #e8f0fe; }
+        .recent-item:last-child { border-bottom: none; padding-bottom: 0; }
+        .recent-item:first-child { padding-top: 0; }
+        .recent-icon { width: 40px; height: 40px; border-radius: 12px; background: #eef6fc; color: #4DA6D9; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 16px; }
+        .recent-body { flex: 1; min-width: 0; }
+        .recent-body .r-title { font-weight: 700; color: #0B2447; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .recent-body .r-sub { color: #64748b; font-size: 12px; margin-top: 2px; }
+        .recent-meta { text-align: right; font-size: 11px; color: #94a3b8; flex-shrink: 0; }
+
+        .tab-btn.calendar-tab.active { background: #4DA6D9; border-color: #4DA6D9; }
+
+        /* status pills */
+        .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+        .status-pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .status-upcoming { background: #e0f2fe; color: #0369a1; }
+        .status-today { background: #dcfce7; color: #15803d; }
+        .status-expired { background: #f1f5f9; color: #64748b; }
+        .tag-linked { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; padding: 3px 9px; border-radius: 20px; font-size: 10px; font-weight: 700; background: #fef3c7; color: #92400e; border: 1px solid #fbbf24; white-space: nowrap; }
+        .cell-resource { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+        .cell-resource .r-name { font-weight: 700; color: #0B2447; font-size: 14px; }
+        .cell-reason { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+        .cell-reason .r-note { font-size: 12.5px; color: #475569; }
+        .cell-reason .r-meta { font-size: 11px; color: #94a3b8; }
+        .action-locked { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #94a3b8; cursor: help; }
+        .btn-unblock { padding: 7px 14px; background: white; color: #0369a1; border: 2px solid #bae6fd; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s; font-family: inherit; }
+        .btn-unblock:hover { background: #e0f2fe; border-color: #4DA6D9; }
+
+        .pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 18px; margin-top: 8px; border-top: 2px solid #e8f0fe; font-size: 13px; color: #64748b; }
+        .pagination .pages { display: flex; gap: 6px; }
+        .pagination a, .pagination span.cur { padding: 7px 13px; border-radius: 8px; border: 2px solid #e8f0fe; background: white; color: #4a6a8c; font-weight: 600; text-decoration: none; }
+        .pagination a:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .pagination span.cur { background: #4DA6D9; border-color: #4DA6D9; color: white; }
+
+        /* ---------- wizard ---------- */
+        .modal-content.wizard { max-width: 660px; padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+        .wizard-head { padding: 22px 28px 0; }
+        .wizard-head .modal-header { margin-bottom: 18px; }
+        .stepper { display: flex; align-items: center; gap: 0; padding: 0 28px 18px; border-bottom: 2px solid #e8f0fe; }
+        .stepper .st { display: flex; align-items: center; gap: 8px; flex: 1; font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.3px; }
+        .stepper .st:last-child { flex: 0 0 auto; }
+        .stepper .st .dot { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #cbd5e1; background: white; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; color: #94a3b8; }
+        .stepper .st .bar { flex: 1; height: 2px; background: #e2e8f0; margin: 0 8px; }
+        .stepper .st.active { color: #0B2447; }
+        .stepper .st.active .dot { border-color: #4DA6D9; background: #4DA6D9; color: white; }
+        .stepper .st.done .dot { border-color: #4DA6D9; background: #e0f2fe; color: #0369a1; }
+        .stepper .st.done .bar { background: #4DA6D9; }
+        .stepper .st .lbl { white-space: nowrap; }
+        .wizard-body { padding: 24px 28px; overflow-y: auto; min-height: 300px; max-height: 58vh; }
+        .wizard-foot { display: flex; justify-content: space-between; gap: 10px; padding: 16px 28px; background: #f8fafc; border-top: 2px solid #e8f0fe; }
+        .wizard-foot .spacer { flex: 1; }
+        .btn-blue { padding: 11px 22px; background: #4DA6D9; color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s; font-family: inherit; }
+        .btn-blue:hover:not(:disabled) { background: #3a8bbf; transform: translateY(-1px); }
+        .btn-blue:disabled { background: #cbd5e1; cursor: not-allowed; }
+        .btn-navy { background: #0B2447; }
+        .btn-navy:hover:not(:disabled) { background: #0B3D91; }
+        .btn-ghost { padding: 11px 20px; background: white; color: #475569; border: 2px solid #e2e8f0; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; font-family: inherit; }
+        .btn-ghost:hover { background: #f1f5f9; }
+
+        .step-title { font-size: 17px; font-weight: 700; color: #0B2447; margin-bottom: 4px; }
+        .step-sub { font-size: 13px; color: #64748b; margin-bottom: 18px; }
+        .choice-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+        .choice-card { background: white; border: 2px solid #e2e8f0; border-radius: 14px; padding: 20px 12px; text-align: center; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+        .choice-card i { font-size: 26px; color: #4DA6D9; display: block; margin-bottom: 10px; }
+        .choice-card .c-name { font-weight: 700; color: #0B2447; font-size: 15px; }
+        .choice-card .c-count { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+        .choice-card:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .choice-card.selected { border-color: #4DA6D9; background: #e0f2fe; box-shadow: 0 0 0 3px rgba(77,166,217,0.15); }
+
+        .resource-search { margin-bottom: 12px; }
+        .resource-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; }
+        .resource-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 2px solid #e2e8f0; border-radius: 12px; background: white; cursor: pointer; text-align: left; font-family: inherit; font-size: 14px; font-weight: 600; color: #0B2447; transition: all 0.2s; }
+        .resource-row i { color: #4DA6D9; width: 20px; text-align: center; }
+        .resource-row:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .resource-row.selected { border-color: #4DA6D9; background: #e0f2fe; }
+        .resource-row .check { margin-left: auto; color: #4DA6D9; opacity: 0; }
+        .resource-row.selected .check { opacity: 1; }
+
+        .mode-toggle { display: inline-flex; background: #f1f5f9; border-radius: 10px; padding: 4px; margin-bottom: 18px; gap: 4px; }
+        .mode-toggle button { padding: 8px 18px; border: none; background: transparent; border-radius: 8px; font-weight: 600; font-size: 13px; color: #64748b; cursor: pointer; font-family: inherit; }
+        .mode-toggle button.active { background: white; color: #0369a1; box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
+        .date-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 14px; }
+        .field-help { font-size: 12px; color: #64748b; margin-top: 6px; }
+        .field-error { font-size: 12.5px; color: #b91c1c; background: #fee2e2; border-left: 4px solid #ef4444; border-radius: 8px; padding: 9px 12px; margin-top: 12px; }
+        .days-pill { display: inline-flex; align-items: center; gap: 8px; background: #e0f2fe; color: #0369a1; font-weight: 700; font-size: 13px; padding: 7px 14px; border-radius: 20px; }
+
+        .summary-box { background: #f0f7fb; border-left: 4px solid #4DA6D9; border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; }
+        .summary-box .info-row { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; font-size: 13px; }
+        .summary-box .info-label { color: #64748b; font-weight: 500; flex-shrink: 0; }
+        .summary-box .info-value { color: #0B2447; font-weight: 700; text-align: right; word-break: break-word; }
+        .notice { border-radius: 10px; padding: 12px 15px; font-size: 13px; margin-bottom: 12px; border-left: 4px solid; }
+        .notice.ok { background: #e0f2fe; color: #075985; border-color: #4DA6D9; }
+        .notice.warn { background: #fffbeb; color: #92400e; border-color: #f59e0b; }
+        .notice.bad { background: #fee2e2; color: #991b1b; border-color: #ef4444; }
+        .notice .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+        .notice .chip { background: rgba(255,255,255,0.75); border-radius: 6px; padding: 3px 8px; font-size: 11.5px; font-weight: 600; }
+        .loading-line { display: flex; align-items: center; gap: 10px; color: #64748b; font-size: 13px; padding: 20px 0; }
+
+        .modal-content.small { max-width: 480px; }
+
+        @media (max-width: 600px) {
+            .stepper .st .lbl { display: none; }
+            .choice-grid { grid-template-columns: 1fr; }
+            .wizard-head, .wizard-body, .wizard-foot, .stepper { padding-left: 18px; padding-right: 18px; }
+            .btn-block-availability { width: 100%; justify-content: center; }
+            .recent-meta { display: none; }
+        }
     </style>
 </head>
 <body>
@@ -770,13 +1003,17 @@ if ($cal_type && $cal_id > 0) {
             <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
             <li class="nav-item"><a href="food-dashboard.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food Management</span></a></li>
-            <li class="nav-item"><a href="booking-management.php" class="nav-link"><i class="fas fa-calendar-check"></i><span>Booking Management</span></a></li>
-            <li class="nav-item"><a href="blocked-dates.php" class="nav-link active"><i class="fas fa-ban"></i><span>Blocked Dates</span></a></li>
-            <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span></a></li>
+            <li class="nav-item"><a href="booking-management.php" class="nav-link"><i class="fas fa-calendar-check"></i><span>Booking Management</span><?php if($sidebar_pending_bookings > 0): ?><span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span><?php endif; ?></a></li>
+<li class="nav-item">
+    <a href="blocked-dates.php" class="nav-link active">
+        <i class="fas fa-ban"></i>
+        <span>Blocked Dates</span>
+    </a>
+</li>            <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span><?php if($sidebar_pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span><?php endif; ?></a></li>
             <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
-            <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span></a></li>
+            <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span><?php if($sidebar_failed_logs > 0): ?><span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span><?php endif; ?></a></li>
             <?php endif; ?>
             <div class="nav-divider"></div>
             <li class="nav-item"><a href="admin-profile.php" class="nav-link"><i class="fas fa-user-circle"></i><span>My Profile</span></a></li>
@@ -790,7 +1027,7 @@ if ($cal_type && $cal_id > 0) {
         <div class="top-bar">
             <div class="page-title">
                 <h1><i class="fas fa-ban"></i> Blocked Dates Management</h1>
-                <p>Block or unblock dates for houses, tours, and food items</p>
+                <p>Restrict availability for houses, tours, and food items</p>
             </div>
             <div class="user-profile">
                 <div style="text-align: right;">
@@ -804,164 +1041,142 @@ if ($cal_type && $cal_id > 0) {
             </div>
         </div>
 
-        <?php if(isset($success)): ?>
-        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <?php echo $success; ?></div>
+        <?php if($success): ?>
+        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span><?php echo $success; ?></span></div>
         <?php endif; ?>
-        <?php if(isset($error)): ?>
-        <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <?php echo $error; ?></div>
+        <?php if($error): ?>
+        <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <span><?php echo $error; ?></span></div>
         <?php endif; ?>
 
-        <div class="page-title-banner">
-            <h1><i class="fas fa-ban"></i> Blocked Dates</h1>
-            <div class="underline"></div>
-            <p style="margin-top: 8px;">Manage blocked dates so online guests can't book these dates</p>
+        <div class="page-title-banner banner-flex">
+            <div>
+                <h1><i class="fas fa-ban"></i> Blocked Dates</h1>
+                <div class="underline"></div>
+                <p style="margin-top: 8px;">Dates listed here can't be booked online. Walk-ins, maintenance, owner use and special events all start here.</p>
+            </div>
+            <button type="button" class="btn-block-availability" onclick="openBlockWizard()">
+                <i class="fas fa-plus"></i> Block Availability
+            </button>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card">
+        <!-- ===================== 1. OVERVIEW ===================== -->
+        <div class="section-title">Overview</div>
+        <div class="stats-grid blocked-stats">
+            <div class="stat-card stat-total">
                 <div class="stat-icon"><i class="fas fa-calendar-times"></i></div>
                 <div class="stat-number"><?php echo $total_blocks; ?></div>
-                <div class="stat-label">Total Blocked</div>
+                <div class="stat-label">Total Blocked Dates</div>
+                <div class="stat-description">
+                    <?php
+                    $bits = [];
+                    foreach (bd_resources() as $t => $cfg) { $bits[] = $cfg['plural'] . ' ' . ($by_type[$t] ?? 0); }
+                    echo htmlspecialchars(implode(' · ', $bits));
+                    ?>
+                </div>
             </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #0ea5e9, #0284c7);">
-                <div class="stat-icon"><i class="fas fa-home"></i></div>
-                <div class="stat-number"><?php echo $total_house_blocks; ?></div>
-                <div class="stat-label">House Blocks</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #10b981, #059669);">
-                <div class="stat-icon"><i class="fas fa-umbrella-beach"></i></div>
-                <div class="stat-number"><?php echo $total_tour_blocks; ?></div>
-                <div class="stat-label">Tour Blocks</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #f59e0b, #d97706);">
-                <div class="stat-icon"><i class="fas fa-utensils"></i></div>
-                <div class="stat-number"><?php echo $total_food_blocks; ?></div>
-                <div class="stat-label">Food Blocks</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #8b5cf6, #7c3aed);">
+            <div class="stat-card stat-upcoming">
                 <div class="stat-icon"><i class="fas fa-clock"></i></div>
-                <div class="stat-number"><?php echo $today_blocks; ?></div>
-                <div class="stat-label">Upcoming</div>
+                <div class="stat-number"><?php echo $upcoming_blocks; ?></div>
+                <div class="stat-label">Upcoming Blocked Dates</div>
+                <div class="stat-description">Today and later</div>
+            </div>
+            <div class="stat-card stat-house">
+                <div class="stat-icon"><i class="fas fa-calendar-week"></i></div>
+                <div class="stat-number"><?php echo $next7_blocks; ?></div>
+                <div class="stat-label">Next 7 Days</div>
+                <div class="stat-description">Restrictions starting soon</div>
+            </div>
+            <div class="stat-card stat-tour">
+                <div class="stat-icon"><i class="fas fa-layer-group"></i></div>
+                <div class="stat-number"><?php echo $resources_affected; ?></div>
+                <div class="stat-label">Resources Restricted</div>
+                <div class="stat-description">With at least one upcoming block</div>
             </div>
         </div>
-
-        <!-- TAB SWITCHER -->
-        <div class="tab-switcher">
-            <a href="?tab=calendar" class="tab-btn calendar-tab <?php echo (!isset($_GET['tab']) || $_GET['tab'] == 'calendar') ? 'active' : ''; ?>">
-                <i class="fas fa-calendar-alt"></i> 📅 Calendar View
-            </a>
-            <a href="?tab=list" class="tab-btn <?php echo (isset($_GET['tab']) && $_GET['tab'] == 'list') ? 'active' : ''; ?>">
-                <i class="fas fa-list"></i> All Blocked Dates
-            </a>
-        </div>
-
-        <?php 
-        $current_tab = $_GET['tab'] ?? 'calendar';
-        
-        // ============================================================
-        // TAB 0: CALENDAR VIEW (DEFAULT)
-        // ============================================================
-        if ($current_tab === 'calendar'): 
-        ?>
 
         <div class="card">
             <div class="card-header">
-                <h2><i class="fas fa-calendar-alt"></i> Calendar View — Select a House, Tour, or Food</h2>
+                <h2><i class="fas fa-history"></i> Recent Restrictions</h2>
             </div>
-
-            <div class="calendar-hint">
-                <i class="fas fa-lightbulb"></i>
-                <div>
-                    <strong>How to use:</strong><br>
-                    1. Select an <strong>Item Type</strong> (House, Tour, or Food) below<br>
-                    2. Select a <strong>specific item</strong><br>
-                    3. The <strong>calendar</strong> will show existing bookings and blocked dates<br>
-                    4. <strong>Click multiple dates</strong> to select them, then click <strong>"Block Selected Dates"</strong><br>
-                    5. Click a <strong>gray blocked event</strong> to unblock it
-                </div>
-            </div>
-
-            <form method="GET" id="calendarFilterForm">
-                <input type="hidden" name="tab" value="calendar">
-                <div class="calendar-item-selector">
-                    <div class="selector-group">
-                        <label class="selector-label"><i class="fas fa-tag"></i> Item Type</label>
-                        <select name="cal_type" id="cal_type_select" onchange="updateCalendarItems()" required>
-                            <option value="">-- Select Type --</option>
-                            <option value="house" <?php echo $cal_type === 'house' ? 'selected' : ''; ?>>🏠 House</option>
-                            <option value="tour" <?php echo $cal_type === 'tour' ? 'selected' : ''; ?>>🚤 Tour</option>
-                            <option value="food" <?php echo $cal_type === 'food' ? 'selected' : ''; ?>>🍽️ Food</option>
-                        </select>
+            <?php if (!empty($recent_blocks)): ?>
+            <ul class="recent-list">
+                <?php foreach ($recent_blocks as $rb):
+                    $rcfg   = bd_resources()[$rb['item_type']] ?? null;
+                    $rlabel = bd_reasons()[$rb['block_type']]['label'] ?? ucwords(str_replace('_', ' ', (string)$rb['block_type']));
+                    $same   = ($rb['first_date'] === $rb['last_date']);
+                    $rlinked = bd_is_booking_linked(['reason' => $rb['reason']]);
+                ?>
+                <li class="recent-item">
+                    <div class="recent-icon"><i class="fas fa-<?php echo $rcfg ? $rcfg['icon'] : 'ban'; ?>"></i></div>
+                    <div class="recent-body">
+                        <div class="r-title"><?php echo htmlspecialchars($rb['item_name'] ?? 'Unknown resource'); ?></div>
+                        <div class="r-sub">
+                            <?php echo bd_fmt_date($rb['first_date']); ?><?php if(!$same): ?> – <?php echo bd_fmt_date($rb['last_date']); ?><?php endif; ?>
+                            · <?php echo (int)$rb['day_count']; ?> day<?php echo $rb['day_count'] > 1 ? 's' : ''; ?>
+                            · <?php echo $rlinked ? 'Booking hold' : htmlspecialchars($rlabel); ?>
+                        </div>
                     </div>
-                    <div class="selector-group">
-                        <label class="selector-label"><i class="fas fa-cube"></i> Select Item</label>
-                        <select name="cal_id" id="cal_id_select" onchange="document.getElementById('calendarFilterForm').submit()" required>
-                            <option value="">-- Select Item --</option>
-                        </select>
+                    <div class="recent-meta">
+                        <?php echo htmlspecialchars($rb['blocked_by_name'] ?? 'System'); ?><br>
+                        <?php echo date('M d, h:i A', strtotime($rb['created_at'])); ?>
                     </div>
-                </div>
-            </form>
-
-            <?php if ($cal_type && $cal_id > 0 && !empty($cal_item_name)): ?>
-                <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #f0f7fb; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #4DA6D9;">
-                    <i class="fas fa-<?php echo $cal_type === 'house' ? 'home' : ($cal_type === 'tour' ? 'umbrella-beach' : 'utensils'); ?>" style="color: #4DA6D9; font-size: 22px;"></i>
-                    <div>
-                        <div style="font-size: 11px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Selected Item</div>
-                        <div style="font-size: 17px; font-weight: 700; color: #0B2447;"><?php echo htmlspecialchars($cal_item_name); ?></div>
-                    </div>
-                </div>
-
-                <div id="itemCalendar"></div>
-
-                <div class="calendar-legend">
-                    <div class="legend-item"><div class="legend-color paid"></div> Paid Booking</div>
-                    <div class="legend-item"><div class="legend-color pending"></div> Pending Payment</div>
-                    <div class="legend-item"><div class="legend-color blocked"></div> Blocked Date</div>
-                    <div class="legend-item" style="color: #0ea5e9;">
-                        <div class="legend-color" style="background: #dbeafe; border: 2px solid #0ea5e9;"></div>
-                        Selected (to block)
-                    </div>
-                </div>
-
-                <div style="margin-top: 20px; padding: 14px 18px; background: #fffbeb; border-left: 4px solid #f59e0b; border-radius: 10px; font-size: 13px; color: #92400e;">
-                    <i class="fas fa-mouse-pointer"></i> <strong>Tip:</strong> Click multiple dates to <strong>select</strong> them (turns blue). Then click <strong>"Block Selected Dates"</strong> to block them all at once. Click a <strong>gray blocked event</strong> to unblock it.
-                </div>
+                </li>
+                <?php endforeach; ?>
+            </ul>
             <?php else: ?>
-                <div class="empty-state">
-                    <i class="fas fa-calendar-alt"></i>
-                    <h3>Select an Item to View the Calendar</h3>
-                    <p>Choose an <strong>Item Type</strong> and a <strong>specific item</strong> above to view its calendar.</p>
-                </div>
+            <div class="empty-state" style="padding: 30px 20px;">
+                <i class="fas fa-calendar-check" style="font-size: 40px; margin-bottom: 12px;"></i>
+                <h3>No restrictions yet</h3>
+                <p>Use “Block Availability” to restrict a house, tour, or food item.</p>
+            </div>
             <?php endif; ?>
         </div>
 
-        <?php 
-        // ============================================================
-        // TAB 2: ALL BLOCKED DATES
-        // ============================================================
-        else: 
-        ?>
+        <!-- ===================== TABS ===================== -->
+        <div class="tab-switcher">
+            <a href="?tab=list" class="tab-btn <?php echo $current_tab === 'list' ? 'active' : ''; ?>">
+                <i class="fas fa-list"></i> Blocked Dates List
+            </a>
+           
+        </div>
 
+        <?php if ($current_tab === 'list'): ?>
+        <!-- ===================== 2. BLOCKED DATES LIST ===================== -->
         <div class="card">
             <div class="card-header">
-                <h2><i class="fas fa-list"></i> All Blocked Dates (<?php echo count($blocked_dates); ?>)</h2>
+                <h2><i class="fas fa-list"></i> Blocked Dates (<?php echo $list_total; ?>)</h2>
                 <div class="filter-bar">
                     <form method="GET" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
                         <input type="hidden" name="tab" value="list">
-                        <select name="filter_type" onchange="this.form.submit()">
-                            <option value="all" <?php echo $filter_type == 'all' ? 'selected' : ''; ?>>All Types</option>
-                            <option value="house" <?php echo $filter_type == 'house' ? 'selected' : ''; ?>>🏠 Houses Only</option>
-                            <option value="tour" <?php echo $filter_type == 'tour' ? 'selected' : ''; ?>>🚤 Tours Only</option>
-                            <option value="food" <?php echo $filter_type == 'food' ? 'selected' : ''; ?>>🍽️ Foods Only</option>
+<select id="filterType" name="filter_type">                            <option value="all">All Resources</option>
+                            <?php foreach (bd_resources() as $t => $cfg): ?>
+                            <option value="<?php echo $t; ?>" <?php echo $filter_type === $t ? 'selected' : ''; ?>><?php echo htmlspecialchars($cfg['plural']); ?> only</option>
+                            <?php endforeach; ?>
                         </select>
-                        <input type="month" name="filter_month" value="<?php echo htmlspecialchars($filter_month); ?>" onchange="this.form.submit()">
-                        <input type="text" name="search" value="<?php echo htmlspecialchars($search); ?>" placeholder="Search reason..." style="min-width: 150px;">
-                        <button type="submit" class="btn-secondary" style="padding: 8px 14px; font-size: 13px;">
-                            <i class="fas fa-search"></i> Filter
-                        </button>
-                        <?php if($filter_type != 'all' || $filter_month || $search): ?>
+                      <select id="filterStatus" name="filter_status">
+                            <option value="current" <?php echo $filter_status === 'current' ? 'selected' : ''; ?>>Active &amp; Upcoming</option>
+                            <option value="past" <?php echo $filter_status === 'past' ? 'selected' : ''; ?>>Expired</option>
+                            <option value="all" <?php echo $filter_status === 'all' ? 'selected' : ''; ?>>All dates</option>
+                        </select>
+<input 
+    id="filterMonth"
+    type="month"
+    name="filter_month"
+    value="<?php echo htmlspecialchars($filter_month); ?>"
+>                       <input 
+    id="blockSearch"
+    type="text"
+    name="search"
+    value="<?php echo htmlspecialchars($search); ?>"
+    placeholder="Search resource, reason, or date..."
+    style="min-width: 220px;"
+>
+                        <span style="font-size:12px;color:#94a3b8;">
+    Live search
+</span>
+                        <?php if($filter_type !== 'all' || $filter_status !== 'current' || $filter_month || $search !== ''): ?>
                             <a href="?tab=list" class="btn-secondary" style="padding: 8px 14px; font-size: 13px; text-decoration: none;">
-                                <i class="fas fa-times"></i> Clear
+                               <i class="fas fa-times"></i> Reset Filters
                             </a>
                         <?php endif; ?>
                     </form>
@@ -973,451 +1188,592 @@ if ($cal_type && $cal_id > 0) {
                 <table>
                     <thead>
                         <tr>
+                            <th>Resource</th>
                             <th>Date</th>
-                            <th>Type</th>
-                            <th>Item</th>
-                            <th>Block Type</th>
                             <th>Reason</th>
-                            <th>Blocked On</th>
+                            <th>Status</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach($blocked_dates as $bd): ?>
+                        <?php foreach($blocked_dates as $bd):
+                            $cfg     = bd_resources()[$bd['item_type']] ?? ['label' => ucfirst($bd['item_type']), 'icon' => 'ban'];
+                            $rlabel  = bd_reasons()[$bd['block_type']]['label'] ?? ucwords(str_replace('_', ' ', (string)$bd['block_type']));
+                            $linked  = bd_is_booking_linked($bd);
+                            $can     = bd_can_unblock($bd, $is_admin);
+                            if ($bd['block_date'] < $today)        { $st_cls = 'status-expired';  $st_txt = 'Expired'; }
+                            elseif ($bd['block_date'] === $today)  { $st_cls = 'status-today';    $st_txt = 'Active Today'; }
+                            else                                   { $st_cls = 'status-upcoming'; $st_txt = 'Upcoming'; }
+                            $note = (string)($bd['reason'] ?? '');
+                        ?>
                         <tr>
-                            <td><strong style="color: #0B2447;"><?php echo date('M d, Y (D)', strtotime($bd['block_date'])); ?></strong></td>
                             <td>
-                                <?php if($bd['item_type'] === 'house'): ?>
-                                    <span class="badge badge-house"><i class="fas fa-home"></i> House</span>
-                                <?php elseif($bd['item_type'] === 'tour'): ?>
-                                    <span class="badge badge-tour"><i class="fas fa-umbrella-beach"></i> Tour</span>
-                                <?php else: ?>
-                                    <span class="badge badge-food"><i class="fas fa-utensils"></i> Food</span>
-                                <?php endif; ?>
+                                <div class="cell-resource">
+                                    <span class="r-name"><?php echo htmlspecialchars($bd['item_name'] ?? 'Unknown'); ?></span>
+                                    <span class="badge badge-<?php echo htmlspecialchars($bd['item_type']); ?>"><i class="fas fa-<?php echo $cfg['icon']; ?>"></i> <?php echo htmlspecialchars($cfg['label']); ?></span>
+                                </div>
                             </td>
-                            <td><strong><?php echo htmlspecialchars($bd['item_name'] ?? 'Unknown'); ?></strong></td>
-                            <td><span class="badge badge-<?php echo $bd['block_type']; ?>"><?php echo ucwords(str_replace('_', ' ', $bd['block_type'])); ?></span></td>
-                            <td><?php echo $bd['reason'] ? htmlspecialchars($bd['reason']) : '<em style="color:#94a3b8;">No reason</em>'; ?></td>
-                            <td style="font-size: 12px; color: #94a3b8;"><?php echo date('M d, Y h:i A', strtotime($bd['created_at'])); ?></td>
+                            <td><strong style="color: #0B2447; white-space: nowrap;"><?php echo date('M d, Y', strtotime($bd['block_date'])); ?></strong><br><span style="font-size: 11px; color: #94a3b8;"><?php echo date('l', strtotime($bd['block_date'])); ?></span></td>
                             <td>
-                                <form method="POST" style="display: inline;" onsubmit="return confirm('Unblock this date?');">
-                                    <input type="hidden" name="block_id" value="<?php echo $bd['id']; ?>">
-                                    <button type="submit" name="unblock_date_action" class="btn-success-sm">
-                                        <i class="fas fa-unlock"></i> Unblock
-                                    </button>
-                                </form>
+                                <div class="cell-reason">
+                                    <span class="badge badge-<?php echo htmlspecialchars($bd['block_type']); ?>"><?php echo htmlspecialchars($rlabel); ?></span>
+                                    <?php if ($note !== ''): ?><span class="r-note"><?php echo htmlspecialchars($note); ?></span><?php endif; ?>
+                                    <span class="r-meta">by <?php echo htmlspecialchars($bd['blocked_by_name'] ?? 'System'); ?> · <?php echo date('M d, h:i A', strtotime($bd['created_at'])); ?></span>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="status-pill <?php echo $st_cls; ?>"><?php echo $st_txt; ?></span>
+                                <?php if ($linked): ?><span class="tag-linked"><i class="fas fa-link"></i> Booking</span><?php endif; ?>
+                            </td>
+                            <td>
+                                <?php if ($can): ?>
+                                <button type="button" class="btn-unblock"
+                                    data-id="<?php echo (int)$bd['id']; ?>"
+                                    data-resource="<?php echo htmlspecialchars($bd['item_name'] ?? 'Unknown'); ?>"
+                                    data-type="<?php echo htmlspecialchars($cfg['label']); ?>"
+                                    data-date="<?php echo htmlspecialchars(bd_fmt_date($bd['block_date'])); ?>"
+                                    data-reason="<?php echo htmlspecialchars($rlabel . ($note !== '' ? ' — ' . $note : '')); ?>"
+                                    data-linked="<?php echo $linked ? '1' : '0'; ?>"
+                                    onclick="openUnblockFromButton(this)">
+                                    <i class="fas fa-unlock"></i> Unblock
+                                </button>
+                                <?php else: ?>
+                                <span class="action-locked" title="<?php echo htmlspecialchars(bd_unblock_denied_reason($bd)); ?>"><i class="fas fa-lock"></i> <?php echo $linked ? 'Managed by booking' : 'Admin only'; ?></span>
+                                <?php endif; ?>
                             </td>
                         </tr>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
+
+            <?php if ($total_pages > 1):
+                $pq = $_GET; unset($pq['page']);
+            ?>
+            <div class="pagination">
+                <div>Showing <?php echo $offset + 1; ?>–<?php echo min($offset + $per_page, $list_total); ?> of <?php echo $list_total; ?></div>
+                <div class="pages">
+                    <?php if ($page > 1): ?><a href="?<?php echo htmlspecialchars(http_build_query(array_merge($pq, ['tab' => 'list', 'page' => $page - 1]))); ?>"><i class="fas fa-chevron-left"></i></a><?php endif; ?>
+                    <span class="cur"><?php echo $page; ?> / <?php echo $total_pages; ?></span>
+                    <?php if ($page < $total_pages): ?><a href="?<?php echo htmlspecialchars(http_build_query(array_merge($pq, ['tab' => 'list', 'page' => $page + 1]))); ?>"><i class="fas fa-chevron-right"></i></a><?php endif; ?>
+                </div>
+            </div>
+            <?php endif; ?>
+
             <?php else: ?>
                 <div class="empty-state">
                     <i class="fas fa-calendar-check"></i>
                     <h3>No Blocked Dates Found</h3>
-                    <p>All dates are available for online booking.</p>
+                    <p>Nothing matches these filters — everything is open for online booking.</p>
+                    <button type="button" class="btn-blue" style="margin-top: 16px;" onclick="openBlockWizard()"><i class="fas fa-plus"></i> Block Availability</button>
                 </div>
-            <?php endif; ?>
-        </div>
+                        <?php endif; ?>
 
         <?php endif; ?>
 
-    </div>
-</div>
-
-<!-- FLOATING SELECTION TOOLBAR -->
-<div class="selection-toolbar" id="selectionToolbar">
-    <div class="selection-info">
-        <i class="fas fa-check-square" style="color: #4DA6D9;"></i>
-        <span>Selected: <span class="count-badge" id="selectedCount">0</span> date(s)</span>
-    </div>
-    <div class="toolbar-actions">
-        <button type="button" class="btn-clear-selection" onclick="clearDateSelection()">
-            <i class="fas fa-times"></i> Clear
-        </button>
-        <button type="button" class="btn-block-selected" onclick="openMultiBlockModal()">
-            <i class="fas fa-ban"></i> Block Selected Dates
-        </button>
-    </div>
-</div>
-
-<!-- MULTI-BLOCK CONFIRMATION MODAL -->
-<div class="modal" id="multiBlockModal">
-    <div class="modal-content" style="max-width: 560px;">
-        <div class="modal-header" style="border-bottom: 2px solid #fee2e2;">
-            <h3 style="color: #991b1b;">
-                <i class="fas fa-exclamation-triangle" style="color: #ef4444;"></i>
-                Confirm Block — Multiple Dates
-            </h3>
-            <button class="close" onclick="closeMultiBlockModal()">&times;</button>
         </div>
 
-        <form method="POST" id="multiBlockForm">
-            <input type="hidden" name="multi_block_action" value="1">
-            <input type="hidden" name="multi_item_type" id="multi_item_type">
-            <input type="hidden" name="multi_item_id" id="multi_item_id">
-            <input type="hidden" name="multi_dates_json" id="multi_dates_json">
+      
 
-            <div class="modal-info-box" style="border-left-color: #ef4444;">
-                <div class="info-row">
-                    <span class="info-label">Item Type:</span>
-                    <span class="info-value" id="multi_item_type_display">—</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Item Name:</span>
-                    <span class="info-value" id="multi_item_name_display">—</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Total Dates:</span>
-                    <span class="info-value" id="multi_total_count_display">—</span>
-                </div>
-            </div>
+    </div>
+</div>
 
-            <div style="margin-bottom: 16px;">
-                <label class="form-label">
-                    <i class="fas fa-calendar-check" style="color: #64748b;"></i>
-                    Selected Dates
-                    <span style="font-weight: 400; color: #94a3b8;">(click × to remove)</span>
-                </label>
-                <div id="multi_dates_preview" style="
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 6px;
-                    max-height: 140px;
-                    overflow-y: auto;
-                    padding: 10px;
-                    background: #f8fafc;
-                    border: 2px solid #e2e8f0;
-                    border-radius: 10px;
-                "></div>
-            </div>
 
-            <div style="margin-bottom: 15px;">
-                <label class="form-label">
-                    <i class="fas fa-list" style="color: #64748b;"></i> Block Type *
-                </label>
-                <div class="block-type-grid">
-                    <label class="block-type-option">
-                        <input type="radio" name="multi_block_type" value="walk_in" checked>
-                        <span class="block-type-option-label"><i class="fas fa-walking"></i> Walk-in</span>
-                    </label>
-                    <label class="block-type-option">
-                        <input type="radio" name="multi_block_type" value="maintenance">
-                        <span class="block-type-option-label"><i class="fas fa-tools"></i> Maintenance</span>
-                    </label>
-                    <label class="block-type-option">
-                        <input type="radio" name="multi_block_type" value="special_occasion">
-                        <span class="block-type-option-label"><i class="fas fa-gift"></i> Special Event</span>
-                    </label>
-                    <label class="block-type-option">
-                        <input type="radio" name="multi_block_type" value="owner_use">
-                        <span class="block-type-option-label"><i class="fas fa-crown"></i> Owner Use</span>
-                    </label>
-                    <label class="block-type-option">
-                        <input type="radio" name="multi_block_type" value="other">
-                        <span class="block-type-option-label"><i class="fas fa-ellipsis-h"></i> Other</span>
-                    </label>
-                </div>
-            </div>
 
-            <div style="margin-bottom: 15px;">
-                <label class="form-label">
-                    <i class="fas fa-comment" style="color: #64748b;"></i>
-                    Reason (Optional — applied to all dates)
-                </label>
-                <input type="text" name="multi_reason" class="form-control"
-                       placeholder="e.g., Walk-in group booking at counter"
-                       maxlength="255">
+<!-- ===================== BLOCK AVAILABILITY WIZARD ===================== -->
+<div class="modal" id="blockModal">
+    <div class="modal-content wizard">
+        <div class="wizard-head">
+            <div class="modal-header">
+                <h3><i class="fas fa-ban"></i> Block Availability</h3>
+                <button type="button" class="close" onclick="closeBlockWizard()" aria-label="Close">&times;</button>
             </div>
+        </div>
+        <div class="stepper" id="wizStepper"></div>
+        <div class="wizard-body" id="wizBody"></div>
+        <div class="wizard-foot">
+            <button type="button" class="btn-ghost" id="wizBack"><i class="fas fa-arrow-left"></i> Back</button>
+            <span class="spacer"></span>
+            <button type="button" class="btn-blue" id="wizNext">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </div>
+</div>
 
-            <div style="background: #fee2e2; padding: 12px 15px; border-radius: 10px;
-                        text-align: left; font-size: 12.5px; color: #991b1b;
-                        margin-bottom: 15px; border-left: 4px solid #ef4444;">
-                <strong>⚠️ Please review before confirming:</strong><br>
-                • All selected dates will be blocked and unavailable for online booking.<br>
-                • Existing bookings on any of these dates will prevent blocking.
+<!-- ===================== UNBLOCK CONFIRMATION ===================== -->
+<div class="modal" id="unblockModal">
+    <div class="modal-content small">
+        <div class="modal-header">
+            <h3><i class="fas fa-unlock"></i> Unblock Date</h3>
+            <button type="button" class="close" onclick="closeUnblock()" aria-label="Close">&times;</button>
+        </div>
+        <form method="POST" id="unblockForm">
+            <input type="hidden" name="bd_action" value="unblock">
+            <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($bd_csrf); ?>">
+            <input type="hidden" name="block_id" id="unblock_block_id">
+            <input type="hidden" name="return_qs" value="<?php echo htmlspecialchars($_SERVER['QUERY_STRING'] ?? ''); ?>">
+
+            <div class="summary-box">
+                <div class="info-row"><span class="info-label">Resource</span><span class="info-value" id="ub_resource">—</span></div>
+                <div class="info-row"><span class="info-label">Date</span><span class="info-value" id="ub_date">—</span></div>
+                <div class="info-row"><span class="info-label">Reason</span><span class="info-value" id="ub_reason">—</span></div>
             </div>
+            <div class="notice warn" id="ub_warn"><i class="fas fa-exclamation-triangle"></i> This date will become available for online booking again.</div>
+            <div class="notice bad" id="ub_denied" style="display:none;"></div>
 
             <div style="display: flex; gap: 10px;">
-                <button type="button" class="btn-secondary"
-                        style="flex: 1; justify-content: center;"
-                        onclick="closeMultiBlockModal()">
-                    <i class="fas fa-times"></i> Cancel
-                </button>
-                <button type="submit" class="btn-primary"
-                        style="flex: 1; justify-content: center;
-                               background: linear-gradient(135deg, #ef4444, #dc2626);
-                               color: white;">
-                    <i class="fas fa-ban"></i> Yes, Block Them
-                </button>
+                <button type="button" class="btn-ghost" style="flex: 1; justify-content: center;" onclick="closeUnblock()">Cancel</button>
+                <button type="submit" class="btn-blue btn-navy" id="ub_confirm" style="flex: 1; justify-content: center;"><i class="fas fa-unlock"></i> Unblock</button>
             </div>
         </form>
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js"></script>
 <script>
 // ============================================================
-// DATA FROM PHP
+// DATA FROM PHP (resources are loaded from the database)
 // ============================================================
-var housesData = <?php echo json_encode($houses); ?>;
-var toursData  = <?php echo json_encode($tours); ?>;
-var foodsData  = <?php echo json_encode($foods); ?>;
-var calendarEvents = <?php echo json_encode($calendar_events); ?>;
-var calType = <?php echo json_encode($cal_type); ?>;
-var calId = <?php echo json_encode($cal_id); ?>;
-var calItemName = <?php echo json_encode($cal_item_name); ?>;
-
-var selectedDates = new Set();
-
-// ============================================================
-// ITEM SELECT DROPDOWNS
-// ============================================================
-function updateCalendarItems() {
-    var type = document.getElementById('cal_type_select').value;
-    var selectEl = document.getElementById('cal_id_select');
-    selectEl.innerHTML = '<option value="">-- Select Item --</option>';
-    var list = [];
-    var labelKey = '';
-
-    if (type === 'house') { list = housesData; labelKey = 'house_name'; }
-    else if (type === 'tour') { list = toursData; labelKey = 'tour_name'; }
-    else if (type === 'food') { list = foodsData; labelKey = 'name'; }
-
-    list.forEach(function(item) {
-        var opt = document.createElement('option');
-        opt.value = item.id;
-        opt.textContent = item[labelKey];
-        selectEl.appendChild(opt);
-    });
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-    if (calType) {
-        updateCalendarItems();
-        if (calId) {
-            document.getElementById('cal_id_select').value = calId;
-        }
+var BD = <?php
+    $bd_js = [
+        'resources' => [],
+        'reasons'   => [],
+        'today'     => $today,
+        'csrf'      => $bd_csrf,
+        'maxDates'  => BD_MAX_DATES,
+        'returnQs'  => $_SERVER['QUERY_STRING'] ?? '',
+    ];
+    foreach (bd_resources() as $t => $cfg) {
+        $bd_js['resources'][$t] = [
+            'label'  => $cfg['label'],
+            'plural' => $cfg['plural'],
+            'icon'   => $cfg['icon'],
+            'items'  => $resource_lists[$t],
+        ];
     }
-});
+    foreach (bd_reasons() as $k => $r) { $bd_js['reasons'][$k] = $r; }
+    echo json_encode($bd_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+?>;
+
+
 
 // ============================================================
-// HELPER: Check if a date has a booking or block
+// SMALL HELPERS
 // ============================================================
-function getEventForDate(dateStr) {
-    var clicked = new Date(dateStr + 'T00:00:00');
-    return calendarEvents.find(function(ev) {
-        var start = new Date(ev.start + 'T00:00:00');
-        var end = ev.end ? new Date(ev.end + 'T00:00:00') : start;
-        return clicked >= start && clicked < end;
-    });
+var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function mk(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+}
+function fmtDate(s) {
+    var p = s.split('-');
+    return MONTHS[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10) + ', ' + p[0];
+}
+function toUTC(s) { var p = s.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]); }
+function expandRange(a, b) {
+    var out = [], t = toUTC(a), end = toUTC(b);
+    while (t <= end && out.length <= BD.maxDates + 1) {
+        out.push(new Date(t).toISOString().slice(0, 10));
+        t += 86400000;
+    }
+    return out;
+}
+function summarizeDates(dates) {
+    if (!dates.length) return '—';
+    if (dates.length === 1) return fmtDate(dates[0]);
+    var contiguous = (toUTC(dates[dates.length - 1]) - toUTC(dates[0])) / 86400000 === dates.length - 1;
+    return contiguous
+        ? fmtDate(dates[0]) + ' – ' + fmtDate(dates[dates.length - 1]) + ' (' + dates.length + ' days)'
+        : dates.length + ' selected dates (' + fmtDate(dates[0]) + ' … ' + fmtDate(dates[dates.length - 1]) + ')';
 }
 
+
+
 // ============================================================
-// MULTI-SELECT LOGIC
+// UNBLOCK MODAL (shared by list + calendar)
 // ============================================================
-function updateSelectionToolbar() {
-    var toolbar = document.getElementById('selectionToolbar');
-    var countEl = document.getElementById('selectedCount');
-    countEl.textContent = selectedDates.size;
-    if (selectedDates.size > 0) {
-        toolbar.classList.add('show');
+function showUnblock(d) {
+    document.getElementById('unblock_block_id').value = d.id;
+    document.getElementById('ub_resource').textContent = d.resource;
+    document.getElementById('ub_date').textContent = d.date;
+    document.getElementById('ub_reason').textContent = d.reason;
+    var denied = document.getElementById('ub_denied');
+    var warn = document.getElementById('ub_warn');
+    var confirmBtn = document.getElementById('ub_confirm');
+    if (d.canUnblock) {
+        denied.style.display = 'none';
+        warn.style.display = '';
+        confirmBtn.style.display = '';
+        confirmBtn.disabled = false;
     } else {
-        toolbar.classList.remove('show');
+        denied.textContent = d.denyReason || 'You do not have permission to unblock this date.';
+        denied.style.display = '';
+        warn.style.display = 'none';
+        confirmBtn.style.display = 'none';
     }
-}
-
-function clearDateSelection() {
-    selectedDates.clear();
-    document.querySelectorAll('.fc-daygrid-day.selected-date').forEach(function(el) {
-        el.classList.remove('selected-date');
-    });
-    updateSelectionToolbar();
-}
-
-function toggleDateSelection(dateStr, dayEl) {
-    if (selectedDates.has(dateStr)) {
-        selectedDates.delete(dateStr);
-        if (dayEl) dayEl.classList.remove('selected-date');
-    } else {
-        selectedDates.add(dateStr);
-        if (dayEl) dayEl.classList.add('selected-date');
-    }
-    updateSelectionToolbar();
-}
-
-// ============================================================
-// FULLCALENDAR
-// ============================================================
-document.addEventListener('DOMContentLoaded', function() {
-    var calendarEl = document.getElementById('itemCalendar');
-    if (!calendarEl) return;
-
-    var calendar = new FullCalendar.Calendar(calendarEl, {
-        initialView: 'dayGridMonth',
-        headerToolbar: {
-            left: 'prev,next today',
-            center: 'title',
-            right: 'dayGridMonth,dayGridWeek'
-        },
-        events: calendarEvents,
-        height: 'auto',
-        contentHeight: 'auto',
-        aspectRatio: 1.6,
-        nowIndicator: true,
-        dayMaxEvents: 3,
-        weekends: true,
-        selectable: false,
-
-        dateClick: function(info) {
-            if (!calType || !calId) return;
-
-            var clickedDate = info.dateStr;
-            var today = new Date();
-            today.setHours(0, 0, 0, 0);
-            var clicked = new Date(clickedDate + 'T00:00:00');
-
-            if (clicked < today) {
-                alert('❌ You cannot select a past date.');
-                return;
-            }
-
-            var existingEvent = getEventForDate(clickedDate);
-            if (existingEvent) {
-                if (existingEvent.extendedProps.event_type === 'booking') {
-                    alert('⚠️ There is already a booking on this date. It cannot be blocked.');
-                    return;
-                }
-                if (existingEvent.extendedProps.event_type === 'blocked') {
-                    openUnblockFromCalendar(existingEvent.extendedProps);
-                    return;
-                }
-            }
-
-            var dayEl = info.dayEl;
-            toggleDateSelection(clickedDate, dayEl);
-        },
-
-        eventClick: function(info) {
-            var props = info.event.extendedProps;
-
-            if (props.event_type === 'blocked') {
-                openUnblockFromCalendar(props);
-            } else if (props.event_type === 'booking') {
-                var msg = '💰 BOOKING DETAILS\n\n' +
-                    'Reference: ' + props.reference + '\n' +
-                    'Guest: ' + props.guest_name + '\n' +
-                    'Date: ' + props.check_in + '\n' +
-                    'Guests: ' + props.guests + '\n' +
-                    'Total: ₱' + parseFloat(props.total).toLocaleString() + '\n' +
-                    'Payment: ' + props.payment_status.toUpperCase() + '\n\n' +
-                    'For full details, please go to Booking Management.';
-                alert(msg);
-            }
-        },
-
-        datesSet: function() {
-            setTimeout(function() {
-                document.querySelectorAll('.fc-daygrid-day').forEach(function(dayEl) {
-                    var dateAttr = dayEl.getAttribute('data-date');
-                    if (dateAttr && selectedDates.has(dateAttr)) {
-                        dayEl.classList.add('selected-date');
-                    }
-                });
-            }, 50);
-        }
-    });
-
-    calendar.render();
-    window.__blockedDatesCalendar = calendar;
-});
-
-// ============================================================
-// MULTI-BLOCK MODAL
-// ============================================================
-function openMultiBlockModal() {
-    if (selectedDates.size === 0) {
-        alert('Please select at least one date first.');
-        return;
-    }
-    if (!calType || !calId) {
-        alert('Please select an item first.');
-        return;
-    }
-
-    document.getElementById('multi_item_type').value = calType;
-    document.getElementById('multi_item_id').value = calId;
-
-    var sortedDates = Array.from(selectedDates).sort();
-    document.getElementById('multi_dates_json').value = JSON.stringify(sortedDates);
-
-    var typeLabel = calType === 'house' ? '🏠 House' : (calType === 'tour' ? '🚤 Tour' : '🍽️ Food');
-    document.getElementById('multi_item_type_display').textContent = typeLabel;
-    document.getElementById('multi_item_name_display').textContent = calItemName;
-    document.getElementById('multi_total_count_display').textContent = sortedDates.length + ' date(s)';
-
-    var preview = document.getElementById('multi_dates_preview');
-    preview.innerHTML = '';
-    sortedDates.forEach(function(dateStr) {
-        var parts = dateStr.split('-');
-        var dateObj = new Date(parts[0], parts[1] - 1, parts[2]);
-        var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        var label = monthNames[dateObj.getMonth()] + ' ' + dateObj.getDate() + ', ' + dateObj.getFullYear() + ' (' + dayNames[dateObj.getDay()] + ')';
-
-        var chip = document.createElement('span');
-        chip.className = 'selected-date-chip';
-        chip.innerHTML = '<span>' + label + '</span><button type="button" class="remove-chip" data-date="' + dateStr + '">×</button>';
-        preview.appendChild(chip);
-    });
-
-    preview.querySelectorAll('.remove-chip').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var d = this.getAttribute('data-date');
-            selectedDates.delete(d);
-            updateSelectionToolbar();
-            var dayEl = document.querySelector('.fc-daygrid-day[data-date="' + d + '"]');
-            if (dayEl) dayEl.classList.remove('selected-date');
-            if (selectedDates.size === 0) {
-                closeMultiBlockModal();
-            } else {
-                openMultiBlockModal();
-            }
-        });
-    });
-
-    document.getElementById('multiBlockModal').classList.add('show');
+    document.getElementById('unblockModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
+function openUnblockFromButton(btn) {
+    showUnblock({
+        id: btn.dataset.id, resource: btn.dataset.resource, date: btn.dataset.date,
+        reason: btn.dataset.reason, canUnblock: true
+    });
+}
 
-function closeMultiBlockModal() {
-    document.getElementById('multiBlockModal').classList.remove('show');
+function closeUnblock() {
+    document.getElementById('unblockModal').classList.remove('show');
     document.body.style.overflow = 'auto';
 }
 
 // ============================================================
-// UNBLOCK FROM CALENDAR
+// BLOCK AVAILABILITY WIZARD
+//   1 Resource type → 2 Resource → 3 Date(s) → 4 Reason → 5 Confirm
 // ============================================================
-function openUnblockFromCalendar(props) {
-    var blockTypeLabel = props.block_type_label || 'Blocked';
-    var reason = props.reason || 'No reason provided';
+var STEPS = ['Type', 'Resource', 'Dates', 'Reason', 'Confirm'];
+var W = null;
 
-    var msg = '🚫 BLOCKED DATE\n\n' +
-        'Date: ' + props.block_date + '\n' +
-        'Type: ' + blockTypeLabel + '\n' +
-        'Reason: ' + reason + '\n\n' +
-        'Do you want to UNBLOCK this date?';
+function newWizardState() {
+    return { step: 1, type: '', id: '', name: '', mode: 'single', start: '', end: '', dates: [], custom: false,
+             reasonType: 'walk_in', note: '', preview: null, previewing: false, error: '' };
+}
 
-    if (confirm(msg)) {
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.innerHTML = '<input type="hidden" name="unblock_date_action" value="1">' +
-                        '<input type="hidden" name="block_id" value="' + props.block_id + '">';
-        document.body.appendChild(form);
-        form.submit();
+function openBlockWizard(preset) {
+    W = newWizardState();
+    if (preset && preset.type && BD.resources[preset.type]) {
+        W.type = preset.type; W.id = String(preset.id); W.name = preset.name || '';
+        if (preset.dates && preset.dates.length) { W.dates = preset.dates.slice(); W.custom = true; W.mode = 'custom'; W.step = 4; }
+        else { W.step = 3; }
+    }
+    document.getElementById('blockModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+    renderWizard();
+}
+function closeBlockWizard() {
+    document.getElementById('blockModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+    W = null;
+}
+
+
+function computeDates() {
+    if (W.mode === 'custom') return W.dates;
+    if (W.mode === 'single') return W.start ? [W.start] : [];
+    if (W.start && W.end && W.end >= W.start) return expandRange(W.start, W.end);
+    return [];
+}
+
+function validateStep(step) {
+    if (step === 1) return W.type ? '' : 'Choose a resource type to continue.';
+    if (step === 2) return W.id ? '' : 'Choose a resource to continue.';
+    if (step === 3) {
+        if (W.mode === 'custom') return W.dates.length ? '' : 'No dates selected.';
+        if (!W.start) return 'Pick a date to continue.';
+        if (W.start < BD.today) return 'Past dates can’t be blocked.';
+        if (W.mode === 'range') {
+            if (!W.end) return 'Pick an end date.';
+            if (W.end < W.start) return 'The end date can’t be before the start date.';
+            if (expandRange(W.start, W.end).length > BD.maxDates) return 'A range can cover at most ' + BD.maxDates + ' days.';
+        }
+        return '';
+    }
+    if (step === 4) {
+        if (!W.reasonType) return 'Choose a reason.';
+        if (W.reasonType === 'other' && !W.note.trim()) return 'Please describe the reason when choosing “Other”.';
+        return '';
+    }
+    return '';
+}
+
+function renderWizard() {
+    if (!W) return;
+    // stepper
+    var st = document.getElementById('wizStepper');
+    st.innerHTML = '';
+    STEPS.forEach(function(label, i) {
+        var n = i + 1;
+        var item = mk('div', 'st' + (n === W.step ? ' active' : (n < W.step ? ' done' : '')));
+        var dot = mk('span', 'dot');
+        if (n < W.step) { var ic = mk('i', 'fas fa-check'); dot.appendChild(ic); } else { dot.textContent = n; }
+        item.appendChild(dot);
+        item.appendChild(mk('span', 'lbl', label));
+        if (n < STEPS.length) item.appendChild(mk('span', 'bar'));
+        st.appendChild(item);
+    });
+
+    var body = document.getElementById('wizBody');
+    body.innerHTML = '';
+    if (W.step === 1) renderStepType(body);
+    else if (W.step === 2) renderStepResource(body);
+    else if (W.step === 3) renderStepDates(body);
+    else if (W.step === 4) renderStepReason(body);
+    else renderStepConfirm(body);
+
+    var back = document.getElementById('wizBack');
+    var next = document.getElementById('wizNext');
+    back.style.visibility = W.step === 1 ? 'hidden' : 'visible';
+    back.onclick = function() { W.error = ''; W.step = Math.max(1, W.step - 1); renderWizard(); };
+
+    if (W.step < 5) {
+        next.className = 'btn-blue';
+        next.innerHTML = 'Next <i class="fas fa-arrow-right"></i>';
+        next.disabled = !!validateStep(W.step) && (W.step === 1 || W.step === 2);
+        next.onclick = function() {
+            var err = validateStep(W.step);
+            if (err) { W.error = err; renderWizard(); return; }
+            W.error = '';
+            W.step++;
+            if (W.step === 5) { W.preview = null; loadPreview(); }
+            renderWizard();
+        };
+    } else {
+        next.className = 'btn-blue btn-navy';
+        next.innerHTML = '<i class="fas fa-check"></i> Confirm &amp; Block';
+        next.disabled = !(W.preview && W.preview.ok && W.preview.can_save) || W.previewing;
+        next.onclick = submitBlock;
     }
 }
+
+function stepHeader(body, title, sub) {
+    body.appendChild(mk('div', 'step-title', title));
+    body.appendChild(mk('div', 'step-sub', sub));
+}
+function errorLine(body) {
+    if (W.error) body.appendChild(mk('div', 'field-error', W.error));
+}
+
+// ---- Step 1
+function renderStepType(body) {
+    stepHeader(body, 'What do you want to block?', 'Choose the type of resource.');
+    var grid = mk('div', 'choice-grid');
+    Object.keys(BD.resources).forEach(function(t) {
+        var r = BD.resources[t];
+        var card = mk('button', 'choice-card' + (W.type === t ? ' selected' : ''));
+        card.type = 'button';
+        card.appendChild(mk('i', 'fas fa-' + r.icon));
+        card.appendChild(mk('div', 'c-name', r.label));
+        card.appendChild(mk('div', 'c-count', r.items.length + ' available'));
+        card.onclick = function() {
+            if (W.type !== t) { W.type = t; W.id = ''; W.name = ''; }
+            W.error = ''; W.step = 2; renderWizard();
+        };
+        grid.appendChild(card);
+    });
+    body.appendChild(grid);
+    errorLine(body);
+}
+
+// ---- Step 2
+function renderStepResource(body) {
+    var r = BD.resources[W.type];
+    stepHeader(body, 'Which ' + r.label.toLowerCase() + '?', 'Pick the specific ' + r.label.toLowerCase() + ' to restrict.');
+    if (!r.items.length) {
+        body.appendChild(mk('div', 'notice warn', 'No ' + r.plural.toLowerCase() + ' found. Add one in its management page first.'));
+        return;
+    }
+    var search = mk('input', 'form-control resource-search');
+    search.type = 'text'; search.placeholder = 'Search ' + r.plural.toLowerCase() + '…';
+    var list = mk('div', 'resource-list');
+    function draw() {
+        list.innerHTML = '';
+        var q = search.value.trim().toLowerCase();
+        var shown = 0;
+        r.items.forEach(function(it) {
+            if (q && String(it.name).toLowerCase().indexOf(q) === -1) return;
+            shown++;
+            var row = mk('button', 'resource-row' + (String(it.id) === W.id ? ' selected' : ''));
+            row.type = 'button';
+            row.appendChild(mk('i', 'fas fa-' + r.icon));
+            row.appendChild(mk('span', '', it.name));
+            row.appendChild(mk('i', 'fas fa-check-circle check'));
+            row.onclick = function() {
+                W.id = String(it.id); W.name = it.name; W.error = '';
+                W.step = 3; renderWizard();
+            };
+            list.appendChild(row);
+        });
+        if (!shown) list.appendChild(mk('div', 'step-sub', 'No matches.'));
+    }
+    search.oninput = draw;
+    if (r.items.length > 6) body.appendChild(search);
+    body.appendChild(list);
+    draw();
+    errorLine(body);
+}
+
+// ---- Step 3
+function renderStepDates(body) {
+    stepHeader(body, 'When?', 'Block a single date or a continuous range. Past dates aren’t allowed.');
+
+    var toggle = mk('div', 'mode-toggle');
+    var modes = [['single', 'Single date'], ['range', 'Date range']];
+    if (W.custom) modes.push(['custom', 'Calendar selection']);
+    modes.forEach(function(m) {
+        var b = mk('button', W.mode === m[0] ? 'active' : '', m[1]);
+        b.type = 'button';
+        b.onclick = function() { W.mode = m[0]; W.error = ''; renderWizard(); };
+        toggle.appendChild(b);
+    });
+    body.appendChild(toggle);
+
+    if (W.mode === 'custom') {
+        body.appendChild(mk('div', 'step-sub', W.dates.length + ' date(s) picked on the calendar:'));
+        var chips = mk('div', 'chips');
+        chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto;';
+        W.dates.forEach(function(d) { chips.appendChild(mk('span', 'selected-date-chip', fmtDate(d))); });
+        body.appendChild(chips);
+        errorLine(body);
+        return;
+    }
+
+    var fields = mk('div', 'date-fields');
+    var g1 = mk('div');
+    g1.appendChild(mk('label', 'form-label', W.mode === 'range' ? 'Start date' : 'Date'));
+    var start = mk('input', 'form-control'); start.type = 'date'; start.min = BD.today; start.value = W.start;
+    start.onchange = function() {
+        W.start = start.value;
+        if (W.mode === 'range' && W.end && W.end < W.start) W.end = W.start;
+        W.error = ''; renderWizard();
+    };
+    g1.appendChild(start); fields.appendChild(g1);
+
+    if (W.mode === 'range') {
+        var g2 = mk('div');
+        g2.appendChild(mk('label', 'form-label', 'End date (inclusive)'));
+        var end = mk('input', 'form-control'); end.type = 'date'; end.min = W.start || BD.today; end.value = W.end;
+        end.onchange = function() { W.end = end.value; W.error = ''; renderWizard(); };
+        g2.appendChild(end); fields.appendChild(g2);
+    }
+    body.appendChild(fields);
+
+    var ds = computeDates();
+    if (ds.length) {
+        var pill = mk('span', 'days-pill');
+        pill.appendChild(mk('i', 'fas fa-calendar-day'));
+        pill.appendChild(document.createTextNode(' ' + ds.length + ' day' + (ds.length > 1 ? 's' : '') + ' · ' + summarizeDates(ds)));
+        body.appendChild(pill);
+    }
+    errorLine(body);
+}
+
+// ---- Step 4
+function renderStepReason(body) {
+    stepHeader(body, 'Why is it being blocked?', 'The reason is saved with the block and shown in the audit log.');
+    var grid = mk('div', 'block-type-grid');
+    Object.keys(BD.reasons).forEach(function(k) {
+        var lab = mk('label', 'block-type-option');
+        var inp = mk('input'); inp.type = 'radio'; inp.name = 'wiz_reason'; inp.value = k; inp.checked = (W.reasonType === k);
+        inp.onchange = function() { W.reasonType = k; W.error = ''; renderWizard(); };
+        var span = mk('span', 'block-type-option-label');
+        span.appendChild(mk('i', 'fas fa-' + BD.reasons[k].icon));
+        span.appendChild(document.createTextNode(' ' + BD.reasons[k].label));
+        lab.appendChild(inp); lab.appendChild(span);
+        grid.appendChild(lab);
+    });
+    body.appendChild(grid);
+
+    body.appendChild(mk('label', 'form-label', W.reasonType === 'other' ? 'Describe the reason *' : 'Note (optional)'));
+    var note = mk('input', 'form-control'); note.type = 'text'; note.maxLength = 255; note.value = W.note;
+    note.placeholder = W.reasonType === 'walk_in' ? 'e.g., Walk-in group booked at the counter' : 'Add details for your team';
+    note.oninput = function() { W.note = note.value; };
+    body.appendChild(note);
+    body.appendChild(mk('div', 'field-help', 'Applies to every selected date.'));
+    errorLine(body);
+}
+
+// ---- Step 5
+function renderStepConfirm(body) {
+    var r = BD.resources[W.type];
+    stepHeader(body, 'Review & confirm', 'Nothing is saved until you confirm.');
+    W.dates = (W.mode === 'custom') ? W.dates : computeDates();
+
+    var box = mk('div', 'summary-box');
+    function row(l, v) {
+        var d = mk('div', 'info-row');
+        d.appendChild(mk('span', 'info-label', l));
+        d.appendChild(mk('span', 'info-value', v));
+        box.appendChild(d);
+    }
+    row('Resource', r.label + ' — ' + W.name);
+    row('Date(s)', summarizeDates(W.dates));
+    row('Reason', BD.reasons[W.reasonType].label);
+    if (W.note.trim()) row('Note', W.note.trim());
+    body.appendChild(box);
+
+    if (W.previewing || !W.preview) {
+        var ld = mk('div', 'loading-line');
+        ld.appendChild(mk('i', 'fas fa-circle-notch fa-spin'));
+        ld.appendChild(document.createTextNode(' Checking availability…'));
+        body.appendChild(ld);
+        return;
+    }
+    var p = W.preview;
+    if (!p.ok) { body.appendChild(mk('div', 'notice bad', p.error || 'Could not check these dates.')); return; }
+
+    function chipsNotice(cls, text, items) {
+        var n = mk('div', 'notice ' + cls);
+        n.appendChild(mk('strong', '', text));
+        if (items && items.length) {
+            var c = mk('div', 'chips');
+            items.slice(0, 40).forEach(function(t) { c.appendChild(mk('span', 'chip', t)); });
+            if (items.length > 40) c.appendChild(mk('span', 'chip', '+' + (items.length - 40) + ' more'));
+            n.appendChild(c);
+        }
+        body.appendChild(n);
+    }
+    if (p.past.length) chipsNotice('bad', 'Past dates can’t be blocked — go back and fix:', p.past.map(fmtDate));
+    var confKeys = Object.keys(p.conflicts || {});
+    if (confKeys.length) chipsNotice('bad', 'Active bookings exist on these dates — cancel or reschedule them first:',
+        confKeys.map(function(d) { return fmtDate(d) + ' (' + p.conflicts[d].join(', ') + ')'; }));
+    if (p.duplicates.length) chipsNotice('warn', p.duplicates.length + ' date(s) already blocked — will be skipped:', p.duplicates.map(fmtDate));
+    if (p.can_save) chipsNotice('ok', p.blockable.length + ' date(s) will be blocked and unavailable for online booking.', p.blockable.length <= 12 ? p.blockable.map(fmtDate) : null);
+    else if (!p.past.length && !confKeys.length) chipsNotice('bad', 'Nothing to block — every selected date is already blocked.');
+}
+
+function loadPreview() {
+    W.previewing = true; W.preview = null;
+    var fd = new FormData();
+    fd.append('bd_action', 'preview');
+    fd.append('csrf', BD.csrf);
+    fd.append('item_type', W.type);
+    fd.append('item_id', W.id);
+    fd.append('dates_json', JSON.stringify(computeDates()));
+    fd.append('block_type', W.reasonType);
+    fd.append('note', W.note.trim());
+    var mine = W;
+    fetch('blocked-dates.php', { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(j) { if (W !== mine) return; W.preview = j; W.previewing = false; renderWizard(); })
+        .catch(function() { if (W !== mine) return; W.preview = { ok: false, error: 'Could not reach the server. Please refresh and try again.' }; W.previewing = false; renderWizard(); });
+}
+
+function submitBlock() {
+    if (!W || !W.preview || !W.preview.can_save) return;
+    var btn = document.getElementById('wizNext');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Saving…';
+
+    var form = document.createElement('form');
+    form.method = 'POST';
+    function add(n, v) { var i = document.createElement('input'); i.type = 'hidden'; i.name = n; i.value = v; form.appendChild(i); }
+    add('bd_action', 'block');
+    add('csrf', BD.csrf);
+    add('item_type', W.type);
+    add('item_id', W.id);
+    add('dates_json', JSON.stringify(computeDates()));
+    add('block_type', W.reasonType);
+    add('note', W.note.trim());
+    add('return_qs', BD.returnQs);
+    document.body.appendChild(form);
+    form.submit();
+}
+
+// Esc closes whichever modal is open
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    if (document.getElementById('blockModal').classList.contains('show')) closeBlockWizard();
+    if (document.getElementById('unblockModal').classList.contains('show')) closeUnblock();
+});
 
 // ============================================================
 // SIDEBAR
@@ -1437,7 +1793,76 @@ setTimeout(function() {
         alert.style.transition = 'opacity 0.5s';
         setTimeout(function() { alert.remove(); }, 500);
     });
-}, 5000);
+}, 8000);
+
+// ============================================
+// BLOCKED DATES LIVE SEARCH
+// ============================================
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const search = document.getElementById("blockSearch");
+
+    if(!search) return;
+
+
+    search.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+        const rows = document.querySelectorAll(
+            "table tbody tr"
+        );
+
+
+        rows.forEach(function(row){
+
+            const text = row.innerText.toLowerCase();
+
+            if(text.includes(keyword)){
+                row.style.display = "";
+            }
+            else{
+                row.style.display = "none";
+            }
+
+        });
+
+
+    });
+
+});
+
+// ============================================
+// AUTO APPLY DROPDOWN FILTERS
+// ============================================
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const filters = [
+        "filterType",
+        "filterStatus",
+        "filterMonth"
+    ];
+
+
+    filters.forEach(function(id){
+
+        const el = document.getElementById(id);
+
+        if(el){
+
+            el.addEventListener("change", function(){
+
+                this.form.submit();
+
+            });
+
+        }
+
+    });
+
+});
 </script>
 
 </body>

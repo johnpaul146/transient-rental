@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
+
 
 // ✅ NEW: Load SystemLogger (for logout logging)
 if (file_exists('includes/SystemLogger.php')) {
@@ -55,36 +57,7 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 // ✅ SIDEBAR BADGE COUNTS — Booking, Reviews, System Logs
 // ============================================================
 
-// ✅ System Logs — failed only
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
 
-// ✅ Booking Management — pending bookings (house + tour + food)
-$pending_bookings = 0;
-try {
-    $hb_count = 0; $tb_count = 0; $fb_count = 0;
-
-    $has_hb = $pdo->query("SHOW COLUMNS FROM house_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_hb)) {
-        $hb_count = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    $has_tb = $pdo->query("SHOW COLUMNS FROM tour_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_tb)) {
-        $tb_count = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    try {
-        $has_fb = $pdo->query("SHOW COLUMNS FROM food_bookings LIKE 'booking_status'")->fetchAll();
-        if (!empty($has_fb)) {
-            $fb_count = (int)$pdo->query("SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending'")->fetchColumn();
-        }
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $hb_count + $tb_count + $fb_count;
-} catch(PDOException $e) {}
 
 // Handle Delete Review
 if(isset($_GET['delete_review']) && ($is_admin || $is_staff)) {
@@ -164,17 +137,6 @@ $avg_rating = $avg_rating ? round($avg_rating, 1) : 0;
 // ============================================================
 // ✅ Reviews — PENDING only (for badge)
 // ============================================================
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
 
 // Get rating distribution
 $rating_distribution = [];
@@ -1122,7 +1084,101 @@ function getRatingText($rating) {
             .btn-logout-cancel,
             .btn-logout-confirm { width: 100%; }
         }
-    </style>
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
+   
+            /* REVIEWS STAT CARD REDESIGN */
+
+.reviews-stats .stat-card {
+
+    background: white !important;
+    color: #0B2447;
+
+    border-radius: 20px;
+    border: 1px solid #e8f0fe;
+
+    box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+
+    padding: 22px 20px;
+}
+
+
+.reviews-stats .stat-icon {
+
+    width: 48px;
+    height: 48px;
+
+    border-radius: 14px;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    font-size:20px;
+
+}
+
+
+.review-rating-card .stat-icon {
+
+    background: rgba(245,158,11,.15);
+    color:#f59e0b;
+
+}
+
+
+.review-total-card .stat-icon {
+
+    background: rgba(77,166,217,.15);
+    color:#4DA6D9;
+
+}
+
+
+.review-recent-card .stat-icon {
+
+    background: rgba(139,92,246,.15);
+    color:#8b5cf6;
+
+}
+
+
+.reviews-stats .stat-number {
+
+    color:#0B2447;
+
+    font-size:30px;
+    font-weight:800;
+
+    margin-top:15px;
+
+}
+
+
+.reviews-stats .stat-label {
+
+    color:#0B2447;
+
+    font-weight:700;
+    font-size:14px;
+
+}
+
+
+.reviews-stats .stat-small {
+
+    color:#64748b;
+
+    margin-top:8px;
+
+}
+
+
+.rating-stars i {
+
+    font-size:14px;
+
+}
+   </style>
 </head>
 <body>
 
@@ -1200,13 +1256,10 @@ function getRatingText($rating) {
                     <span>Activities Management</span>
                 </a>
             </li>
-
-            <!-- FOOD — walang badge -->
-            <li class="nav-item">
+<li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
                     <i class="fas fa-utensils"></i>
-                    <span>Food Management</span>
-                </a>
+                    <span>Food Management</span></a>
             </li>
 
             <!-- ✅ BOOKING — badge = pending bookings -->
@@ -1214,8 +1267,8 @@ function getRatingText($rating) {
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i>
                     <span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1223,8 +1276,7 @@ function getRatingText($rating) {
             <li class="nav-item">
                 <a href="blocked-dates.php" class="nav-link">
                     <i class="fas fa-ban"></i>
-                    <span>Blocked Dates</span>
-                </a>
+                    <span>Blocked Dates</span></a>
             </li>
 
             <!-- ✅ REVIEWS — badge = PENDING only -->
@@ -1232,8 +1284,8 @@ function getRatingText($rating) {
                 <a href="reviews-management.php" class="nav-link active">
                     <i class="fas fa-star"></i>
                     <span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1258,8 +1310,8 @@ function getRatingText($rating) {
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i>
                     <span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1352,39 +1404,77 @@ function getRatingText($rating) {
             </div>
         </div>
 
-        <!-- Stats Grid -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-star" style="background: rgba(255,255,255,0.25);"></i></div>
-                </div>
-                <div class="stat-number"><?php echo $avg_rating; ?></div>
-                <div class="stat-label">Average Rating</div>
-                <div class="stat-small" style="color: #F4B400;">
-                    <?php echo renderSmallStars($avg_rating); ?>
-                </div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-comments" style="background: rgba(255,255,255,0.25);"></i></div>
-                </div>
-                <div class="stat-number"><?php echo $total_reviews; ?></div>
-                <div class="stat-label">Total Reviews</div>
-                <div class="stat-small">
-                    <i class="fas fa-user"></i> From customers
-                </div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-calendar-week" style="background: rgba(255,255,255,0.25);"></i></div>
-                </div>
-                <div class="stat-number"><?php echo $recent_count; ?></div>
-                <div class="stat-label">Last 7 Days</div>
-                <div class="stat-small">
-                    <i class="fas fa-clock"></i> Recent activity
-                </div>
-            </div>
+    <!-- Stats Grid -->
+<div class="stats-grid reviews-stats">
+
+    <!-- Average Rating -->
+    <div class="stat-card review-rating-card">
+
+        <div class="stat-icon">
+            <i class="fas fa-star"></i>
         </div>
+
+        <div class="stat-number">
+            <?php echo $avg_rating; ?>
+        </div>
+
+        <div class="stat-label">
+            Average Rating
+        </div>
+
+        <div class="stat-small rating-stars">
+            <?php echo renderSmallStars($avg_rating); ?>
+        </div>
+
+    </div>
+
+
+    <!-- Total Reviews -->
+    <div class="stat-card review-total-card">
+
+        <div class="stat-icon">
+            <i class="fas fa-comments"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo $total_reviews; ?>
+        </div>
+
+        <div class="stat-label">
+            Total Reviews
+        </div>
+
+        <div class="stat-small">
+            <i class="fas fa-user"></i>
+            Customer feedback
+        </div>
+
+    </div>
+
+
+    <!-- Recent Reviews -->
+    <div class="stat-card review-recent-card">
+
+        <div class="stat-icon">
+            <i class="fas fa-calendar-week"></i>
+        </div>
+
+        <div class="stat-number">
+            <?php echo $recent_count; ?>
+        </div>
+
+        <div class="stat-label">
+            Recent Reviews
+        </div>
+
+        <div class="stat-small">
+            <i class="fas fa-clock"></i>
+            Last 7 days
+        </div>
+
+    </div>
+
+</div>
 
         <!-- Rating Distribution -->
         <div class="card">
@@ -1408,12 +1498,19 @@ function getRatingText($rating) {
         <!-- Reviews Table -->
         <div class="card">
             <div class="card-header">
-                <h2><i class="fas fa-list"></i> All Reviews</h2>
-                <div class="header-actions">
+<h2>
+    <i class="fas fa-comments"></i>
+    Customer Feedback
+</h2>                <div class="header-actions">
                     <form method="GET" class="filter-bar">
-                        <input type="text" name="search" placeholder="Search by user or review..." value="<?php echo htmlspecialchars($search); ?>">
-
-                        <select name="rating">
+<input 
+    type="text" 
+    id="reviewSearch"
+    name="search"
+    placeholder="🔍 Search reviews..."
+    value="<?php echo htmlspecialchars($search); ?>"
+>
+                        <select name="rating" id="ratingFilter">
                             <option value="all" <?php echo $rating_filter == 'all' ? 'selected' : ''; ?>>All Ratings</option>
                             <option value="5" <?php echo $rating_filter == '5' ? 'selected' : ''; ?>>5 ★</option>
                             <option value="4" <?php echo $rating_filter == '4' ? 'selected' : ''; ?>>4 ★</option>
@@ -1422,15 +1519,16 @@ function getRatingText($rating) {
                             <option value="1" <?php echo $rating_filter == '1' ? 'selected' : ''; ?>>1 ★</option>
                         </select>
 
-                        <select name="sort">
+                        <select name="sort" id="sortFilter">
                             <option value="newest" <?php echo $sort == 'newest' ? 'selected' : ''; ?>>Newest First</option>
                             <option value="oldest" <?php echo $sort == 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
                             <option value="highest" <?php echo $sort == 'highest' ? 'selected' : ''; ?>>Highest Rating</option>
                             <option value="lowest" <?php echo $sort == 'lowest' ? 'selected' : ''; ?>>Lowest Rating</option>
                         </select>
 
-                        <button type="submit" class="btn-filter"><i class="fas fa-search"></i> Filter</button>
-                        <?php if($search || $rating_filter != 'all' || $sort != 'newest'): ?>
+<button type="submit" class="btn-filter">
+    <i class="fas fa-filter"></i> Apply
+</button>                        <?php if($search || $rating_filter != 'all' || $sort != 'newest'): ?>
                             <a href="reviews-management.php" class="btn-clear"><i class="fas fa-times"></i> Clear</a>
                         <?php endif; ?>
                     </form>
@@ -1480,7 +1578,7 @@ function getRatingText($rating) {
                                 <a href="?delete_review=<?php echo $review['id']; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?><?php echo $rating_filter != 'all' ? '&rating='.$rating_filter : ''; ?><?php echo $sort != 'newest' ? '&sort='.$sort : ''; ?>"
                                    class="btn-sm btn-danger"
                                    onclick="return confirm('Delete this review from <?php echo addslashes($review['username']); ?>? This action cannot be undone.')">
-                                    <i class="fas fa-trash"></i> Delete
+                                    <i class="fas fa-trash-alt"></i> Remove
                                 </a>
                             </td>
                         </tr>
@@ -1695,6 +1793,105 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+
+// LIVE REVIEW SEARCH
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const searchInput = document.getElementById("reviewSearch");
+
+    if(!searchInput) return;
+
+
+    searchInput.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase();
+
+
+        const rows = document.querySelectorAll(
+            ".desktop-table tbody tr"
+        );
+
+
+        rows.forEach(function(row){
+
+            const text = row.innerText.toLowerCase();
+
+
+            if(text.includes(keyword)){
+                row.style.display = "";
+            } else {
+                row.style.display = "none";
+            }
+
+        });
+
+
+        const cards = document.querySelectorAll(
+            ".review-card-mobile"
+        );
+
+
+        cards.forEach(function(card){
+
+            const text = card.innerText.toLowerCase();
+
+
+            if(text.includes(keyword)){
+                card.style.display = "";
+            } else {
+                card.style.display = "none";
+            }
+
+        });
+
+
+    });
+
+
+});
+
+// AUTO APPLY REVIEW FILTERS
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const ratingFilter = document.getElementById("ratingFilter");
+    const sortFilter = document.getElementById("sortFilter");
+
+
+    function applyReviewFilter(){
+
+        const form = ratingFilter.closest("form");
+
+        if(form){
+            form.submit();
+        }
+
+    }
+
+
+    if(ratingFilter){
+
+        ratingFilter.addEventListener(
+            "change",
+            applyReviewFilter
+        );
+
+    }
+
+
+    if(sortFilter){
+
+        sortFilter.addEventListener(
+            "change",
+            applyReviewFilter
+        );
+
+    }
+
+
+});
 </script>
 
 </body>

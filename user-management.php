@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 
 // ============================================================
 // ✅ NEW: Load SystemLogger
@@ -150,49 +151,8 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 // ✅ SIDEBAR BADGE COUNTS — Booking, Reviews, System Logs
 // ============================================================
 
-// ✅ System Logs — failed only
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
 
-// ✅ Booking Management — pending bookings (house + tour + food)
-$pending_bookings = 0;
-try {
-    $hb_count = 0; $tb_count = 0; $fb_count = 0;
 
-    $has_hb = $pdo->query("SHOW COLUMNS FROM house_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_hb)) {
-        $hb_count = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    $has_tb = $pdo->query("SHOW COLUMNS FROM tour_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_tb)) {
-        $tb_count = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    try {
-        $has_fb = $pdo->query("SHOW COLUMNS FROM food_bookings LIKE 'booking_status'")->fetchAll();
-        if (!empty($has_fb)) {
-            $fb_count = (int)$pdo->query("SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending'")->fetchColumn();
-        }
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $hb_count + $tb_count + $fb_count;
-} catch(PDOException $e) {}
-
-// ✅ Reviews — PENDING only
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
 
 // ADD USER - ADMIN ONLY
 if(isset($_POST['add_user']) && $is_admin) {
@@ -1831,7 +1791,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     word-break:break-word;
 }
 
-</style>
+        .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
+    </style>
 </head>
 <body>
 
@@ -1874,20 +1835,17 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item"><a href="house-dashboard.php" class="nav-link"><i class="fas fa-home"></i><span>House Management</span></a></li>
             <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
-
-            <!-- FOOD — walang badge -->
-            <li class="nav-item">
+<li class="nav-item">
                 <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i><span>Food Management</span>
-                </a>
+                    <i class="fas fa-utensils"></i><span>Food Management</span></a>
             </li>
 
             <!-- ✅ BOOKING — badge = pending bookings -->
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1898,8 +1856,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1912,8 +1870,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <li class="nav-item">
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -2081,6 +2039,12 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
 
 
     <div class="user-toolbar-actions">
+        <select id="roleFilter" class="user-filter">
+    <option value="all">All Roles</option>
+    <option value="admin">Admin</option>
+    <option value="staff">Staff</option>
+    <option value="guest">Guest</option>
+</select>
 
         <form method="GET" style="display:flex;gap:10px;">
 
@@ -2141,11 +2105,13 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
 ?>
 
 <tr class="user-row"
-    data-search="<?php echo strtolower(htmlspecialchars(
-        $user['username'].' '.
-        $user['full_name'].' '.
-        $user['email']
-    )); ?>">
+data-role="<?php echo $role; ?>"
+data-search="<?php echo strtolower(htmlspecialchars(
+    $user['username'].' '.
+    $user['full_name'].' '.
+    $user['email']
+)); ?>">
+
 
     <td><?php echo $index + 1; ?></td>
                             <td>
@@ -3414,32 +3380,47 @@ setTimeout(function() {
 }, 5000);
 
 
-// LIVE USER SEARCH FILTER
-
 document.addEventListener("DOMContentLoaded", function(){
 
     const searchInput = document.getElementById("userSearchInput");
+    const roleFilter = document.getElementById("roleFilter");
     const rows = document.querySelectorAll(".user-row");
 
-    if(!searchInput) return;
 
-    searchInput.addEventListener("input", function(){
+    function filterUsers(){
 
-        const keyword = this.value.toLowerCase().trim();
+        const keyword = searchInput.value.toLowerCase().trim();
+        const role = roleFilter.value;
+
 
         rows.forEach(row => {
 
             const text = row.dataset.search;
+            const userRole = row.dataset.role;
 
-            if(text.includes(keyword)){
-                row.style.display = "";
-            }else{
-                row.style.display = "none";
+
+            const matchSearch = text.includes(keyword);
+
+            const matchRole =
+                role === "all" ||
+                userRole === role;
+
+
+            if(matchSearch && matchRole){
+                row.style.display="";
+            }
+            else{
+                row.style.display="none";
             }
 
         });
 
-    });
+    }
+
+
+    searchInput.addEventListener("input", filterUsers);
+
+    roleFilter.addEventListener("change", filterUsers);
 
 });
 </script>

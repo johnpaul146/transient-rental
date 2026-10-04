@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/sidebar-counts.php';
 
 if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
     header("Location: index.php");
@@ -52,49 +53,8 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 // ✅ SIDEBAR BADGE COUNTS — Booking, Reviews, System Logs
 // ============================================================
 
-// ✅ System Logs — failed only
-$log_stats = ['failed' => 0];
-try {
-    $log_stats['failed'] = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn();
-} catch (PDOException $e) {}
 
-// ✅ Booking Management — pending bookings (house + tour + food)
-$pending_bookings = 0;
-try {
-    $hb_count = 0; $tb_count = 0; $fb_count = 0;
 
-    $has_hb = $pdo->query("SHOW COLUMNS FROM house_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_hb)) {
-        $hb_count = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    $has_tb = $pdo->query("SHOW COLUMNS FROM tour_bookings LIKE 'booking_status'")->fetchAll();
-    if (!empty($has_tb)) {
-        $tb_count = (int)$pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE booking_status = 'pending'")->fetchColumn();
-    }
-
-    try {
-        $has_fb = $pdo->query("SHOW COLUMNS FROM food_bookings LIKE 'booking_status'")->fetchAll();
-        if (!empty($has_fb)) {
-            $fb_count = (int)$pdo->query("SELECT COUNT(*) FROM food_bookings WHERE booking_status = 'pending'")->fetchColumn();
-        }
-    } catch(PDOException $e) {}
-
-    $pending_bookings = $hb_count + $tb_count + $fb_count;
-} catch(PDOException $e) {}
-
-// ✅ Reviews — PENDING only (auto-detect column)
-$pending_reviews = 0;
-try {
-    $has_status = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'status'")->fetchAll();
-    $has_is_approved = $pdo->query("SHOW COLUMNS FROM overall_feedback LIKE 'is_approved'")->fetchAll();
-
-    if (!empty($has_status)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE status = 'pending'")->fetchColumn();
-    } elseif (!empty($has_is_approved)) {
-        $pending_reviews = (int)$pdo->query("SELECT COUNT(*) FROM overall_feedback WHERE is_approved = 0")->fetchColumn();
-    }
-} catch(PDOException $e) {}
 
 // ============================================================
 // SIZE VARIATIONS
@@ -437,6 +397,9 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
         .menu-toggle:hover { background: rgba(77,166,217,0.2); transform: scale(1.05); }
         body.sidebar-open-mobile .menu-toggle { opacity: 0; visibility: hidden; pointer-events: none; transform: scale(0.8); }
 
+
+
+
         @media (max-width: 1024px) {
             .sidebar { position: fixed; top: 0; left: 0; height: 100vh; transform: translateX(-100%); width: 280px; z-index: 1000; padding-top: 25px; }
             .sidebar.open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,0.4); }
@@ -504,6 +467,19 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             width: 100%; height: 100%;
             object-fit: cover; border-radius: 50%;
         }
+        .food-total .stat-icon{
+    background:linear-gradient(135deg,#38bdf8,#0284c7);
+}
+
+
+.food-available .stat-icon{
+    background:linear-gradient(135deg,#34d399,#059669);
+}
+
+
+.food-featured .stat-icon{
+    background:linear-gradient(135deg,#fbbf24,#f59e0b);
+}
 
         @media (max-width: 768px) {
             .top-bar {
@@ -604,13 +580,98 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             .page-title-banner h1 { font-size: 22px; }
         }
 
-        /* STATS */
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: #4DA6D9; border-radius: 16px; padding: 22px 20px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(77,166,217,0.2); transition: transform 0.3s; }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77,166,217,0.3); }
-        .stat-icon { width: 44px; height: 44px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; }
-        .stat-number { font-size: 26px; font-weight: 700; color: white; margin-top: 8px; }
-        .stat-label { color: rgba(255,255,255,0.9); font-size: 12px; }
+      /* FOOD DASHBOARD STATS */
+
+.stats-grid{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:24px;
+    margin-bottom:30px;
+}
+
+
+.stat-card{
+
+    background:white;
+    border-radius:22px;
+    padding:24px;
+
+    border:1px solid #e8f0fe;
+
+    box-shadow:
+    0 12px 30px rgba(11,36,71,.08);
+
+    display:flex;
+    align-items:center;
+    gap:18px;
+
+    transition:.25s ease;
+
+}
+
+
+.stat-card:hover{
+
+    transform:translateY(-5px);
+
+    box-shadow:
+    0 18px 40px rgba(11,36,71,.15);
+
+}
+
+
+
+.stat-icon{
+
+    width:65px;
+    height:65px;
+
+    border-radius:18px;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    font-size:26px;
+
+    color:white;
+
+    background:
+    linear-gradient(
+        135deg,
+        #4DA6D9,
+        #0B3D91
+    );
+
+}
+
+
+
+.stat-number{
+
+    font-size:34px;
+
+    font-weight:800;
+
+    color:#0B2447;
+
+    line-height:1;
+
+}
+
+
+
+.stat-label{
+
+    margin-top:6px;
+
+    color:#64748b;
+
+    font-size:14px;
+
+    font-weight:600;
+
+}
 
         @media (max-width: 768px) {
             .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
@@ -743,6 +804,32 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             margin-bottom: 8px; align-self: flex-start;
         }
 
+        .size-variations-badge{
+    cursor:pointer;
+    user-select:none;
+}
+
+
+.toggle-icon{
+    margin-left:auto;
+    transition:.3s ease;
+}
+
+
+.size-variations-badge.active .toggle-icon{
+    transform:rotate(180deg);
+}
+
+
+.food-card .variations-list{
+    display:none;
+}
+
+
+.food-card .variations-list.show{
+    display:block;
+}
+
         .food-card .variations-list {
             background: rgba(255,255,255,0.1);
             border-radius: 10px;
@@ -772,6 +859,20 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             color: #F4B400;
             margin: 4px 0 10px;
         }
+
+        .food-price small{
+
+    display:block;
+
+    font-size:11px;
+
+    font-weight:500;
+
+    color:rgba(255,255,255,.75);
+
+    margin-top:2px;
+
+}
 
         .food-card .food-actions {
             margin-top: auto;
@@ -917,6 +1018,75 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             .logout-modal-actions { flex-direction: column-reverse; }
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
+
+        /* FOOD SEARCH */
+
+.food-header{
+    flex-direction:column;
+    align-items:stretch;
+}
+
+
+.section-subtitle{
+    margin-top:5px;
+    color:#64748b;
+    font-size:13px;
+}
+
+
+.food-toolbar{
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+
+.food-search{
+
+    height:45px;
+    width:350px;
+
+    display:flex;
+    align-items:center;
+    gap:10px;
+
+    padding:0 15px;
+
+    background:white;
+    border:2px solid #e8f0fe;
+    border-radius:12px;
+
+}
+
+
+.food-search i{
+    color:#4DA6D9;
+}
+
+
+.food-search input{
+
+    width:100%;
+    border:none;
+    outline:none;
+    font-size:14px;
+
+}
+
+
+@media(max-width:768px){
+
+    .food-toolbar{
+        flex-direction:column;
+        align-items:stretch;
+    }
+
+    .food-search{
+        width:100%;
+    }
+
+}
+            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
 </head>
 <body>
@@ -962,19 +1132,19 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
             <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
 
-            <!-- FOOD — walang badge -->
-            <li class="nav-item">
-                <a href="food-dashboard.php" class="nav-link active">
-                    <i class="fas fa-utensils"></i><span>Food Management</span>
-                </a>
-            </li>
+         <li class="nav-item">
+    <a href="food-dashboard.php" class="nav-link active">
+        <i class="fas fa-utensils"></i>
+        <span>Food Management</span>
+    </a>
+</li>
 
             <!-- ✅ BOOKING — badge = pending bookings -->
             <li class="nav-item">
                 <a href="booking-management.php" class="nav-link">
                     <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $pending_bookings; ?></span>
+                    <?php if($sidebar_pending_bookings > 0): ?>
+                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -985,8 +1155,8 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             <li class="nav-item">
                 <a href="reviews-management.php" class="nav-link">
                     <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $pending_reviews; ?></span>
+                    <?php if($sidebar_pending_reviews > 0): ?>
+                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1000,8 +1170,8 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
             <li class="nav-item">
                 <a href="system-logs.php" class="nav-link">
                     <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($log_stats['failed'] > 0): ?>
-                        <span class="nav-badge"><?php echo $log_stats['failed']; ?></span>
+                    <?php if($sidebar_failed_logs > 0): ?>
+                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
                     <?php endif; ?>
                 </a>
             </li>
@@ -1076,17 +1246,17 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
         </div>
 
         <div class="stats-grid">
-            <div class="stat-card">
+           <div class="stat-card food-total">
                 <div class="stat-icon"><i class="fas fa-utensils"></i></div>
                 <div class="stat-number"><?php echo $total_food; ?></div>
                 <div class="stat-label">Total Food Items</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card food-available">
                 <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
                 <div class="stat-number"><?php echo $available_food; ?></div>
                 <div class="stat-label">Available</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card food-featured">
                 <div class="stat-icon"><i class="fas fa-star"></i></div>
                 <div class="stat-number"><?php echo $featured_food; ?></div>
                 <div class="stat-label">Featured Items</div>
@@ -1094,14 +1264,46 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
         </div>
 
         <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-pizza-slice"></i> Food Items</h2>
-                <div class="header-actions">
-                    <button class="btn btn-primary" onclick="showModal('addFood')">
-                        <i class="fas fa-plus"></i> Add Food Item
-                    </button>
-                </div>
-            </div>
+          <div class="card-header food-header">
+
+    <div>
+        <h2>
+            <i class="fas fa-pizza-slice"></i>
+            Food Items
+        </h2>
+
+        <p class="section-subtitle">
+            Manage food packages, prices, availability, and menu items
+        </p>
+    </div>
+
+
+    <div class="food-toolbar">
+
+        <div class="food-search">
+
+            <i class="fas fa-search"></i>
+
+            <input 
+                type="text"
+                id="foodSearch"
+                placeholder="Search food items..."
+                autocomplete="off"
+            >
+
+        </div>
+
+
+        <button class="btn btn-primary" onclick="showModal('addFood')">
+
+            <i class="fas fa-plus"></i>
+            Add Food Item
+
+        </button>
+
+    </div>
+
+</div>   
 
             <?php if(empty($food_items)): ?>
             <div style="text-align: center; padding: 40px; color: #94a3b8;">
@@ -1116,7 +1318,13 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
                     $gallery_images = !empty($food['gallery_images']) ? json_decode($food['gallery_images'], true) : [];
                     $has_gallery = !empty($gallery_images);
                 ?>
-                <div class="food-card">
+                <div class="food-card food-item"
+data-search="<?php echo strtolower(htmlspecialchars(
+    ($food['name'] ?? '') . ' ' .
+    ($food['description'] ?? '') . ' ' .
+    ($food['category'] ?? '') . ' ' .
+    ($food['is_available'] ? 'available' : 'unavailable')
+)); ?>">
                     <div class="food-image-wrapper">
                         <img src="uploads/foods/<?php echo htmlspecialchars($food['image'] ?? 'default-food.jpg'); ?>?v=<?php echo time(); ?>" 
                              alt="<?php echo htmlspecialchars($food['name']); ?>"
@@ -1142,19 +1350,58 @@ $all_categories = array_unique(array_merge($default_categories, $categories));
                             <div class="food-desc"><?php echo htmlspecialchars($food['description']); ?></div>
                         <?php endif; ?>
 
-                        <?php if($has_variations): ?>
-                            <div class="size-variations-badge">
-                                <i class="fas fa-arrows-alt-h"></i> <?php echo count($size_variations); ?> sizes
-                            </div>
-                            <div class="variations-list">
-                                <?php foreach($size_variations as $var): ?>
-                                    <div class="var-item">
-                                        <span><?php echo htmlspecialchars($var['size']); ?></span>
-                                        <span>₱<?php echo number_format($var['price']); ?></span>
-                                    </div>
-                                <?php endforeach; ?>
-                            </div>
-                        <?php else: ?>
+                    
+
+                 <?php if($has_variations): ?>
+
+<div 
+    class="size-variations-badge"
+    onclick="toggleSizes(this)"
+>
+    <i class="fas fa-layer-group"></i>
+    <?php echo count($size_variations); ?> sizes available
+
+    <i class="fas fa-chevron-down toggle-icon"></i>
+</div>
+
+
+<div class="variations-list">
+
+    <?php foreach($size_variations as $var): ?>
+
+        <div class="var-item">
+
+            <span>
+                <?php echo htmlspecialchars($var['size']); ?>
+            </span>
+
+            <span>
+                ₱<?php echo number_format($var['price']); ?>
+            </span>
+
+        </div>
+
+    <?php endforeach; ?>
+
+</div>
+
+
+<div class="food-price">
+
+    ₱<?php echo number_format($size_variations[0]['price']); ?>
+
+    <small>
+        starting price
+    </small>
+
+</div>
+
+
+   
+
+
+<?php else: ?>
+
                             <?php if(!empty($food['pax_range'])): ?>
                                 <div class="food-pax"><i class="fas fa-users"></i> <?php echo htmlspecialchars($food['pax_range']); ?></div>
                             <?php endif; ?>
@@ -1757,6 +2004,50 @@ setTimeout(function() {
         setTimeout(() => alert.remove(), 500);
     });
 }, 5000);
+
+// FOOD LIVE SEARCH
+
+document.addEventListener("DOMContentLoaded", function(){
+
+    const searchInput = document.getElementById("foodSearch");
+    const foods = document.querySelectorAll(".food-item");
+
+
+    if(!searchInput) return;
+
+
+    searchInput.addEventListener("input", function(){
+
+        const keyword = this.value.toLowerCase().trim();
+
+
+        foods.forEach(food => {
+
+            const data = food.dataset.search;
+
+
+            if(data.includes(keyword)){
+                food.style.display = "";
+            }
+            else{
+                food.style.display = "none";
+            }
+
+        });
+
+    });
+
+});
+
+function toggleSizes(button){
+
+    const list = button.nextElementSibling;
+
+    list.classList.toggle("show");
+
+    button.classList.toggle("active");
+
+}
 </script>
 
 </body>
