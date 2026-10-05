@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Oct 04, 2026 at 07:12 PM
+-- Generation Time: Oct 05, 2026 at 05:42 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -954,7 +954,10 @@ INSERT INTO `system_logs` (`id`, `user_id`, `username`, `fullname`, `role`, `act
 (251, 11, 'paul', 'john paul navarro', 'staff', 'verify_device', 'auth', 'User \'paul\' successfully verified a NEW device and logged in — IP: ::1', 11, 'user', NULL, '{\"role\":\"staff\",\"device_name\":\"Mozilla\\/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit\\/537.36 (KHTML, like Gecko) Chrome\\/154.0.0.0 Safari\\/537.36\",\"ip\":\"::1\",\"device_expires_at\":\"2026-11-03 14:51:08\",\"redirect_to\":\"admin-dashboard.php\",\"page\":\"verify-device.php\"}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-04 20:51:08'),
 (252, 11, 'paul', 'john paul navarro', 'staff', 'logout', 'auth', 'User \'paul\' logged out', 11, 'user', NULL, NULL, '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-04 21:00:13'),
 (253, NULL, NULL, NULL, NULL, 'login', 'auth', 'User \'admin\' logged in from NEW device — OTP sent', 1, 'user', NULL, '{\"role\":\"admin\",\"ip\":\"::1\",\"device_trusted\":false,\"pending_otp\":true}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-04 21:00:31'),
-(254, 1, 'admin', 'John Paul Navarro', 'admin', 'verify_device', 'auth', 'User \'admin\' successfully verified a NEW device and logged in — IP: ::1', 1, 'user', NULL, '{\"role\":\"admin\",\"device_name\":\"Mozilla\\/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit\\/537.36 (KHTML, like Gecko) Chrome\\/154.0.0.0 Safari\\/537.36\",\"ip\":\"::1\",\"device_expires_at\":\"2026-11-03 15:01:31\",\"redirect_to\":\"admin-dashboard.php\",\"page\":\"verify-device.php\"}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-04 21:01:31');
+(254, 1, 'admin', 'John Paul Navarro', 'admin', 'verify_device', 'auth', 'User \'admin\' successfully verified a NEW device and logged in — IP: ::1', 1, 'user', NULL, '{\"role\":\"admin\",\"device_name\":\"Mozilla\\/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit\\/537.36 (KHTML, like Gecko) Chrome\\/154.0.0.0 Safari\\/537.36\",\"ip\":\"::1\",\"device_expires_at\":\"2026-11-03 15:01:31\",\"redirect_to\":\"admin-dashboard.php\",\"page\":\"verify-device.php\"}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-04 21:01:31'),
+(255, NULL, NULL, NULL, NULL, 'login_failed', 'auth', 'Failed login attempt for username \'admin\' (IP: ::1)', 1, 'user', NULL, '{\"username\":\"admin\",\"ip\":\"::1\",\"attempts_left\":4,\"reason\":\"wrong_password\"}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'failed', '2026-10-05 23:39:07'),
+(256, NULL, NULL, NULL, NULL, 'login_failed', 'auth', 'Failed login attempt for username \'admin\' (IP: ::1)', 1, 'user', NULL, '{\"username\":\"admin\",\"ip\":\"::1\",\"attempts_left\":3,\"reason\":\"wrong_password\"}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'failed', '2026-10-05 23:39:12'),
+(257, 1, 'admin', 'John Paul Navarro', 'admin', 'login', 'auth', 'User \'admin\' logged in (trusted device)', 1, 'user', NULL, '{\"role\":\"admin\",\"ip\":\"::1\",\"device_trusted\":true}', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'success', '2026-10-05 23:39:18');
 
 -- --------------------------------------------------------
 
@@ -1140,7 +1143,7 @@ INSERT INTO `trusted_devices` (`id`, `user_id`, `device_token`, `device_name`, `
 (18, 9, '20ec2c5cd1d81c87c991413f6dbe29371aacc6e7bf2ecadab0f5a57631329afc', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', '::1', '2026-10-03 21:37:35', '2026-11-02 15:37:35', '2026-10-03 21:37:35'),
 (19, 1, '7f445dbea6a7b0c9015f12b3a70b334f463636d12f6a7c409c6d22717cadadcc', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', '::1', '2026-10-04 01:20:32', '2026-11-02 15:42:30', '2026-10-03 21:42:30'),
 (20, 11, '098881bcb07deaf3617cd13c4b65b1d58423a7528771f01e9c64aa13423376bd', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', '::1', '2026-10-04 20:51:08', '2026-11-03 14:51:08', '2026-10-04 20:51:08'),
-(21, 1, 'd9e1147f29e90084917997486e2482cf17c5c5c949a99727d4d253591e3553b8', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', '::1', '2026-10-04 21:01:31', '2026-11-03 15:01:31', '2026-10-04 21:01:31');
+(21, 1, 'd9e1147f29e90084917997486e2482cf17c5c5c949a99727d4d253591e3553b8', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', '::1', '2026-10-05 23:39:18', '2026-11-03 15:01:31', '2026-10-04 21:01:31');
 
 -- --------------------------------------------------------
 
@@ -1500,7 +1503,7 @@ ALTER TABLE `house_gallery`
 -- AUTO_INCREMENT for table `login_attempts`
 --
 ALTER TABLE `login_attempts`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=28;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=29;
 
 --
 -- AUTO_INCREMENT for table `overall_feedback`
@@ -1530,7 +1533,7 @@ ALTER TABLE `site_content`
 -- AUTO_INCREMENT for table `system_logs`
 --
 ALTER TABLE `system_logs`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=255;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=258;
 
 --
 -- AUTO_INCREMENT for table `tours`

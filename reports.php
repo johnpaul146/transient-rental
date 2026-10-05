@@ -599,28 +599,108 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
             .page-title-banner h1 { font-size: 18px; }
         }
 
-        /* STATS GRID */
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; transition: opacity 0.3s ease; }
-        .stats-grid.loading { opacity: 0.5; pointer-events: none; }
-        .stat-card { background: #4DA6D9; border-radius: 16px; padding: 22px 20px; transition: transform 0.3s, box-shadow 0.3s; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 10px 30px rgba(77, 166, 217, 0.2); color: white; display: block; }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77, 166, 217, 0.3); }
-        .stat-card .stat-top { display: flex; justify-content: space-between; align-items: flex-start; }
-        .stat-icon { width: 48px; height: 48px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 20px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
-        .stat-number { font-size: 28px; font-weight: 700; color: white; margin-top: 10px; transition: opacity 0.3s; }
-        .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; margin-top: 2px; }
-        @media (max-width: 768px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-            .stat-card { padding: 16px 14px; border-radius: 12px; }
-            .stat-number { font-size: 22px; }
-            .stat-icon { width: 40px; height: 40px; font-size: 16px; }
-            .stat-label { font-size: 11px; }
+        /* STATS GRID - aligned with the admin dashboard card system */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            transition: opacity 0.3s ease;
         }
-        @media (max-width: 480px) {
-            .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
-            .stat-card { padding: 12px 10px; border-radius: 10px; }
-            .stat-number { font-size: 18px; margin-top: 6px; }
-            .stat-icon { width: 32px; height: 32px; font-size: 14px; border-radius: 8px; }
-            .stat-label { font-size: 10px; }
+        .stats-grid.loading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        .stat-card {
+            background: #fff;
+            border-radius: 22px;
+            padding: 24px;
+            min-width: 0;
+            min-height: 180px;
+            color: #0B2447;
+            border: 1px solid #e8f0fe;
+            box-shadow: 0 12px 30px rgba(6, 38, 61, 0.08);
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 20px 45px rgba(6, 38, 61, 0.15);
+        }
+        .stat-icon {
+            width: 55px;
+            height: 55px;
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            font-size: 24px;
+        }
+        .stat-card:nth-child(1) .stat-icon {
+            background: #dbeafe;
+            color: #2563eb;
+        }
+        .stat-card:nth-child(2) .stat-icon {
+            background: #cffafe;
+            color: #0891b2;
+        }
+        .stat-card:nth-child(3) .stat-icon {
+            background: #ede9fe;
+            color: #7c3aed;
+        }
+        .stat-card:nth-child(4) .stat-icon {
+            background: #fef3c7;
+            color: #d97706;
+        }
+        .stat-number {
+            margin-top: 18px;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            font-size: clamp(28px, 2.15vw, 36px);
+            line-height: 1.08;
+            font-weight: 800;
+            color: #0B2447;
+            transition: opacity 0.3s ease;
+        }
+        .stat-label {
+            margin-top: 4px;
+            color: #334155;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        .stat-small {
+            margin-top: 10px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.45;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .stat-small i {
+            color: #94a3b8;
+            font-size: 11px;
+        }
+        @media (max-width: 1200px) {
+            .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        }
+        @media (max-width: 900px) {
+            .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 768px) {
+            .stats-grid { gap: 12px; }
+            .stat-card { padding: 18px 16px; min-height: 160px; border-radius: 18px; }
+            .stat-icon { width: 44px; height: 44px; border-radius: 14px; font-size: 18px; }
+            .stat-number { margin-top: 14px; font-size: 26px; }
+            .stat-label { font-size: 13px; }
+            .stat-small { margin-top: 8px; font-size: 11px; }
+        }
+        @media (max-width: 600px) {
+            .stats-grid { grid-template-columns: 1fr; gap: 10px; }
+            .stat-card { min-height: 0; padding: 16px; }
+            .stat-number { font-size: 24px; }
         }
 
         /* FILTER BAR */
@@ -631,8 +711,6 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
         .filter-bar .range-select:focus { outline: none; border-color: #4DA6D9; background: white; }
         .filter-bar input[type="date"] { padding: 8px 12px; border: 2px solid #e8f0fe; border-radius: 8px; font-size: 13px; background: #fafafa; transition: border-color 0.3s; }
         .filter-bar input[type="date"]:focus { outline: none; border-color: #4DA6D9; background: white; }
-        .filter-bar .btn-filter { padding: 8px 20px; background: #4DA6D9; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; transition: all 0.3s; }
-        .filter-bar .btn-filter:hover { background: #3a8bbf; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(77, 166, 217, 0.3); }
         .filter-bar .btn-clear { padding: 8px 15px; background: #64748b; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; transition: all 0.3s; text-decoration: none; }
         .filter-bar .btn-clear:hover { background: #475569; transform: translateY(-2px); }
         @media (max-width: 768px) {
@@ -1019,32 +1097,28 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
         <!-- Stats -->
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-calendar-check"></i></div>
-                </div>
+                <div class="stat-icon"><i class="fas fa-calendar-check"></i></div>
                 <div class="stat-number" id="statTotalBookings"><?php echo number_format($total_bookings); ?></div>
                 <div class="stat-label">Total Bookings</div>
+                <div class="stat-small"><i class="fas fa-calendar-alt"></i> Within selected range</div>
             </div>
             <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-money-bill-wave"></i></div>
-                </div>
+                <div class="stat-icon"><i class="fas fa-money-bill-wave"></i></div>
                 <div class="stat-number" id="statTotalRevenue">₱<?php echo number_format($total_revenue, 2); ?></div>
                 <div class="stat-label">Total Revenue</div>
+                <div class="stat-small"><i class="fas fa-check-circle"></i> Paid bookings in range</div>
             </div>
             <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-users"></i></div>
-                </div>
+                <div class="stat-icon"><i class="fas fa-users"></i></div>
                 <div class="stat-number" id="statTotalUsers"><?php echo number_format($total_users); ?></div>
                 <div class="stat-label">Total Users</div>
+                <div class="stat-small"><i class="fas fa-user-plus"></i> Registered in range</div>
             </div>
             <div class="stat-card">
-                <div class="stat-top">
-                    <div class="stat-icon"><i class="fas fa-star"></i></div>
-                </div>
+                <div class="stat-icon"><i class="fas fa-star"></i></div>
                 <div class="stat-number" id="statTotalReviews"><?php echo number_format($total_feedback); ?></div>
                 <div class="stat-label">Total Reviews</div>
+                <div class="stat-small"><i class="fas fa-comment-alt"></i> Submitted in range</div>
             </div>
         </div>
 
@@ -1052,13 +1126,13 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
         <form method="GET" class="filter-bar" id="filterForm">
             <div class="filter-group">
                 <label><i class="fas fa-calendar-alt"></i> Range:</label>
-                <select name="range_type" id="range_type" class="range-select" onchange="updateDateRange()">
+                <select name="range_type" id="range_type" class="range-select">
+                    <option value="" disabled hidden <?php echo !in_array($range_type, ['today', 'yesterday', 'week', 'month', 'year'], true) ? 'selected' : ''; ?>>Quick Range</option>
                     <option value="today" <?php echo $range_type == 'today' ? 'selected' : ''; ?>>Today</option>
                     <option value="yesterday" <?php echo $range_type == 'yesterday' ? 'selected' : ''; ?>>Yesterday</option>
                     <option value="week" <?php echo $range_type == 'week' ? 'selected' : ''; ?>>This Week</option>
                     <option value="month" <?php echo $range_type == 'month' ? 'selected' : ''; ?>>This Month</option>
                     <option value="year" <?php echo $range_type == 'year' ? 'selected' : ''; ?>>This Year</option>
-                    <option value="custom" <?php echo $range_type == 'custom' ? 'selected' : ''; ?>>Custom</option>
                 </select>
             </div>
             <div class="filter-group" id="dateRangeGroup">
@@ -1067,7 +1141,6 @@ $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away Fro
                 <label>To:</label>
                 <input type="date" name="date_to" id="date_to" value="<?php echo $date_to; ?>">
             </div>
-            <button type="submit" class="btn-filter"><i class="fas fa-sync"></i> Apply</button>
             <a href="reports.php" class="btn-clear"><i class="fas fa-times"></i> Clear</a>
         </form>
 
@@ -1330,13 +1403,52 @@ function updateDateRange() {
             from = new Date(today.getFullYear(), 0, 1);
             to = new Date(today.getFullYear(), 11, 31);
             break;
-        case 'custom':
         default:
             return;
     }
 
     dateFrom.value = formatDate(from);
     dateTo.value = formatDate(to);
+    applyDateFilters('preset');
+}
+
+function applyDateFilters(source) {
+    const dateFrom = document.getElementById('date_from');
+    const dateTo = document.getElementById('date_to');
+    const rangeSelect = document.getElementById('range_type');
+
+    if (!dateFrom || !dateTo || !dateFrom.value || !dateTo.value) return;
+
+    // Keep the range valid while dates are being changed independently.
+    if (dateFrom.value > dateTo.value) {
+        if (source === 'to') {
+            dateFrom.value = dateTo.value;
+        } else {
+            dateTo.value = dateFrom.value;
+        }
+    }
+
+    currentDateFrom = dateFrom.value;
+    currentDateTo = dateTo.value;
+
+    const url = new URL(window.location.href);
+    url.searchParams.set('date_from', currentDateFrom);
+    url.searchParams.set('date_to', currentDateTo);
+
+    if (source === 'preset') {
+        url.searchParams.set('range_type', rangeSelect.value);
+    } else {
+        // Manual From/To dates are authoritative; the Range control is only a shortcut.
+        rangeSelect.selectedIndex = 0;
+        url.searchParams.set('range_type', 'manual');
+    }
+
+    if (window.history.replaceState) {
+        window.history.replaceState({}, '', url.pathname + '?' + url.searchParams.toString());
+    }
+
+    loadStats();
+    loadReportPreview();
 }
 
 function formatDate(date) {
@@ -1520,22 +1632,30 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     const filterForm = document.getElementById('filterForm');
+    const rangeSelect = document.getElementById('range_type');
+    const dateFrom = document.getElementById('date_from');
+    const dateTo = document.getElementById('date_to');
+
     if (filterForm) {
+        // Prevent Enter from causing a full page reload; filters apply automatically.
         filterForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            currentDateFrom = document.getElementById('date_from').value;
-            currentDateTo = document.getElementById('date_to').value;
+        });
+    }
 
-            const url = new URL(window.location.href);
-            url.searchParams.set('date_from', currentDateFrom);
-            url.searchParams.set('date_to', currentDateTo);
-            url.searchParams.set('range_type', document.getElementById('range_type').value);
-            if (window.history.replaceState) {
-                window.history.replaceState({}, '', url.pathname + '?' + url.searchParams.toString());
-            }
+    if (rangeSelect) {
+        rangeSelect.addEventListener('change', updateDateRange);
+    }
 
-            loadStats();
-            loadReportPreview();
+    if (dateFrom) {
+        dateFrom.addEventListener('change', function() {
+            applyDateFilters('from');
+        });
+    }
+
+    if (dateTo) {
+        dateTo.addEventListener('change', function() {
+            applyDateFilters('to');
         });
     }
 });

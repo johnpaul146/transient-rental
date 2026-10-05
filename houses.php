@@ -63,10 +63,16 @@ if(isset($content['site_settings']['logo_path']) && !empty($content['site_settin
 
 // Get hero image
 $hero_path = 'uploads/hero/hero-bg.jpg';
-if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_settings']['hero_image_path'])) {
-    $hero_path = $content['site_settings']['hero_image_path'];
+$home_hero_path = $content['site_settings']['hero_image_path'] ?? $hero_path;
+if (!empty($home_hero_path) && file_exists($home_hero_path) && !is_dir($home_hero_path)) {
+    $hero_path = $home_hero_path;
 }
-$hero_exists = file_exists($hero_path);
+$page_hero_filename = basename((string)($content['site_settings']['houses_hero_image'] ?? ''));
+$page_hero_path = 'uploads/hero/houses/' . $page_hero_filename;
+if ($page_hero_filename !== '' && file_exists($page_hero_path) && !is_dir($page_hero_path)) {
+    $hero_path = $page_hero_path;
+}
+$hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
 
 // Get GCash settings
 $gcash_settings = [];
@@ -932,7 +938,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             <?php else: ?>
             background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
             <?php endif; ?>
-            padding: 80px 20px;
+            padding: 120px 20px 70px;
             color: white;
             text-align: center;
             position: relative;
@@ -1518,7 +1524,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 
         /* RESPONSIVE */
         @media (max-width: 768px) {
-            .hero { padding: 60px 20px; }
+            .hero { padding: 100px 20px 50px; }
             .hero h1 { font-size: 32px; gap: 8px; }
             .hero p { font-size: 16px; }
 
@@ -1536,7 +1542,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 
         @media (max-width: 480px) {
             .modal-content { padding: 15px; }
-            .hero { padding: 40px 15px; }
+            .hero { padding: 95px 15px 45px; }
             .hero h1 { font-size: 26px; gap: 6px; }
             .hero p { font-size: 14px; }
             .gallery-slider-container { height: 280px; }
@@ -2403,6 +2409,14 @@ $is_logged_in = isset($_SESSION['user_id']);
 
 <?php include 'components/navbar.php'; ?>
 
+<!-- PAGE HERO -->
+<div class="hero">
+    <div class="hero-content">
+        <h1><i class="fas fa-home"></i> Houses</h1>
+        <p>Comfortable transient stays near the Hundred Islands gateway</p>
+    </div>
+</div>
+
 <div class="main-container">
     
     <div class="section-title">
@@ -3021,49 +3035,6 @@ $is_logged_in = isset($_SESSION['user_id']);
 
 <script>
 // ============================================================
-// SIDEBAR
-// ============================================================
-function toggleSidebar() {
-    if (window.innerWidth > 1100) return;
-
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-    
-    const willOpen = !sidebar.classList.contains('open');
-    
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-
-    if (willOpen && window.innerWidth <= 1100) {
-        document.body.classList.add('sidebar-open-mobile');
-    } else {
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-    
-    document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-}
-
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar.classList.contains('open')) toggleSidebar();
-    }
-});
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (window.innerWidth > 1100 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
-    }
-});
-
-// ============================================================
 // ✅ SHOPEE-STYLE VIEW MODAL — HOUSE DATA
 // ============================================================
 const isLoggedIn = <?php echo $is_logged_in ? 'true' : 'false'; ?>;
@@ -3323,8 +3294,7 @@ var overallRatingTexts = { 1: 'Very Poor', 2: 'Poor', 3: 'Average', 4: 'Good', 5
 
 function openOverallFeedbackModal(event) {
     if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     document.getElementById('overallFeedbackModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
@@ -3385,8 +3355,7 @@ var __pendingBookingSubmit = false;
 
 function showModal(type, event) {
     if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     var modal = document.getElementById(type + 'Modal');
     if(modal) modal.classList.add('show');
     document.body.style.overflow = 'hidden';

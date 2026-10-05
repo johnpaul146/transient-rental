@@ -61,27 +61,6 @@ if (!function_exists('validateGuestName')) {
     }
 }
 
-// ============================================================
-// ✨ PARSE PLACES TO VISIT
-// Format: Place Name|image/path.jpg  (one per line)
-// ============================================================
-function parsePlacesToVisit($raw) {
-    $places = [];
-    if (empty($raw)) return $places;
-    $lines = preg_split('/[\r\n]+/', $raw);
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if ($line === '') continue;
-        $parts = explode('|', $line, 2);
-        $name = trim($parts[0]);
-        $image = isset($parts[1]) ? trim($parts[1]) : '';
-        if ($name !== '') {
-            $places[] = ['name' => $name, 'image' => $image];
-        }
-    }
-    return $places;
-}
-
 $content = [];
 $stmt = $pdo->query("SELECT section_name, content_key, content_value FROM site_content");
 while($row = $stmt->fetch()) {
@@ -94,10 +73,16 @@ if(isset($content['site_settings']['logo_path']) && !empty($content['site_settin
 }
 
 $hero_path = 'uploads/hero/hero-bg.jpg';
-if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_settings']['hero_image_path'])) {
-    $hero_path = $content['site_settings']['hero_image_path'];
+$home_hero_path = $content['site_settings']['hero_image_path'] ?? $hero_path;
+if (!empty($home_hero_path) && file_exists($home_hero_path) && !is_dir($home_hero_path)) {
+    $hero_path = $home_hero_path;
 }
-$hero_exists = file_exists($hero_path);
+$page_hero_filename = basename((string)($content['site_settings']['tours_hero_image'] ?? ''));
+$page_hero_path = 'uploads/hero/tours/' . $page_hero_filename;
+if ($page_hero_filename !== '' && file_exists($page_hero_path) && !is_dir($page_hero_path)) {
+    $hero_path = $page_hero_path;
+}
+$hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
 
 $gcash_settings = [];
 $stmt = $pdo->query("SELECT content_key, content_value FROM site_content WHERE section_name = 'gcash'");
@@ -656,7 +641,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             .logo-wrapper .brand-text .brand-tagline { font-size: 9px; }
         }
 
-        .hero { <?php if($hero_exists): ?> background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo $hero_path; ?>?<?php echo time(); ?>'); background-size: cover; background-position: center; <?php else: ?> background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); <?php endif; ?> padding: 80px 0; color: white; text-align: center; position: relative; }
+        .hero { <?php if($hero_exists): ?> background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo $hero_path; ?>?<?php echo time(); ?>'); background-size: cover; background-position: center; <?php else: ?> background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); <?php endif; ?> padding: 120px 20px 70px; color: white; text-align: center; position: relative; }
         .hero-content { max-width: 800px; margin: 0 auto; padding: 0 20px; position: relative; z-index: 1; }
         .hero h1 { font-size: 48px; font-weight: 700; margin-bottom: 20px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); }
         .hero h1 i { color: #7bb8f0; }
@@ -702,26 +687,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             color: #F4B400; text-transform: uppercase;
             letter-spacing: 0.5px; margin-bottom: 6px;
         }
-        .tour-places-thumbs {
-            display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px;
-        }
-        .tour-places-thumbs::-webkit-scrollbar { height: 4px; }
-        .tour-places-thumbs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 4px; }
-        .tour-place-thumb {
-            flex-shrink: 0; width: 44px; height: 44px;
-            border-radius: 8px; object-fit: cover;
-            border: 2px solid rgba(255,255,255,0.4);
-            background: rgba(255,255,255,0.2);
-            transition: transform 0.25s;
-        }
-        .tour-place-thumb:hover { transform: scale(1.08); }
-        .tour-places-more {
-            flex-shrink: 0; width: 44px; height: 44px;
-            border-radius: 8px; background: rgba(0,0,0,0.4);
-            color: white; font-size: 11px; font-weight: 700;
-            display: flex; align-items: center; justify-content: center;
-            border: 2px solid rgba(255,255,255,0.4);
-        }
+
 
        
         .tour-actions { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -730,7 +696,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         .btn-book:disabled { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.4); cursor: not-allowed; transform: none; box-shadow: none; }
         a.btn-book { text-decoration: none; }
 
-        .empty-state { text-align: center; padding: 80px 20px; background: white; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        .empty-state { text-align: center; padding: 120px 20px 70px; background: white; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
         .empty-state i { font-size: 60px; color: #cbd5e1; margin-bottom: 20px; }
         .empty-state h3 { color: #1e293b; margin-bottom: 10px; }
         .empty-state p { color: #94a3b8; margin-bottom: 0; }
@@ -978,51 +944,6 @@ $is_logged_in = isset($_SESSION['user_id']);
         .shopee-detail-section h4 i { color: #4DA6D9; }
         .shopee-detail-section p { font-size: 13.5px; color: #475569; line-height: 1.7; margin: 0; }
 
-        .places-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-            gap: 10px;
-            margin-top: 4px;
-        }
-        .place-card {
-            background: #f8fafc;
-            border: 1px solid #e8f0fe;
-            border-radius: 12px;
-            overflow: hidden;
-            transition: all 0.25s;
-            cursor: pointer;
-        }
-        .place-card:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(77, 166, 217, 0.2); border-color: #4DA6D9; }
-        .place-card-img {
-            width: 100%;
-            height: 90px;
-            object-fit: cover;
-            background: #e2e8f0;
-            display: block;
-        }
-        .place-card-img-placeholder {
-            width: 100%;
-            height: 90px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(135deg, #e0f2fe, #bae6fd);
-            color: #0284c7;
-            font-size: 28px;
-        }
-        .place-card-name {
-            padding: 8px 10px;
-            font-size: 11.5px;
-            font-weight: 600;
-            color: #1e293b;
-            text-align: center;
-            line-height: 1.3;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-            min-height: 32px;
-        }
 
         .shopee-actions { margin-top: auto; padding-top: 20px; border-top: 1px solid #e8f0fe; display: flex; gap: 12px; flex-wrap: wrap; }
         .shopee-actions .btn-book { flex: 1; min-width: 200px; padding: 15px 24px; background: linear-gradient(135deg, #F4B400, #e6a800); color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; transition: all 0.3s; box-shadow: 0 6px 20px rgba(244, 180, 0, 0.35); }
@@ -1035,31 +956,6 @@ $is_logged_in = isset($_SESSION['user_id']);
         .shopee-login-note a { color: #4DA6D9; font-weight: 600; text-decoration: none; }
         .shopee-login-note a:hover { text-decoration: underline; }
 
-        .place-lightbox {
-            display: none; position: fixed; inset: 0; z-index: 9999;
-            background: rgba(0,0,0,0.92); align-items: center; justify-content: center;
-            padding: 20px; animation: shopeeFadeIn 0.2s ease;
-        }
-        .place-lightbox.show { display: flex; }
-        .place-lightbox img {
-            max-width: 95%; max-height: 85vh; border-radius: 12px;
-            box-shadow: 0 30px 80px rgba(0,0,0,0.6);
-        }
-        .place-lightbox-caption {
-            position: absolute; bottom: 30px; left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.75); color: white;
-            padding: 10px 24px; border-radius: 24px;
-            font-size: 14px; font-weight: 600;
-        }
-        .place-lightbox-close {
-            position: absolute; top: 20px; right: 20px;
-            background: rgba(255,255,255,0.15); color: white;
-            border: none; width: 48px; height: 48px; border-radius: 50%;
-            font-size: 20px; cursor: pointer; transition: all 0.25s;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .place-lightbox-close:hover { background: #ef4444; transform: rotate(90deg); }
 
         @media (max-width: 820px) {
             .shopee-modal-body { flex-direction: column; }
@@ -1074,8 +970,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .shopee-actions { flex-direction: column; }
             .shopee-actions .btn-book { min-width: unset; width: 100%; }
             .shopee-actions .btn-secondary { width: 100%; }
-            .places-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
-            .place-card-img, .place-card-img-placeholder { height: 75px; }
         }
         @media (max-width: 480px) {
             .shopee-modal { padding: 10px; }
@@ -1090,9 +984,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .shopee-price-section { padding: 14px 16px; }
             .shopee-actions .btn-book { font-size: 15px; padding: 13px 18px; }
             .shopee-close-btn { width: 34px; height: 34px; font-size: 15px; top: 10px; right: 10px; }
-            .places-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-            .place-card-img, .place-card-img-placeholder { height: 70px; }
-            .place-card-name { font-size: 11px; padding: 6px 8px; }
         }
 
         @media (max-width: 992px) { .tour-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); } }
@@ -1101,7 +992,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             .logo-wrapper .logo-image, .logo-wrapper .logo-image-placeholder { height: 42px; width: 42px; }
             .logo-wrapper .brand-text .brand-name { font-size: 18px; }
             .logo-wrapper .brand-text .brand-tagline { font-size: 10px; }
-            .hero { padding: 60px 0; }
+            .hero { padding: 100px 16px 50px; }
             .hero h1 { font-size: 32px; }
             .hero p { font-size: 16px; }
             .tour-grid { grid-template-columns: 1fr; }
@@ -1220,6 +1111,14 @@ $is_logged_in = isset($_SESSION['user_id']);
 
 <?php include 'components/navbar.php'; ?>
 
+<!-- PAGE HERO -->
+<div class="hero">
+    <div class="hero-content">
+        <h1><i class="fas fa-ship"></i> Boat Tours</h1>
+        <p>Choose the right boat for your Hundred Islands adventure</p>
+    </div>
+</div>
+
 <div class="main-container">
 
     <div class="section-title">
@@ -1242,7 +1141,6 @@ $is_logged_in = isset($_SESSION['user_id']);
                 $boat_label = getBoatCapacityLabel($tour['max_guests']);
                 $boat_badge_class = getBoatBadgeClass($tour['max_guests']);
                 $is_featured = isset($tour['is_featured']) && $tour['is_featured'];
-                $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
             ?>
             <div class="tour-card" onclick="openShopeeView(<?php echo $tour['id']; ?>)">
                 <div class="tour-image-wrapper">
@@ -1280,43 +1178,12 @@ $is_logged_in = isset($_SESSION['user_id']);
                         </div>
                     </div>
 
-                    <?php if(!empty($places)): ?>
                     <div class="tour-places">
                         <div class="tour-places-header">
-                            <i class="fas fa-map-marked-alt"></i> Places to Visit
+                            <i class="fas fa-map-marked-alt"></i> Destinations
                         </div>
-                        <div class="tour-places-thumbs">
-                            <?php
-                            $maxThumbs = 5;
-                            $shown = 0;
-                            foreach($places as $place):
-                                if ($shown >= $maxThumbs) break;
-                                $imgSrc = !empty($place['image']) && file_exists($place['image'])
-                                    ? htmlspecialchars($place['image'])
-                                    : '';
-                            ?>
-                                <?php if($imgSrc): ?>
-                                    <img src="<?php echo $imgSrc; ?>"
-                                         class="tour-place-thumb"
-                                         alt="<?php echo htmlspecialchars($place['name']); ?>"
-                                         title="<?php echo htmlspecialchars($place['name']); ?>"
-                                         onclick="event.stopPropagation(); openPlaceLightbox('<?php echo $imgSrc; ?>', '<?php echo addslashes($place['name']); ?>')">
-                                <?php else: ?>
-                                    <div class="tour-place-thumb" style="display:flex;align-items:center;justify-content:center;color:white;font-size:16px;"
-                                         title="<?php echo htmlspecialchars($place['name']); ?>">
-                                        <i class="fas fa-map-pin"></i>
-                                    </div>
-                                <?php endif; ?>
-                            <?php
-                                $shown++;
-                            endforeach;
-                            if (count($places) > $maxThumbs):
-                            ?>
-                                <div class="tour-places-more">+<?php echo count($places) - $maxThumbs; ?></div>
-                            <?php endif; ?>
-                        </div>
+                        <div style="color:white;font-size:13px;font-weight:700;">12–14 islands</div>
                     </div>
-                    <?php endif; ?>
 
                     <div class="tour-price">
                         ₱<?php echo number_format($tour['price_per_boat']); ?> <small>/boat</small>
@@ -1431,13 +1298,6 @@ $is_logged_in = isset($_SESSION['user_id']);
     </div>
     <?php endif; ?>
 
-</div>
-
-<!-- PLACE LIGHTBOX -->
-<div class="place-lightbox" id="placeLightbox" onclick="if(event.target === this) closePlaceLightbox()">
-    <button class="place-lightbox-close" onclick="closePlaceLightbox()">&times;</button>
-    <img id="placeLightboxImg" src="" alt="Place">
-    <div class="place-lightbox-caption" id="placeLightboxCaption"></div>
 </div>
 
 <div id="galleryModal" class="gallery-modal" onclick="if(event.target === this) closeGalleryModal()">
@@ -1902,64 +1762,12 @@ $is_logged_in = isset($_SESSION['user_id']);
 </div>
 
 <script>
-function toggleSidebar() {
-    if (window.innerWidth > 1100) return;
-
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-
-    const willOpen = !sidebar.classList.contains('open');
-
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-
-    if (willOpen && window.innerWidth <= 1100) {
-        document.body.classList.add('sidebar-open-mobile');
-    } else {
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-
-    document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-}
-
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar.classList.contains('open')) toggleSidebar();
-
         const modal = document.getElementById('logoutModal');
         if (modal && modal.classList.contains('show')) closeLogoutModal();
     }
 });
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (window.innerWidth > 1100 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
-    }
-});
-
-// ============================================================
-// PLACE LIGHTBOX
-// ============================================================
-function openPlaceLightbox(imgSrc, placeName) {
-    if (!imgSrc) return;
-    const lb = document.getElementById('placeLightbox');
-    document.getElementById('placeLightboxImg').src = imgSrc;
-    document.getElementById('placeLightboxCaption').textContent = placeName;
-    lb.classList.add('show');
-    document.body.style.overflow = 'hidden';
-}
-function closePlaceLightbox() {
-    document.getElementById('placeLightbox').classList.remove('show');
-    document.body.style.overflow = 'auto';
-}
 
 // ============================================================
 // ✅ GUEST NAME FIELD — Restrict to letters only
@@ -2048,16 +1856,11 @@ const tourData = <?php
     foreach($tours as $tour) {
         $gallery = $tour_gallery[$tour['id']] ?? [];
         $mainImage = getTourMainImage($tour, $gallery);
-        $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
-        foreach ($places as &$p) {
-            $p['image_exists'] = (!empty($p['image']) && file_exists($p['image']));
-        }
-        unset($p);
         $td[$tour['id']] = [
             'id' => (int)$tour['id'],
             'name' => $tour['tour_name'],
             'description' => $tour['description'] ?? '',
-            'places' => $places,
+            'destinations' => '12–14 islands',
             'price' => (float)$tour['price_per_boat'],
             'max_guests' => (int)$tour['max_guests'],
             'status' => $tour['status'] ?? 'available',
@@ -2133,25 +1936,7 @@ function openShopeeView(tourId) {
         descHtml = '<div class="shopee-detail-section"><h4><i class="fas fa-align-left"></i> Description</h4><p>' + nl2br(escapeHtml(tour.description)) + '</p></div>';
     }
 
-    let placesHtml = '';
-    if (tour.places && tour.places.length > 0) {
-        let gridHtml = '<div class="places-grid">';
-        tour.places.forEach(function(p, idx) {
-            let imgContent = '';
-            if (p.image_exists) {
-                imgContent = '<img src="' + escapeHtml(p.image) + '" class="place-card-img" alt="' + escapeHtml(p.name) + '" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';"><div class="place-card-img-placeholder" style="display:none;"><i class="fas fa-image"></i></div>';
-            } else {
-                imgContent = '<div class="place-card-img-placeholder"><i class="fas fa-map-pin"></i></div>';
-            }
-            let clickAttr = p.image_exists ? ' onclick="openPlaceLightbox(\'' + escapeJs(p.image) + '\', \'' + escapeJs(p.name) + '\')"' : '';
-            gridHtml += '<div class="place-card"' + clickAttr + '>' +
-                imgContent +
-                '<div class="place-card-name">' + escapeHtml(p.name) + '</div>' +
-            '</div>';
-        });
-        gridHtml += '</div>';
-        placesHtml = '<div class="shopee-detail-section"><h4><i class="fas fa-map-marked-alt"></i> Places to Visit</h4>' + gridHtml + '</div>';
-    }
+    let destinationsHtml = '<div class="shopee-detail-section"><h4><i class="fas fa-map-marked-alt"></i> Destinations</h4><p><strong>12–14 islands</strong></p></div>';
 
     let mainImageHtml = '';
     if (images.length > 0) {
@@ -2185,7 +1970,7 @@ function openShopeeView(tourId) {
                 <span class="status-badge ${statusClass}" style="display:inline-block; position:static; padding:6px 16px; border-radius:20px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;">${statusLabel}</span>
             </div>
             ${descHtml}
-            ${placesHtml}
+            ${destinationsHtml}
             <div class="shopee-actions">
                 ${actionsHtml}
                 <button class="btn-secondary" onclick="closeShopeeView()"><i class="fas fa-arrow-left"></i> Back</button>
@@ -2380,8 +2165,7 @@ var overallRatingTexts = { 1: 'Very Poor', 2: 'Poor', 3: 'Average', 4: 'Good', 5
 
 function openOverallFeedbackModal(event) {
     if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     document.getElementById('overallFeedbackModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
@@ -2779,15 +2563,7 @@ setTimeout(function() {
 function openLogoutModal(event) {
     if (event) event.preventDefault();
 
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) {
-        const overlay = document.getElementById('sidebarOverlay');
-        const toggleBtn = document.getElementById('menuToggle');
-        sidebar.classList.remove('open');
-        if (overlay) overlay.classList.remove('active');
-        if (toggleBtn) toggleBtn.classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-    }
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
 
     document.getElementById('logoutModal').classList.add('show');
     document.body.style.overflow = 'hidden';

@@ -77,16 +77,6 @@ function parsePlacesToVisit($raw) {
     return $places;
 }
 
-function placesToString($places) {
-    $lines = [];
-    foreach ($places as $p) {
-        $name = trim($p['name'] ?? '');
-        $image = trim($p['image'] ?? '');
-        if ($name === '') continue;
-        $lines[] = $name . ($image !== '' ? '|' . $image : '');
-    }
-    return implode("\n", $lines);
-}
 
 function getTourMainImage($tour) {
     $image = $tour['image'] ?? '';
@@ -146,22 +136,6 @@ function createTourFolder($tour_name) {
     return $folder_name;
 }
 
-function uploadPlaceImage($file, $tour_slug) {
-    if (!isset($file) || $file['error'] !== UPLOAD_ERR_OK) return null;
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    $allowed = ['jpg','jpeg','png','gif','webp'];
-    if (!in_array($ext, $allowed)) return null;
-
-    $dir = 'uploads/tours/places/';
-    if (!file_exists($dir)) mkdir($dir, 0777, true);
-
-    $filename = 'place_' . preg_replace('/[^a-zA-Z0-9_-]/', '', $tour_slug) . '_' . time() . '_' . rand(100, 999) . '.' . $ext;
-    $target = $dir . $filename;
-    if (move_uploaded_file($file['tmp_name'], $target)) {
-        return $target;
-    }
-    return null;
-}
 
 // ============================================================
 // HANDLE ADD TOUR
@@ -169,61 +143,46 @@ function uploadPlaceImage($file, $tour_slug) {
 if(isset($_POST['add_tour']) && ($is_admin || $is_staff)) {
     try {
         if (!file_exists('uploads/tours/')) mkdir('uploads/tours/', 0777, true);
+
+        $boat_name = trim($_POST['tour_name'] ?? '');
+        $description = trim($_POST['description'] ?? '');
+        $price_per_boat = (float)($_POST['price_per_boat'] ?? 0);
+        $boat_capacity = (int)($_POST['boat_capacity'] ?? 0);
+        $status = $_POST['status'] ?? 'available';
+        $allowed_statuses = ['available', 'fully_booked', 'seasonal'];
+        if (!in_array($status, $allowed_statuses, true)) $status = 'available';
+
+        if ($boat_name === '') throw new Exception('Boat name is required.');
+        if ($price_per_boat < 0) throw new Exception('Boat price cannot be negative.');
+        if (!in_array($boat_capacity, [5, 10, 15, 20], true)) throw new Exception('Please select a valid boat capacity.');
+
         $tour_image = 'default-tour.jpg';
-        $folder_name = createTourFolder($_POST['tour_name']);
+        $folder_name = createTourFolder($boat_name);
 
         if(isset($_FILES['tour_image']) && $_FILES['tour_image']['error'] == 0) {
-            $ext = strtolower(pathinfo($_FILES["tour_image"]["name"], PATHINFO_EXTENSION));
-            if (in_array($ext, ['jpg','jpeg','png','gif','webp'])) {
-                $new_filename = time() . '_' . str_replace(' ', '_', $_POST['tour_name']) . '.' . $ext;
-                if(move_uploaded_file($_FILES["tour_image"]["tmp_name"], "uploads/tours/gallery/" . $folder_name . "/" . $new_filename)) {
+            $ext = strtolower(pathinfo($_FILES['tour_image']['name'], PATHINFO_EXTENSION));
+            if (in_array($ext, ['jpg','jpeg','png','gif','webp'], true)) {
+                $new_filename = time() . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $boat_name) . '.' . $ext;
+                if(move_uploaded_file($_FILES['tour_image']['tmp_name'], 'uploads/tours/gallery/' . $folder_name . '/' . $new_filename)) {
                     $tour_image = $new_filename;
                 }
             }
         }
 
-        $places_raw = $_POST['places_to_visit'] ?? '';
-        $place_lines = array_filter(array_map('trim', preg_split('/[\r\n]+/', $places_raw)));
-        $slug = str_replace(' ', '_', $_POST['tour_name']);
-
-        $final_places = [];
-        foreach ($place_lines as $i => $line) {
-            $name = $line;
-            $img_path = '';
-            if (strpos($line, '|') !== false) {
-                $parts = explode('|', $line, 2);
-                $name = trim($parts[0]);
-                $img_path = trim($parts[1]);
-            }
-            if ($name === '') continue;
-
-            if (isset($_FILES['place_images']) && isset($_FILES['place_images']['error'][$i]) && $_FILES['place_images']['error'][$i] === UPLOAD_ERR_OK) {
-                $file = [
-                    'name' => $_FILES['place_images']['name'][$i],
-                    'type' => $_FILES['place_images']['type'][$i],
-                    'tmp_name' => $_FILES['place_images']['tmp_name'][$i],
-                    'error' => $_FILES['place_images']['error'][$i],
-                    'size' => $_FILES['place_images']['size'][$i],
-                ];
-                $uploaded = uploadPlaceImage($file, $slug);
-                if ($uploaded) $img_path = $uploaded;
-            }
-            $final_places[] = ['name' => $name, 'image' => $img_path];
-        }
-        $places_to_visit = placesToString($final_places);
-
-        $stmt = $pdo->prepare("INSERT INTO tours (tour_name, description, places_to_visit, price_per_boat, max_guests, status, image, boat_capacity, folder_name) VALUES (?, ?, ?, ?, ?, 'available', ?, ?, ?)");
-        $stmt->execute([$_POST['tour_name'], $_POST['description'], $places_to_visit, $_POST['price_per_boat'], $_POST['boat_capacity'], $tour_image, $_POST['boat_capacity'], $folder_name]);
+        // Legacy places_to_visit data is intentionally not used by the new Boat Information UI.
+        // Keep required legacy columns populated for compatibility with the existing schema.
+        $stmt = $pdo->prepare("INSERT INTO tours (tour_name, tour_type, description, duration_hours, price_per_boat, max_guests, status, image, boat_capacity, folder_name) VALUES (?, '', ?, 0, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$boat_name, $description, $price_per_boat, $boat_capacity, $status, $tour_image, $boat_capacity, $folder_name]);
         $tour_id = $pdo->lastInsertId();
 
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'create', 'tour', "Added new tour: {$_POST['tour_name']}", $tour_id, 'tour');
+            SystemLogger::log($pdo, 'create', 'tour', "Added new boat: {$boat_name}", $tour_id, 'tour');
         }
-        $_SESSION['flash_success'] = "Tour added successfully!";
-        header("Location: tour-dashboard.php");
+        $_SESSION['flash_success'] = 'Boat added successfully!';
+        header('Location: tour-dashboard.php');
         exit();
     } catch(Exception $e) {
-        $error = "Failed to add tour: " . $e->getMessage();
+        $error = 'Failed to add boat: ' . $e->getMessage();
     }
 }
 
@@ -232,86 +191,63 @@ if(isset($_POST['add_tour']) && ($is_admin || $is_staff)) {
 // ============================================================
 if(isset($_POST['edit_tour']) && ($is_admin || $is_staff)) {
     try {
-        $tour_id = $_POST['tour_id'];
-        $old_tour = $pdo->prepare("SELECT tour_name, folder_name, image, places_to_visit FROM tours WHERE id = ?");
+        $tour_id = (int)($_POST['tour_id'] ?? 0);
+        $boat_name = trim($_POST['tour_name'] ?? '');
+        $description = trim($_POST['description'] ?? '');
+        $price_per_boat = (float)($_POST['price_per_boat'] ?? 0);
+        $boat_capacity = (int)($_POST['boat_capacity'] ?? 0);
+        $status = $_POST['status'] ?? 'available';
+        $allowed_statuses = ['available', 'fully_booked', 'seasonal'];
+        if (!in_array($status, $allowed_statuses, true)) $status = 'available';
+
+        if ($tour_id <= 0) throw new Exception('Invalid boat record.');
+        if ($boat_name === '') throw new Exception('Boat name is required.');
+        if ($price_per_boat < 0) throw new Exception('Boat price cannot be negative.');
+        if (!in_array($boat_capacity, [5, 10, 15, 20], true)) throw new Exception('Please select a valid boat capacity.');
+
+        $old_tour = $pdo->prepare('SELECT tour_name, folder_name, image FROM tours WHERE id = ?');
         $old_tour->execute([$tour_id]);
         $old_data = $old_tour->fetch();
+        if (!$old_data) throw new Exception('Boat record not found.');
 
-        $new_folder_name = str_replace(' ', '_', trim($_POST['tour_name']));
+        $new_folder_name = str_replace(' ', '_', $boat_name);
         $tour_image = $old_data['image'] ?? 'default-tour.jpg';
 
-        if ($old_data && $old_data['folder_name'] != $new_folder_name) {
-            $old_path = 'uploads/tours/gallery/' . $old_data['folder_name'] . '/';
+        if (($old_data['folder_name'] ?? '') !== $new_folder_name) {
+            $old_path = 'uploads/tours/gallery/' . ($old_data['folder_name'] ?? '') . '/';
             $new_path = 'uploads/tours/gallery/' . $new_folder_name . '/';
-            if (file_exists($old_path)) {
-                if (!file_exists('uploads/tours/gallery/')) mkdir('uploads/tours/gallery/', 0777, true);
-                rename($old_path, $new_path);
+            if (is_dir($old_path) && $old_path !== $new_path) {
+                if (!is_dir('uploads/tours/gallery/')) mkdir('uploads/tours/gallery/', 0777, true);
+                if (!file_exists($new_path)) @rename($old_path, $new_path);
             }
+        }
+        if (!is_dir('uploads/tours/gallery/' . $new_folder_name . '/')) {
+            @mkdir('uploads/tours/gallery/' . $new_folder_name . '/', 0777, true);
         }
 
         if(isset($_FILES['tour_image']) && $_FILES['tour_image']['error'] == 0) {
-            $ext = strtolower(pathinfo($_FILES["tour_image"]["name"], PATHINFO_EXTENSION));
-            if (in_array($ext, ['jpg','jpeg','png','gif','webp'])) {
-                $new_filename = time() . '_' . str_replace(' ', '_', $_POST['tour_name']) . '.' . $ext;
+            $ext = strtolower(pathinfo($_FILES['tour_image']['name'], PATHINFO_EXTENSION));
+            if (in_array($ext, ['jpg','jpeg','png','gif','webp'], true)) {
+                $new_filename = time() . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $boat_name) . '.' . $ext;
                 $target_folder = 'uploads/tours/gallery/' . $new_folder_name . '/';
-                if (!file_exists($target_folder)) mkdir($target_folder, 0777, true);
-                if(move_uploaded_file($_FILES["tour_image"]["tmp_name"], $target_folder . $new_filename)) {
+                if(move_uploaded_file($_FILES['tour_image']['tmp_name'], $target_folder . $new_filename)) {
                     $tour_image = $new_filename;
                 }
             }
         }
 
-        $places_raw = $_POST['places_to_visit'] ?? '';
-        $place_lines = array_filter(array_map('trim', preg_split('/[\r\n]+/', $places_raw)));
-        $slug = str_replace(' ', '_', $_POST['tour_name']);
-
-        $existing_places = parsePlacesToVisit($old_data['places_to_visit'] ?? '');
-        $existing_map = [];
-        foreach ($existing_places as $p) {
-            $existing_map[trim($p['name'])] = $p['image'];
-        }
-
-        $final_places = [];
-        foreach ($place_lines as $i => $line) {
-            $name = $line;
-            $img_path = '';
-            if (strpos($line, '|') !== false) {
-                $parts = explode('|', $line, 2);
-                $name = trim($parts[0]);
-                $img_path = trim($parts[1]);
-            }
-            if ($name === '') continue;
-
-            if ($img_path === '' && isset($existing_map[$name])) {
-                $img_path = $existing_map[$name];
-            }
-
-            if (isset($_FILES['place_images']) && isset($_FILES['place_images']['error'][$i]) && $_FILES['place_images']['error'][$i] === UPLOAD_ERR_OK) {
-                $file = [
-                    'name' => $_FILES['place_images']['name'][$i],
-                    'type' => $_FILES['place_images']['type'][$i],
-                    'tmp_name' => $_FILES['place_images']['tmp_name'][$i],
-                    'error' => $_FILES['place_images']['error'][$i],
-                    'size' => $_FILES['place_images']['size'][$i],
-                ];
-                $uploaded = uploadPlaceImage($file, $slug);
-                if ($uploaded) $img_path = $uploaded;
-            }
-            $final_places[] = ['name' => $name, 'image' => $img_path];
-        }
-        $places_to_visit = placesToString($final_places);
-
-        $stmt = $pdo->prepare("UPDATE tours SET tour_name=?, description=?, places_to_visit=?, price_per_boat=?, max_guests=?, status=?, boat_capacity=?, folder_name=?, image=? WHERE id=?");
-        $stmt->execute([$_POST['tour_name'], $_POST['description'], $places_to_visit, $_POST['price_per_boat'], $_POST['boat_capacity'], $_POST['status'], $_POST['boat_capacity'], $new_folder_name, $tour_image, $tour_id]);
+        // Do not overwrite places_to_visit: old island data remains preserved but is no longer exposed in the active UI.
+        $stmt = $pdo->prepare('UPDATE tours SET tour_name=?, description=?, price_per_boat=?, max_guests=?, status=?, boat_capacity=?, folder_name=?, image=? WHERE id=?');
+        $stmt->execute([$boat_name, $description, $price_per_boat, $boat_capacity, $status, $boat_capacity, $new_folder_name, $tour_image, $tour_id]);
 
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'update', 'tour', "Updated tour: {$_POST['tour_name']}", $tour_id, 'tour');
+            SystemLogger::log($pdo, 'update', 'tour', "Updated boat: {$boat_name}", $tour_id, 'tour');
         }
-        $_SESSION['flash_success'] = "Tour updated successfully!";
-        header("Location: tour-dashboard.php");
+        $_SESSION['flash_success'] = 'Boat updated successfully!';
+        header('Location: tour-dashboard.php');
         exit();
     } catch(Exception $e) {
-        $error = "Failed to update tour: " . $e->getMessage();
+        $error = 'Failed to update boat: ' . $e->getMessage();
     }
 }
 
@@ -345,13 +281,13 @@ if(isset($_GET['delete_tour']) && ($is_admin || $is_staff)) {
         $pdo->prepare("DELETE FROM tours WHERE id = ?")->execute([$_GET['delete_tour']]);
 
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'delete', 'tour', "Deleted tour: " . ($folder['tour_name'] ?? "ID {$_GET['delete_tour']}"), (int)$_GET['delete_tour'], 'tour', null, null, 'warning');
+            SystemLogger::log($pdo, 'delete', 'tour', "Deleted boat: " . ($folder['tour_name'] ?? "ID {$_GET['delete_tour']}"), (int)$_GET['delete_tour'], 'tour', null, null, 'warning');
         }
-        $_SESSION['flash_success'] = "Tour and all place images deleted!";
+        $_SESSION['flash_success'] = "Boat deleted successfully!";
         header("Location: tour-dashboard.php");
         exit();
     } catch(Exception $e) {
-        $error = "Failed to delete tour: " . $e->getMessage();
+        $error = "Failed to delete boat: " . $e->getMessage();
     }
 }
 
@@ -579,7 +515,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .tour-card .status-badge.status-available { background: rgba(16, 185, 129, 0.95); }
         .tour-card .status-badge.status-fully_booked { background: rgba(239, 68, 68, 0.95); }
         .tour-card .status-badge.status-seasonal { background: rgba(245, 158, 11, 0.95); }
-        .tour-card .places-count-badge { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.65); color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; backdrop-filter: blur(5px); z-index: 2; }
 
         .tour-card .tour-content { padding: 20px; flex: 1; display: flex; flex-direction: column; }
         .tour-card .tour-content h4 { font-size: 18px; font-weight: 700; color: white; margin-bottom: 8px; line-height: 1.3; }
@@ -588,37 +523,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .tour-card .tour-meta .meta-item { display: flex; align-items: center; gap: 5px; color: rgba(255,255,255,0.9); font-size: 13px; }
         .tour-card .tour-meta .meta-item i { color: white; font-size: 13px; opacity: 0.85; }
 
-        .tour-card .places-strip {
-            background: rgba(255,255,255,0.15);
-            border-radius: 8px;
-            padding: 8px;
-            margin-bottom: 10px;
-        }
-        .tour-card .places-strip-header {
-            display: flex; align-items: center; gap: 5px;
-            font-size: 10.5px; font-weight: 700;
-            color: #F4B400; text-transform: uppercase;
-            letter-spacing: 0.5px; margin-bottom: 6px;
-        }
-        .tour-card .places-strip-thumbs {
-            display: flex; gap: 5px; overflow-x: auto;
-        }
-        .tour-card .places-strip-thumbs::-webkit-scrollbar { height: 3px; }
-        .tour-card .places-strip-thumbs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 3px; }
-        .tour-card .place-mini-thumb {
-            flex-shrink: 0; width: 38px; height: 38px;
-            border-radius: 6px; object-fit: cover;
-            border: 2px solid rgba(255,255,255,0.4);
-            background: rgba(255,255,255,0.2);
-        }
-        .tour-card .places-more {
-            flex-shrink: 0; width: 38px; height: 38px;
-            border-radius: 6px; background: rgba(0,0,0,0.4);
-            color: white; font-size: 10px; font-weight: 700;
-            display: flex; align-items: center; justify-content: center;
-            border: 2px solid rgba(255,255,255,0.4);
-        }
-
         .tour-card .tour-desc { color: rgba(255,255,255,0.9); font-size: 13px; line-height: 1.5; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 39px; }
         .tour-card .price-tag { font-size: 22px; font-weight: 700; color: #F4B400; margin: 4px 0 10px; line-height: 1.2; }
         .tour-card .price-tag small { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.7); margin-left: 2px; }
@@ -626,7 +530,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .tour-card .tour-actions { margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.12); display: flex; gap: 8px; flex-wrap: wrap; }
         .tour-card .btn-card { flex: 1; min-width: 70px; min-height: 40px; padding: 10px 12px; border: none; border-radius: 10px; font-weight: 700; font-size: 12.5px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; transition: all 0.2s; }
         .tour-card .btn-card:active { transform: scale(0.97); }
-        .tour-card .btn-places-card { background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3); }
         .tour-card .btn-edit-card { background: #f59e0b; color: white; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3); }
         .tour-card .btn-delete-card { background: #ef4444; color: white; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
 
@@ -675,218 +578,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .current-image-preview .label { font-size: 11px; color: #64748b; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; }
         .current-image-preview .no-image { color: #94a3b8; font-size: 12px; padding: 20px; font-style: italic; }
 
-        .places-manager {
-            background: #f8fafc;
-            border-radius: 12px;
-            padding: 14px;
-            border: 1px solid #e8f0fe;
-            margin-bottom: 15px;
-        }
-        .places-manager-header {
-            display: flex; justify-content: space-between;
-            align-items: center; margin-bottom: 12px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #e8f0fe;
-            gap: 10px; flex-wrap: wrap;
-        }
-        .places-manager-header h4 {
-            font-size: 13px; font-weight: 700;
-            color: #0B2447; margin: 0;
-            display: flex; align-items: center; gap: 6px;
-        }
-        .places-manager-header h4 i { color: #4DA6D9; }
-        .places-manager-hint {
-            font-size: 11.5px;
-            color: #64748b;
-            margin-bottom: 12px;
-            line-height: 1.5;
-            padding: 8px 10px;
-            background: #fef3c7;
-            border-radius: 8px;
-            border-left: 3px solid #f59e0b;
-        }
-        .places-manager-hint i { color: #f59e0b; }
-
-        .btn-add-place {
-            background: linear-gradient(135deg, #10b981, #059669);
-            color: white; border: none;
-            padding: 10px 16px; border-radius: 10px;
-            font-size: 12px; font-weight: 700;
-            cursor: pointer; display: inline-flex;
-            align-items: center; gap: 6px;
-            box-shadow: 0 3px 10px rgba(16, 185, 129, 0.3);
-            transition: all 0.2s;
-        }
-        .btn-add-place:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(16, 185, 129, 0.4); }
-
-        .place-rows-container {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .place-row {
-            display: grid;
-            grid-template-columns: 70px 1fr auto;
-            gap: 10px;
-            align-items: center;
-            background: white;
-            padding: 10px;
-            border-radius: 12px;
-            border: 1px solid #e2e8f0;
-            transition: all 0.2s;
-        }
-        .place-row:hover { border-color: #4DA6D9; }
-
-        .place-img-preview {
-            width: 70px; height: 70px;
-            border-radius: 10px;
-            overflow: hidden;
-            background: #eef2f7;
-            display: flex; align-items: center; justify-content: center;
-            position: relative;
-            cursor: pointer;
-            border: 2px dashed #cbd5e1;
-            transition: all 0.2s;
-            flex-shrink: 0;
-        }
-        .place-img-preview:hover { border-color: #4DA6D9; background: #f0f7fb; }
-        .place-img-preview.has-image { border-style: solid; border-color: #4DA6D9; }
-        .place-img-preview img {
-            width: 100%; height: 100%;
-            object-fit: cover;
-        }
-        .place-img-preview .placeholder-icon {
-            color: #94a3b8; font-size: 24px;
-        }
-        .place-img-preview .overlay {
-            position: absolute; inset: 0;
-            background: rgba(11, 36, 71, 0.6);
-            display: flex; align-items: center; justify-content: center;
-            color: white; font-size: 18px;
-            opacity: 0; transition: opacity 0.2s;
-        }
-        .place-img-preview:hover .overlay { opacity: 1; }
-
-        .place-inputs {
-            display: flex; flex-direction: column; gap: 6px; min-width: 0;
-        }
-        .place-inputs input[type="text"] {
-            width: 100%;
-            padding: 9px 12px;
-            border: 2px solid #e8f0fe;
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .place-inputs input[type="text"]:focus { outline: none; border-color: #4DA6D9; background: white; }
-        .place-inputs input[type="file"] {
-            font-size: 10.5px;
-            color: #94a3b8;
-        }
-        .place-inputs input[type="file"]::file-selector-button {
-            background: #eef2ff; color: #4f46e5;
-            border: none; padding: 4px 10px;
-            border-radius: 6px; font-size: 11px;
-            font-weight: 600; cursor: pointer;
-            margin-right: 6px;
-        }
-
-        .place-row-remove {
-            background: #fee2e2; color: #ef4444;
-            border: none; width: 36px; height: 36px;
-            border-radius: 10px; cursor: pointer;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 14px;
-            flex-shrink: 0;
-            transition: all 0.2s;
-        }
-        .place-row-remove:hover { background: #ef4444; color: white; }
-
-        .places-empty-msg {
-            text-align: center;
-            padding: 20px 15px;
-            color: #94a3b8;
-            font-size: 12.5px;
-            font-style: italic;
-            background: white;
-            border-radius: 10px;
-            border: 1px dashed #cbd5e1;
-        }
-
-        .places-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-            gap: 12px;
-        }
-        .place-card-view {
-            background: #f8fafc;
-            border: 1px solid #e8f0fe;
-            border-radius: 12px;
-            overflow: hidden;
-            transition: all 0.25s;
-            cursor: pointer;
-        }
-        .place-card-view:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(77, 166, 217, 0.2); border-color: #4DA6D9; }
-        .place-card-view-img {
-            width: 100%;
-            height: 110px;
-            object-fit: cover;
-            background: #e2e8f0;
-            display: block;
-        }
-        .place-card-view-img-placeholder {
-            width: 100%;
-            height: 110px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(135deg, #e0f2fe, #bae6fd);
-            color: #0284c7;
-            font-size: 30px;
-        }
-        .place-card-view-name {
-            padding: 8px 10px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #1e293b;
-            text-align: center;
-            line-height: 1.3;
-            word-break: break-word;
-        }
-
-        .place-lightbox {
-            display: none; position: fixed; inset: 0; z-index: 9999;
-            background: rgba(0,0,0,0.92); align-items: center; justify-content: center;
-            padding: 20px;
-        }
-        .place-lightbox.show { display: flex; }
-        .place-lightbox img {
-            max-width: 95%; max-height: 85vh; border-radius: 12px;
-            box-shadow: 0 30px 80px rgba(0,0,0,0.6);
-        }
-        .place-lightbox-caption {
-            position: absolute; bottom: 30px; left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.75); color: white;
-            padding: 10px 24px; border-radius: 24px;
-            font-size: 14px; font-weight: 600;
-        }
-        .place-lightbox-close {
-            position: absolute; top: 20px; right: 20px;
-            background: rgba(255,255,255,0.15); color: white;
-            border: none; width: 48px; height: 48px; border-radius: 50%;
-            font-size: 20px; cursor: pointer; transition: all 0.25s;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .place-lightbox-close:hover { background: #ef4444; transform: rotate(90deg); }
-
         @media (max-width: 768px) {
             .modal-content { padding: 20px; }
             .form-row { grid-template-columns: 1fr; }
-            .place-row { grid-template-columns: 60px 1fr auto; gap: 8px; padding: 8px; }
-            .place-img-preview { width: 60px; height: 60px; }
         }
 
         .alert { padding: 15px 20px; border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
@@ -1092,7 +786,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                         <?php endif; ?>
                     </span>
                 </h1>
-                <p>Manage your tour packages, view bookings, and track revenue</p>
+                <p>Manage boat information, pricing, capacity, and availability</p>
             </div>
             <div class="user-profile">
                 <div class="user-info" style="text-align: right;">
@@ -1130,7 +824,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 <h1><i class="fas fa-umbrella-beach"></i> Tour Management</h1>
                 <div class="underline"></div>
                 <p>
-                    Manage all tour packages, view bookings, and track revenue
+                    Manage boat information, pricing, capacity, and availability
                     <?php if($is_staff): ?>
                         <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
                     <?php endif; ?>
@@ -1145,11 +839,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     <div>
         <h2>
             <i class="fas fa-list"></i>
-            Manage Tours
+            Manage Boats
         </h2>
 
         <p class="section-subtitle">
-            Manage tour packages, prices, availability, and destinations
+            Maintain boat name, description, capacity, price, destinations, and availability
         </p>
     </div>
 
@@ -1161,14 +855,14 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <input 
                 type="text" 
                 id="tourSearch"
-                placeholder="Search tours..."
+                placeholder="Search boats..."
             >
         </div>
 
 
         <button class="btn btn-primary" onclick="showModal('addTour')">
             <i class="fas fa-plus"></i>
-            Add New Tour
+            Add New Boat
         </button>
 
     </div>
@@ -1181,9 +875,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 <table>
                     <thead>
                         <tr>
-                            <th>Image</th><th>Tour Name</th><th>Price/Boat</th>
-                            <th>Boat Capacity</th><th>Status</th>
-                            <th>Places</th><th>Actions</th>
+                            <th>Image</th><th>Boat Name</th><th>Boat Price</th>
+                            <th>Boat Capacity</th><th>Destinations</th><th>Availability</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1192,7 +886,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                             $boat_label = getBoatCapacityLabel($tour['max_guests']);
                             $badge_class = getBoatBadgeClass($tour['max_guests']);
                             $main_image = getTourMainImage($tour);
-                            $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
                         ?>
                         <tr class="tour-row"
     data-search="<?php echo strtolower(htmlspecialchars(
@@ -1218,6 +911,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                     <br><small><?php echo $boat_label; ?></small>
                                 </span>
                             </td>
+                            <td><span class="badge badge-info"><i class="fas fa-map-marked-alt"></i> 12–14 islands</span></td>
                             <td>
                                 <span class="badge <?php echo $tour['status'] == 'available' ? 'badge-success' : ($tour['status'] == 'fully_booked' ? 'badge-danger' : 'badge-warning'); ?>">
                                     <i class="fas fa-<?php echo $tour['status'] == 'available' ? 'check-circle' : ($tour['status'] == 'fully_booked' ? 'times-circle' : 'calendar-alt'); ?>"></i>
@@ -1225,17 +919,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                 </span>
                             </td>
                             <td>
-                                <button class="btn btn-sm" style="background:#8b5cf6; color:white; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer; border:none;"
-                                        onclick="showPlaces(<?php echo $tour['id']; ?>, '<?php echo addslashes($tour['tour_name']); ?>')">
-                                    <i class="fas fa-map-marked-alt"></i> <?php echo count($places); ?>
-                                </button>
-                            </td>
-                            <td>
                                 <div class="action-buttons">
                                     <button class="btn-action btn-edit" onclick='editTour(<?php echo htmlspecialchars(json_encode($tour), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-edit"></i> <span>Edit</span>
                                     </button>
-                                    <a href="?delete_tour=<?php echo $tour['id']; ?>" class="btn-action btn-delete" onclick="return confirm('Delete this tour and all place images?')">
+                                    <a href="?delete_tour=<?php echo $tour['id']; ?>" class="btn-action btn-delete" onclick="return confirm('Delete this boat? Existing related records may also be affected.')">
                                         <i class="fas fa-trash"></i> <span>Delete</span>
                                     </a>
                                 </div>
@@ -1253,7 +941,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                     $badge_class = getBoatBadgeClass($tour['max_guests']);
                     $main_image = getTourMainImage($tour);
                     $status = $tour['status'] ?? 'available';
-                    $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
                 ?>
                 <div class="tour-card">
                     <div class="tour-image-wrapper">
@@ -1280,11 +967,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                             <?php echo ucfirst(str_replace('_', ' ', $status)); ?>
                         </span>
 
-                        <?php if(count($places) > 0): ?>
-                        <span class="places-count-badge">
-                            <i class="fas fa-map-marked-alt"></i> <?php echo count($places); ?>
-                        </span>
-                        <?php endif; ?>
                     </div>
 
                     <div class="tour-content">
@@ -1295,42 +977,12 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                 <i class="fas fa-users"></i>
                                 <span><?php echo $boat_label; ?></span>
                             </div>
+                            <div class="meta-item">
+                                <i class="fas fa-map-marked-alt"></i>
+                                <span>12–14 islands</span>
+                            </div>
                         </div>
 
-                        <?php if(!empty($places)): ?>
-                        <div class="places-strip">
-                            <div class="places-strip-header">
-                                <i class="fas fa-map-marked-alt"></i> Places (<?php echo count($places); ?>)
-                            </div>
-                            <div class="places-strip-thumbs">
-                                <?php
-                                $shown = 0;
-                                $maxShow = 4;
-                                foreach ($places as $p):
-                                    if ($shown >= $maxShow) break;
-                                    $hasImg = !empty($p['image']) && file_exists($p['image']);
-                                ?>
-                                    <?php if ($hasImg): ?>
-                                        <img src="<?php echo htmlspecialchars($p['image']); ?>"
-                                             class="place-mini-thumb"
-                                             alt="<?php echo htmlspecialchars($p['name']); ?>"
-                                             title="<?php echo htmlspecialchars($p['name']); ?>">
-                                    <?php else: ?>
-                                        <div class="place-mini-thumb" style="display:flex; align-items:center; justify-content:center; color:white; font-size:14px;"
-                                             title="<?php echo htmlspecialchars($p['name']); ?>">
-                                            <i class="fas fa-map-pin"></i>
-                                        </div>
-                                    <?php endif; ?>
-                                <?php
-                                    $shown++;
-                                endforeach;
-                                if (count($places) > $maxShow):
-                                ?>
-                                    <div class="places-more">+<?php echo count($places) - $maxShow; ?></div>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <?php endif; ?>
 
                         <?php if(!empty($tour['description'])): ?>
                         <div class="tour-desc">
@@ -1343,17 +995,13 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                         </div>
 
                         <div class="tour-actions">
-                            <button type="button" class="btn-card btn-places-card"
-                                    onclick="showPlaces(<?php echo $tour['id']; ?>, '<?php echo addslashes($tour['tour_name']); ?>')">
-                                <i class="fas fa-map-marked-alt"></i> Places
-                            </button>
                             <button type="button" class="btn-card btn-edit-card"
                                     onclick='editTour(<?php echo htmlspecialchars(json_encode($tour), ENT_QUOTES, "UTF-8"); ?>)'>
                                 <i class="fas fa-edit"></i> Edit
                             </button>
                             <a href="?delete_tour=<?php echo $tour['id']; ?>"
                                class="btn-card btn-delete-card"
-                               onclick="return confirm('Delete this tour and all place images?')">
+                               onclick="return confirm('Delete this boat? Existing related records may also be affected.')">
                                 <i class="fas fa-trash"></i> Delete
                             </a>
                         </div>
@@ -1365,7 +1013,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <?php else: ?>
             <div style="text-align: center; padding: 60px 20px; color: #94a3b8;">
                 <i class="fas fa-umbrella-beach" style="font-size: 48px; margin-bottom: 15px; color: #cbd5e1; display:block;"></i>
-                <p>No tours found. Click "Add New Tour" to get started!</p>
+                <p>No boats found. Click "Add New Boat" to get started!</p>
             </div>
             <?php endif; ?>
         </div>
@@ -1386,179 +1034,142 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     </div>
 </div>
 
-<!-- ADD TOUR MODAL -->
+<!-- ADD BOAT MODAL -->
 <div class="modal" id="addTourModal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
-            <h3><i class="fas fa-plus-circle"></i> Add New Tour</h3>
+            <h3><i class="fas fa-plus-circle"></i> Add New Boat</h3>
             <button class="close" onclick="hideModal('addTour')">&times;</button>
         </div>
         <form method="POST" enctype="multipart/form-data" id="addTourForm">
-            <div class="form-section-title"><i class="fas fa-umbrella-beach"></i> Tour Information</div>
+            <div class="form-section-title"><i class="fas fa-ship"></i> Boat Information</div>
 
             <div class="form-group">
-                <label>Tour Name <span class="required">*</span></label>
-                <input type="text" name="tour_name" class="form-control" required>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Price per Boat (₱) <span class="required">*</span></label>
-                    <input type="number" name="price_per_boat" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Boat Capacity <span class="required">*</span></label>
-                    <select name="boat_capacity" class="form-select" required>
-                        <option value="5">🟢 Small Boat (1-5 PAX)</option>
-                        <option value="10">🔵 Medium Boat (6-10 PAX)</option>
-                        <option value="15">🟡 Large Boat (11-15 PAX)</option>
-                        <option value="20">🔴 Deluxe Boat (16-20 PAX)</option>
-                    </select>
-                </div>
+                <label>Boat Name <span class="required">*</span></label>
+                <input type="text" name="tour_name" class="form-control" required maxlength="200">
             </div>
 
             <div class="form-group">
                 <label>Description</label>
-                <textarea name="description" class="form-control" rows="3"></textarea>
+                <textarea name="description" class="form-control" rows="4" placeholder="Describe the boat and service."></textarea>
             </div>
 
-            <div class="form-section-title"><i class="fas fa-map-marked-alt"></i> Places to Visit</div>
-
-            <div class="places-manager">
-                <div class="places-manager-header">
-                    <h4><i class="fas fa-list-ul"></i> Places List</h4>
-                    <button type="button" class="btn-add-place" onclick="addPlaceRow('add')">
-                        <i class="fas fa-plus"></i> Add Place
-                    </button>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Boat Capacity <span class="required">*</span></label>
+                    <select name="boat_capacity" class="form-select" required>
+                        <option value="5">Small Boat (1–5 PAX)</option>
+                        <option value="10">Medium Boat (6–10 PAX)</option>
+                        <option value="15">Large Boat (11–15 PAX)</option>
+                        <option value="20">Deluxe Boat (16–20 PAX)</option>
+                    </select>
                 </div>
-
-                <div class="places-manager-hint">
-                    <i class="fas fa-lightbulb"></i> You can add <strong>any number of places</strong>. Each place has a name and a picture. Click the picture box to upload.
+                <div class="form-group">
+                    <label>Boat Price (₱) <span class="required">*</span></label>
+                    <input type="number" name="price_per_boat" class="form-control" min="0" step="0.01" required>
                 </div>
-
-                <div class="place-rows-container" id="addPlacesContainer"></div>
-
-                <textarea name="places_to_visit" id="addPlacesTextarea" style="display:none;"></textarea>
             </div>
 
-            <div class="form-section-title"><i class="fas fa-image"></i> Main Tour Image</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Destinations</label>
+                    <input type="text" class="form-control" value="12–14 islands" readonly>
+                    <div style="font-size:11px;color:#64748b;margin-top:5px;"><i class="fas fa-lock"></i> Fixed destination coverage requested by the client.</div>
+                </div>
+                <div class="form-group">
+                    <label>Availability</label>
+                    <select name="status" class="form-select">
+                        <option value="available">Available</option>
+                        <option value="fully_booked">Fully Booked</option>
+                        <option value="seasonal">Seasonal</option>
+                    </select>
+                </div>
+            </div>
 
+            <div class="form-section-title"><i class="fas fa-image"></i> Main Boat Image</div>
             <div class="form-group">
-                <label>Tour Image</label>
-                <input type="file" name="tour_image" class="form-control" accept="image/*">
+                <label>Boat Image</label>
+                <input type="file" name="tour_image" class="form-control" accept="image/jpeg,image/png,image/gif,image/webp">
+                <div style="font-size:11px;color:#64748b;margin-top:5px;"><i class="fas fa-info-circle"></i> This is the boat photo only. Individual island photos are no longer used.</div>
             </div>
 
-            <button type="submit" name="add_tour" class="btn btn-primary" style="width: 100%;">
-                <i class="fas fa-save"></i> Add Tour
+            <button type="submit" name="add_tour" class="btn btn-primary" style="width:100%;">
+                <i class="fas fa-save"></i> Add Boat
             </button>
         </form>
     </div>
 </div>
 
-<!-- PLACES VIEW MODAL -->
-<div class="modal" id="placesModal">
-    <div class="modal-content modal-lg">
-        <div class="modal-header">
-            <h3><i class="fas fa-map-marked-alt"></i> Places to Visit - <span id="placesTourName"></span></h3>
-            <button class="close" onclick="hideModal('places')">&times;</button>
-        </div>
-        <div id="placesContent"></div>
-    </div>
-</div>
-
-<!-- EDIT TOUR MODAL -->
+<!-- EDIT BOAT MODAL -->
 <div class="modal" id="editTourModal">
     <div class="modal-content modal-lg">
         <div class="modal-header">
-            <h3><i class="fas fa-edit"></i> Edit Tour</h3>
+            <h3><i class="fas fa-edit"></i> Edit Boat</h3>
             <button class="close" onclick="hideModal('editTour')">&times;</button>
         </div>
         <form method="POST" enctype="multipart/form-data" id="editTourForm">
             <input type="hidden" name="tour_id" id="edit_tour_id">
 
-            <div class="form-section-title"><i class="fas fa-umbrella-beach"></i> Tour Information</div>
+            <div class="form-section-title"><i class="fas fa-ship"></i> Boat Information</div>
 
             <div class="form-group">
-                <label>Tour Name <span class="required">*</span></label>
-                <input type="text" name="tour_name" id="edit_tour_name" class="form-control" required>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Price per Boat (₱) <span class="required">*</span></label>
-                    <input type="number" name="price_per_boat" id="edit_price" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>Boat Capacity <span class="required">*</span></label>
-                    <select name="boat_capacity" id="edit_boat_capacity" class="form-select" required>
-                        <option value="5">🟢 Small Boat (1-5 PAX)</option>
-                        <option value="10">🔵 Medium Boat (6-10 PAX)</option>
-                        <option value="15">🟡 Large Boat (11-15 PAX)</option>
-                        <option value="20">🔴 Deluxe Boat (16-20 PAX)</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label>Status</label>
-                <select name="status" id="edit_status" class="form-select">
-                    <option value="available">Available</option>
-                    <option value="fully_booked">Fully Booked</option>
-                    <option value="seasonal">Seasonal</option>
-                </select>
+                <label>Boat Name <span class="required">*</span></label>
+                <input type="text" name="tour_name" id="edit_tour_name" class="form-control" required maxlength="200">
             </div>
 
             <div class="form-group">
                 <label>Description</label>
-                <textarea name="description" id="edit_description" class="form-control" rows="3"></textarea>
+                <textarea name="description" id="edit_description" class="form-control" rows="4"></textarea>
             </div>
 
-            <div class="form-section-title"><i class="fas fa-map-marked-alt"></i> Places to Visit</div>
-
-            <div class="places-manager">
-                <div class="places-manager-header">
-                    <h4><i class="fas fa-list-ul"></i> Places List</h4>
-                    <button type="button" class="btn-add-place" onclick="addPlaceRow('edit')">
-                        <i class="fas fa-plus"></i> Add Place
-                    </button>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Boat Capacity <span class="required">*</span></label>
+                    <select name="boat_capacity" id="edit_boat_capacity" class="form-select" required>
+                        <option value="5">Small Boat (1–5 PAX)</option>
+                        <option value="10">Medium Boat (6–10 PAX)</option>
+                        <option value="15">Large Boat (11–15 PAX)</option>
+                        <option value="20">Deluxe Boat (16–20 PAX)</option>
+                    </select>
                 </div>
-
-                <div class="places-manager-hint">
-                    <i class="fas fa-lightbulb"></i> Edit the name or change the picture. You can also add new places.
+                <div class="form-group">
+                    <label>Boat Price (₱) <span class="required">*</span></label>
+                    <input type="number" name="price_per_boat" id="edit_price" class="form-control" min="0" step="0.01" required>
                 </div>
-
-                <div class="place-rows-container" id="editPlacesContainer"></div>
-
-                <textarea name="places_to_visit" id="editPlacesTextarea" style="display:none;"></textarea>
             </div>
 
-            <div class="form-section-title"><i class="fas fa-image"></i> Main Tour Image</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Destinations</label>
+                    <input type="text" class="form-control" value="12–14 islands" readonly>
+                    <div style="font-size:11px;color:#64748b;margin-top:5px;"><i class="fas fa-lock"></i> Individual island names and photos are intentionally hidden from the active workflow.</div>
+                </div>
+                <div class="form-group">
+                    <label>Availability</label>
+                    <select name="status" id="edit_status" class="form-select">
+                        <option value="available">Available</option>
+                        <option value="fully_booked">Fully Booked</option>
+                        <option value="seasonal">Seasonal</option>
+                    </select>
+                </div>
+            </div>
 
+            <div class="form-section-title"><i class="fas fa-image"></i> Main Boat Image</div>
             <div class="form-group">
                 <label>Current Main Image</label>
                 <div class="current-image-preview" id="current_main_image_preview"></div>
             </div>
-
             <div class="form-group">
                 <label>Replace Main Image</label>
-                <input type="file" name="tour_image" id="edit_tour_image" class="form-control" accept="image/*">
-                <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">
-                    <i class="fas fa-info-circle"></i> Upload a new image to replace the current one. Leave empty to keep existing.
-                </div>
+                <input type="file" name="tour_image" id="edit_tour_image" class="form-control" accept="image/jpeg,image/png,image/gif,image/webp">
+                <div style="font-size:11px;color:#94a3b8;margin-top:4px;"><i class="fas fa-info-circle"></i> Leave empty to keep the existing boat image.</div>
             </div>
 
-            <button type="submit" name="edit_tour" class="btn btn-primary" style="width: 100%;">
-                <i class="fas fa-save"></i> Update Tour
+            <button type="submit" name="edit_tour" class="btn btn-primary" style="width:100%;">
+                <i class="fas fa-save"></i> Update Boat
             </button>
         </form>
     </div>
-</div>
-
-<!-- LIGHTBOX -->
-<div class="place-lightbox" id="placeLightbox" onclick="if(event.target === this) closePlaceLightbox()">
-    <button class="place-lightbox-close" onclick="closePlaceLightbox()">&times;</button>
-    <img id="placeLightboxImg" src="" alt="Place">
-    <div class="place-lightbox-caption" id="placeLightboxCaption"></div>
 </div>
 
 <div class="logout-modal-overlay" id="logoutModal">
@@ -1603,8 +1214,6 @@ document.addEventListener('keydown', function(e) {
         if (sidebar.classList.contains('open')) toggleSidebar();
         const lm = document.getElementById('logoutModal');
         if (lm && lm.classList.contains('show')) closeLogoutModal();
-        const lb = document.getElementById('placeLightbox');
-        if (lb && lb.classList.contains('show')) closePlaceLightbox();
     }
 });
 
@@ -1627,124 +1236,6 @@ function showModal(type) {
 function hideModal(type) {
     document.getElementById(type + 'Modal').classList.remove('show');
     document.body.style.overflow = 'auto';
-}
-
-// LIGHTBOX
-function openPlaceLightbox(src, name) {
-    if (!src) return;
-    document.getElementById('placeLightboxImg').src = src;
-    document.getElementById('placeLightboxCaption').textContent = name || '';
-    document.getElementById('placeLightbox').classList.add('show');
-}
-function closePlaceLightbox() {
-    document.getElementById('placeLightbox').classList.remove('show');
-}
-
-// PLACES MANAGER — Add Row
-let placeRowCounter = 0;
-
-function addPlaceRow(mode, prefillName, prefillImagePath) {
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    const rowId = 'place_row_' + mode + '_' + (++placeRowCounter) + '_' + Date.now();
-
-    const emptyMsg = container.querySelector('.places-empty-msg');
-    if (emptyMsg) emptyMsg.remove();
-
-    const row = document.createElement('div');
-    row.className = 'place-row';
-    row.id = rowId;
-    row.dataset.imagePath = prefillImagePath || '';
-
-    const hasImage = prefillImagePath && prefillImagePath !== '';
-
-    row.innerHTML = `
-        <div class="place-img-preview ${hasImage ? 'has-image' : ''}" onclick="document.getElementById('${rowId}_file').click()">
-            ${hasImage
-                ? `<img src="${escapeAttr(prefillImagePath)}?t=${Date.now()}" alt="Place" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                   <div class="placeholder-icon" style="display:none;"><i class="fas fa-image"></i></div>`
-                : `<div class="placeholder-icon"><i class="fas fa-camera"></i></div>`
-            }
-            <div class="overlay"><i class="fas fa-camera"></i></div>
-        </div>
-
-        <div class="place-inputs">
-            <input type="text" class="place-name-field" placeholder="Place name (e.g., Governor's Island)" value="${escapeAttr(prefillName || '')}">
-            <input type="file" id="${rowId}_file" class="place-image-field" accept="image/*" onchange="previewPlaceImage(this, '${rowId}')">
-        </div>
-
-        <button type="button" class="place-row-remove" onclick="removePlaceRow('${rowId}', '${mode}')">
-            <i class="fas fa-trash"></i>
-        </button>
-    `;
-    container.appendChild(row);
-}
-
-function previewPlaceImage(input, rowId) {
-    if (!input.files || !input.files[0]) return;
-    const row = document.getElementById(rowId);
-    const preview = row.querySelector('.place-img-preview');
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        preview.innerHTML = `
-            <img src="${e.target.result}" alt="Place">
-            <div class="overlay"><i class="fas fa-camera"></i></div>
-        `;
-        preview.classList.add('has-image');
-    };
-    reader.readAsDataURL(input.files[0]);
-}
-
-function removePlaceRow(rowId, mode) {
-    const row = document.getElementById(rowId);
-    if (row) row.remove();
-
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    if (container.querySelectorAll('.place-row').length === 0) {
-        showEmptyMessage(mode);
-    }
-}
-
-function showEmptyMessage(mode) {
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    if (container.querySelector('.places-empty-msg')) return;
-    const msg = document.createElement('div');
-    msg.className = 'places-empty-msg';
-    msg.innerHTML = '<i class="fas fa-info-circle"></i> No places yet. Click "Add Place" to add one.';
-    container.appendChild(msg);
-}
-
-function collectPlacesFromRows(mode) {
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    const rows = container.querySelectorAll('.place-row');
-    const lines = [];
-
-    rows.forEach(row => {
-        const nameField = row.querySelector('.place-name-field');
-        const name = nameField ? nameField.value.trim() : '';
-        if (!name) return;
-
-        const imagePath = row.dataset.imagePath || '';
-        lines.push(name + (imagePath ? '|' + imagePath : ''));
-    });
-    return lines.join("\n");
-}
-
-function collectPlaceImageFiles(mode) {
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    const rows = container.querySelectorAll('.place-row');
-    const files = [];
-    rows.forEach(row => {
-        const fileInput = row.querySelector('.place-image-field');
-        const nameField = row.querySelector('.place-name-field');
-        const name = nameField ? nameField.value.trim() : '';
-        if (!name) return;
-        if (fileInput && fileInput.files && fileInput.files[0]) {
-            files.push(fileInput.files[0]);
-        } else {
-            files.push(null);
-        }
-    });
-    return files;
 }
 
 // EDIT TOUR
@@ -1777,137 +1268,9 @@ function editTour(tour) {
     }
     document.getElementById('edit_tour_image').value = '';
 
-    const editContainer = document.getElementById('editPlacesContainer');
-    editContainer.innerHTML = '';
-
-    const placesRaw = tour.places_to_visit || '';
-    const lines = placesRaw.split(/[\r\n]+/).map(s => s.trim()).filter(s => s !== '');
-
-    if (lines.length === 0) {
-        showEmptyMessage('edit');
-    } else {
-        lines.forEach(line => {
-            let name = line;
-            let imagePath = '';
-            if (line.indexOf('|') !== -1) {
-                const parts = line.split('|');
-                name = (parts[0] || '').trim();
-                imagePath = (parts[1] || '').trim();
-            }
-            if (name) addPlaceRow('edit', name, imagePath);
-        });
-    }
 
     showModal('editTour');
 }
-
-// FORM SUBMIT
-document.getElementById('addTourForm').addEventListener('submit', function(e) {
-    document.getElementById('addPlacesTextarea').value = collectPlacesFromRows('add');
-});
-
-document.getElementById('editTourForm').addEventListener('submit', function(e) {
-    document.getElementById('editPlacesTextarea').value = collectPlacesFromRows('edit');
-});
-
-function preparePlaceFileInputs(mode) {
-    const container = document.getElementById(mode === 'add' ? 'addPlacesContainer' : 'editPlacesContainer');
-    const rows = container.querySelectorAll('.place-row');
-    container.querySelectorAll('input[type="file"][name="place_images[]"]').forEach(el => {
-        if (el.dataset.isHiddenHelper === '1') el.remove();
-    });
-    rows.forEach(row => {
-        const fileInput = row.querySelector('.place-image-field');
-        if (fileInput && fileInput.files && fileInput.files[0]) {
-            const hidden = document.createElement('input');
-            hidden.type = 'file';
-            hidden.name = 'place_images[]';
-            hidden.style.display = 'none';
-            hidden.dataset.isHiddenHelper = '1';
-            try {
-                const dt = new DataTransfer();
-                dt.items.add(fileInput.files[0]);
-                hidden.files = dt.files;
-            } catch(err) {}
-            row.appendChild(hidden);
-        }
-    });
-}
-
-document.getElementById('addTourForm').addEventListener('submit', function(e) {
-    preparePlaceFileInputs('add');
-}, true);
-
-document.getElementById('editTourForm').addEventListener('submit', function(e) {
-    preparePlaceFileInputs('edit');
-}, true);
-
-// SHOW PLACES MODAL
-function showPlaces(tourId, tourName) {
-    const tour = toursCache[tourId];
-    if (!tour) { alert('Tour data not found.'); return; }
-
-    document.getElementById('placesTourName').textContent = tourName;
-    const container = document.getElementById('placesContent');
-
-    const places = tour.places || [];
-    if (places.length === 0) {
-        container.innerHTML = `
-            <div style="text-align: center; padding: 40px; color: #94a3b8;">
-                <i class="fas fa-map-marked-alt" style="font-size: 40px; display: block; margin-bottom: 10px; color: #cbd5e1;"></i>
-                <p>No places added yet. Click <strong>Edit</strong> to add places.</p>
-            </div>`;
-    } else {
-        let gridHtml = '<div class="places-grid">';
-        places.forEach((p, idx) => {
-            const hasImg = p.image && p.imageExists;
-            const imgHtml = hasImg
-                ? `<img src="${escapeAttr(p.image)}" class="place-card-view-img" alt="${escapeAttr(p.name)}" onclick="openPlaceLightbox('${escapeAttr(p.image)}', '${escapeAttr(p.name)}')" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="place-card-view-img-placeholder" style="display:none;"><i class="fas fa-image"></i></div>`
-                : `<div class="place-card-view-img-placeholder"><i class="fas fa-map-pin"></i></div>`;
-            gridHtml += `
-                <div class="place-card-view" ${hasImg ? 'onclick="openPlaceLightbox(\'' + escapeAttr(p.image) + '\', \'' + escapeAttr(p.name) + '\')"' : ''}>
-                    ${imgHtml}
-                    <div class="place-card-view-name">${escapeHtml(p.name)}</div>
-                </div>
-            `;
-        });
-        gridHtml += '</div>';
-        container.innerHTML = gridHtml;
-    }
-
-    showModal('places');
-}
-
-function escapeHtml(t) {
-    if (!t) return '';
-    const d = document.createElement('div'); d.textContent = t; return d.innerHTML;
-}
-function escapeAttr(t) {
-    if (!t) return '';
-    return String(t).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
-
-// PLACES CACHE
-const toursCache = <?php
-    $cache = [];
-    foreach($tours as $tour) {
-        $places = parsePlacesToVisit($tour['places_to_visit'] ?? '');
-        $placesWithCheck = [];
-        foreach ($places as $p) {
-            $placesWithCheck[] = [
-                'name' => $p['name'],
-                'image' => $p['image'],
-                'imageExists' => !empty($p['image']) && file_exists($p['image'])
-            ];
-        }
-        $cache[$tour['id']] = [
-            'id' => $tour['id'],
-            'tour_name' => $tour['tour_name'],
-            'places' => $placesWithCheck
-        ];
-    }
-    echo json_encode($cache);
-?>;
 
 window.onclick = function(event) {
     if(event.target.classList.contains('modal')) {

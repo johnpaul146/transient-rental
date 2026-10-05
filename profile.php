@@ -405,7 +405,7 @@ $google_maps_embed = $content['location']['google_maps_embed'] ?? '';
 $maps_url = getGoogleMapsUrl($location_address);
 $default_map_url = 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3863.123456789!2d119.1234567!3d16.1234567!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x0%3A0x0!2zMTbCsDA3JzI0LjAiTiAxMTnCsDA3JzI0LjAiRQ!5e0!3m2!1sen!2sph!4v1234567890';
 $map_embed = !empty($google_maps_embed) && $google_maps_embed != '#' ? $google_maps_embed : $default_map_url;
-$facebook_link = $content['social']['facebook'] ?? '#';
+$facebook_link = trim((string)($content['social']['facebook'] ?? ''));
 
 // GCash settings
 $gcash_settings = [];
@@ -3937,9 +3937,11 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                 <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
                 <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
                 <div class="social-links">
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook" rel="noopener">
+                    <?php if ($facebook_link !== '' && $facebook_link !== '#'): ?>
+                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook" rel="noopener noreferrer">
                         <i class="fab fa-facebook-f"></i>
                     </a>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="footer-col">
@@ -3957,9 +3959,11 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
             </div>
             <div class="footer-col">
                 <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                <div class="footer-map">
-                    <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                </div>
+                <?php if (!empty($map_embed) && $map_embed !== '#'): ?>
+                    <div class="footer-map">
+                        <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                    </div>
+                <?php endif; ?>
                 <ul>
                     <li>
                         <i class="fas fa-map-marker-alt"></i>
@@ -3978,10 +3982,10 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
             </div>
         </div>
         <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?></div>
+            <div>&copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.</div>
             <div class="footer-bottom-links">
-                <a onclick="reopenTermsModal('privacy'); return false;"><?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?></a>
-                <a onclick="reopenTermsModal('terms'); return false;"><?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?></a>
+                <a onclick="reopenTermsModal('privacy'); return false;">Privacy Policy</a>
+                <a onclick="reopenTermsModal('terms'); return false;">Terms &amp; Conditions</a>
             </div>
         </div>
     </div>

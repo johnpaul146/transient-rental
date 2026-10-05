@@ -192,12 +192,12 @@ if (isset($_POST['upload_logo']) && $is_admin) {
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log($pdo, 'upload', 'content',
-                logActor($user_info) . " uploaded a new site logo",
+                logActor($user_info) . " updated the website logo",
                 null, 'site_content', null,
                 ['file' => 'uploads/logos/' . $result['filename']]);
         }
 
-        $_SESSION['flash_success'] = "Logo uploaded successfully!";
+        $_SESSION['flash_success'] = "Website logo updated successfully.";
         header("Location: edit-content.php?fresh=" . time());
         exit();
     } else { $error = $result['message']; }
@@ -312,17 +312,17 @@ if (isset($_POST['upload_gcash_qr']) && $is_admin) {
 // ============================================================
 // REMOVALS
 // ============================================================
-if (isset($_GET['remove_logo']) && $is_admin) {
+if (isset($_POST['remove_logo']) && $is_admin) {
     foreach (glob('uploads/logos/logo.*') as $f) @unlink($f);
     $pdo->prepare("DELETE FROM site_content WHERE section_name='site_settings' AND content_key='logo_path'")->execute();
 
     if (class_exists('SystemLogger')) {
         SystemLogger::log($pdo, 'delete', 'content',
-            logActor($user_info) . " removed the site logo",
+            logActor($user_info) . " removed the website logo",
             null, 'site_content', null, null, 'warning');
     }
 
-    $_SESSION['flash_success'] = "Logo removed successfully.";
+    $_SESSION['flash_success'] = "Website logo removed. Default branding will be used.";
     header("Location: edit-content.php"); exit();
 }
 if (isset($_GET['remove_home_hero']) && $is_admin) {
@@ -516,16 +516,34 @@ if (isset($_POST['update_content']) && $is_admin) {
         $old_privacy_title= $content['privacy']['title']?? '';
 
         if (!empty($_POST['content']) && is_array($_POST['content'])) {
+            $locked_content_keys = [
+                'hero' => ['stats_houses_label', 'stats_houses_available_label', 'stats_tours_label', 'stats_tours_available_label'],
+                'features' => ['section_title', 'feature1_title', 'feature1_desc', 'feature2_title', 'feature2_desc', 'feature3_title', 'feature3_desc', 'feature4_title', 'feature4_desc'],
+                'cta' => ['button_houses_text', 'button_tours_text'],
+                'footer' => ['address', 'copyright', 'privacy_policy', 'terms_of_service'],
+            ];
+
             foreach ($_POST['content'] as $section => $items) {
+                // Terms & Conditions and system-controlled labels are locked by policy.
+                if ($section === 'terms') continue;
+                if (!is_array($items)) continue;
                 foreach ($items as $key => $value) {
+                    if (isset($locked_content_keys[$section]) && in_array($key, $locked_content_keys[$section], true)) {
+                        continue;
+                    }
                     saveSiteContent($pdo, $section, $key, $value);
                 }
             }
+
+            // Keep the legacy footer address synchronized for older pages/data consumers.
+            if (isset($_POST['content']['location']['address'])) {
+                saveSiteContent($pdo, 'footer', 'address', $_POST['content']['location']['address']);
+            }
         }
 
-        $new_terms_body   = $_POST['content']['terms']['body']   ?? $old_terms_body;
+        $new_terms_body   = $old_terms_body;
         $new_privacy_body = $_POST['content']['privacy']['body'] ?? $old_privacy_body;
-        $new_terms_title  = $_POST['content']['terms']['title']  ?? $old_terms_title;
+        $new_terms_title  = $old_terms_title;
         $new_privacy_title= $_POST['content']['privacy']['title']?? $old_privacy_title;
 
         $terms_changed = ($old_terms_body !== $new_terms_body)
@@ -534,9 +552,13 @@ if (isset($_POST['update_content']) && $is_admin) {
                       || ($old_privacy_title !== $new_privacy_title);
 
         if (class_exists('SystemLogger')) {
-            $sections = array_keys($_POST['content'] ?? []);
+            $sections = array_values(array_filter(
+                array_keys($_POST['content'] ?? []),
+                static fn($section) => $section !== 'terms'
+            ));
             $field_count = 0;
-            foreach ($_POST['content'] as $items) {
+            foreach (($_POST['content'] ?? []) as $section => $items) {
+                if ($section === 'terms') continue;
                 if (is_array($items)) $field_count += count($items);
             }
 
@@ -552,7 +574,7 @@ if (isset($_POST['update_content']) && $is_admin) {
                 ), 0, 8);
 
                 SystemLogger::log($pdo, 'update', 'terms',
-                    logActor($user_info) . " updated Terms & Privacy Policy (new version: {$new_version})",
+                    logActor($user_info) . " updated Privacy Policy (new acceptance version: {$new_version}); Terms & Conditions remained locked",
                     null, 'site_content', null,
                     ['new_version' => $new_version]);
             }
@@ -1054,10 +1076,683 @@ $current_terms_version = substr(md5(
         }
         .preview-section .file-name-display { font-size: 13px; color: #64748b; margin-top: 10px; }
         .preview-section .size-info { font-size: 12px; color: #94a3b8; margin-top: 5px; }
-        .hero-grid {
+
+        /* Website logo manager */
+        .logo-content-section { padding: 28px; }
+        .logo-section-intro {
+            border-bottom: 2px solid #e8f0fe;
+            padding-bottom: 16px;
+            margin-bottom: 22px;
+        }
+        .logo-content-section .logo-section-intro h2 {
+            border-bottom: 0;
+            padding-bottom: 0;
+            margin-bottom: 6px;
+        }
+        .logo-section-intro p {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.6;
+            margin: 0;
+        }
+        .logo-manager {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: minmax(220px, .78fr) minmax(0, 1.35fr);
             gap: 20px;
+            align-items: stretch;
+        }
+        .logo-panel {
+            border: 1px solid #dce8f8;
+            border-radius: 16px;
+            padding: 20px;
+            background: #fbfdff;
+        }
+        .logo-panel-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: #0B2447;
+            margin: 0 0 5px;
+        }
+        .logo-panel-copy {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.55;
+            margin: 0 0 16px;
+        }
+        .logo-card-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 12px;
+            color: #64748b;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .logo-current-preview {
+            min-height: 190px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+        }
+        .logo-current-preview img {
+            display: block;
+            max-width: 170px;
+            max-height: 170px;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            border-radius: 10px;
+        }
+        .logo-current-placeholder {
+            width: 140px;
+            height: 140px;
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #eef6ff, #dcecff);
+            color: #4DA6D9;
+            font-size: 42px;
+            border: 1px solid #d8e8fb;
+        }
+        .logo-current-details {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .logo-current-name {
+            min-width: 0;
+        }
+        .logo-current-name strong {
+            display: block;
+            color: #0f172a;
+            font-size: 14px;
+            line-height: 1.35;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .logo-current-name span {
+            display: block;
+            color: #94a3b8;
+            font-size: 11px;
+            margin-top: 3px;
+        }
+        .logo-status-pill {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .logo-status-pill.active { background: #ecfdf3; color: #0f9f6e; }
+        .logo-status-pill.fallback { background: #fff7ed; color: #c36a09; }
+        .logo-upload-dropzone {
+            position: relative;
+            min-height: 180px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 22px;
+            border: 2px dashed #cfe0f5;
+            border-radius: 14px;
+            background: #f8fbff;
+            cursor: pointer;
+            transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
+            text-align: center;
+        }
+        .logo-upload-dropzone:hover,
+        .logo-upload-dropzone.dragover {
+            border-color: #4DA6D9;
+            background: #f0f8ff;
+            box-shadow: 0 0 0 4px rgba(77,166,217,.08);
+        }
+        .logo-upload-dropzone input[type="file"] {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .logo-dropzone-default,
+        .logo-selected-state {
+            width: 100%;
+            pointer-events: none;
+        }
+        .logo-upload-icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 10px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #e8f4fd;
+            color: #4DA6D9;
+            font-size: 20px;
+        }
+        .logo-dropzone-default strong {
+            display: block;
+            color: #0f172a;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+        .logo-dropzone-default span {
+            display: block;
+            color: #64748b;
+            font-size: 12px;
+        }
+        .logo-selected-state {
+            display: none;
+            align-items: center;
+            gap: 14px;
+            text-align: left;
+        }
+        .logo-selected-state.show { display: flex; }
+        .logo-selected-preview {
+            width: 74px;
+            height: 74px;
+            flex: 0 0 74px;
+            border-radius: 12px;
+            background: #fff;
+            border: 1px solid #dce8f8;
+            object-fit: contain;
+            padding: 5px;
+        }
+        .logo-selected-info { min-width: 0; flex: 1; }
+        .logo-selected-info strong {
+            display: block;
+            color: #0f172a;
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .logo-selected-info span {
+            display: block;
+            color: #64748b;
+            font-size: 11px;
+            margin-top: 4px;
+        }
+        .logo-ready-badge {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 8px;
+            border-radius: 999px;
+            background: #ecfdf3;
+            color: #0f9f6e;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        .logo-upload-requirements {
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            color: #64748b;
+            font-size: 11px;
+            line-height: 1.5;
+            margin-top: 11px;
+        }
+        .logo-upload-requirements i { color: #4DA6D9; margin-top: 2px; }
+        .logo-save-row {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            margin-top: 16px;
+        }
+        .logo-save-btn {
+            border: 0;
+            border-radius: 10px;
+            padding: 11px 18px;
+            background: #4DA6D9;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            cursor: pointer;
+            transition: transform .2s ease, background .2s ease, box-shadow .2s ease;
+        }
+        .logo-save-btn:hover:not(:disabled) {
+            background: #3a8bbf;
+            transform: translateY(-1px);
+            box-shadow: 0 5px 14px rgba(77,166,217,.25);
+        }
+        .logo-save-btn:disabled {
+            background: #cbd5e1;
+            color: #f8fafc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .logo-readonly-panel {
+            grid-column: 1 / -1;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            border: 1px solid #fde68a;
+            background: #fffbeb;
+            color: #92400e;
+            border-radius: 14px;
+            padding: 14px 16px;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+        .logo-readonly-panel i { color: #f59e0b; margin-top: 2px; }
+        .logo-danger-zone {
+            grid-column: 1 / -1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 16px 18px;
+            border: 1px solid #fecaca;
+            border-radius: 14px;
+            background: #fffafa;
+        }
+        .logo-danger-zone strong {
+            display: block;
+            color: #991b1b;
+            font-size: 13px;
+            margin-bottom: 3px;
+        }
+        .logo-danger-zone p {
+            color: #7f1d1d;
+            font-size: 11px;
+            line-height: 1.5;
+            margin: 0;
+        }
+        .logo-remove-button {
+            flex: 0 0 auto;
+            border: 1px solid #ef4444;
+            background: #fff;
+            color: #dc2626;
+            border-radius: 9px;
+            padding: 9px 13px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: background .2s ease, color .2s ease;
+        }
+        .logo-remove-button:hover { background: #ef4444; color: #fff; }
+
+        .logo-remove-modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 10050;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(2, 18, 38, .58);
+            backdrop-filter: blur(3px);
+        }
+        .logo-remove-modal-overlay.show { display: flex; }
+        .logo-remove-modal {
+            width: min(430px, 100%);
+            background: #fff;
+            border-radius: 18px;
+            padding: 26px;
+            box-shadow: 0 24px 70px rgba(2,18,38,.28);
+            text-align: center;
+        }
+        .logo-remove-modal-icon {
+            width: 58px;
+            height: 58px;
+            margin: 0 auto 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 16px;
+            background: #fee2e2;
+            color: #dc2626;
+            font-size: 22px;
+        }
+        .logo-remove-modal h3 {
+            color: #0f172a;
+            font-size: 18px;
+            margin: 0 0 7px;
+        }
+        .logo-remove-modal p {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.6;
+            margin: 0 0 20px;
+        }
+        .logo-remove-modal-actions {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+        }
+        .logo-modal-cancel,
+        .logo-modal-confirm {
+            border-radius: 9px;
+            padding: 10px 16px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .logo-modal-cancel {
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #475569;
+        }
+        .logo-modal-confirm {
+            border: 1px solid #dc2626;
+            background: #dc2626;
+            color: #fff;
+        }
+        .logo-modal-cancel:hover { background: #f8fafc; }
+        .logo-modal-confirm:hover { background: #b91c1c; }
+
+        @media (max-width: 820px) {
+            .logo-manager { grid-template-columns: 1fr; }
+            .logo-danger-zone, .logo-readonly-panel { grid-column: auto; }
+        }
+        @media (max-width: 560px) {
+            .logo-content-section { padding: 20px 16px; }
+            .logo-panel { padding: 16px; }
+            .logo-current-details,
+            .logo-danger-zone { align-items: stretch; flex-direction: column; }
+            .logo-status-pill { align-self: flex-start; }
+            .logo-remove-button { width: 100%; justify-content: center; }
+            .logo-selected-state { align-items: flex-start; flex-wrap: wrap; }
+            .logo-ready-badge { margin-left: 88px; }
+            .logo-save-btn { width: 100%; justify-content: center; }
+            .logo-remove-modal-actions { flex-direction: column-reverse; }
+            .logo-modal-cancel, .logo-modal-confirm { width: 100%; }
+        }
+
+        /* Page banner manager */
+        .banner-content-section { padding: 28px; }
+        .banner-section-intro {
+            border-bottom: 2px solid #e8f0fe;
+            padding-bottom: 16px;
+            margin-bottom: 18px;
+        }
+        .banner-content-section .banner-section-intro h2 {
+            border-bottom: 0;
+            padding-bottom: 0;
+            margin-bottom: 6px;
+        }
+        .banner-section-intro p {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.6;
+            margin: 0;
+        }
+        .banner-list {
+            border: 1px solid #dce8f8;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #fff;
+            container-type: inline-size;
+        }
+        .banner-row {
+            display: grid;
+            grid-template-columns: minmax(180px, .9fr) 170px minmax(300px, 1.6fr);
+            gap: 16px;
+            align-items: center;
+            padding: 16px 18px;
+            border-bottom: 1px solid #e8eef7;
+            transition: background .2s ease, box-shadow .2s ease;
+        }
+        .banner-row:last-child { border-bottom: 0; }
+        .banner-row:hover { background: #fbfdff; }
+        .banner-row.is-selected {
+            background: #f5fbff;
+            box-shadow: inset 3px 0 0 #4DA6D9;
+        }
+        .banner-page {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+        .banner-page-icon {
+            width: 42px;
+            height: 42px;
+            flex: 0 0 42px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #edf7fd;
+            color: #4DA6D9;
+            font-size: 17px;
+            border: 1px solid #dcecf8;
+        }
+        .banner-page-copy { min-width: 0; }
+        .banner-page-copy strong {
+            display: block;
+            color: #0f172a;
+            font-size: 14px;
+            line-height: 1.35;
+        }
+        .banner-page-copy span {
+            display: block;
+            color: #94a3b8;
+            font-size: 11px;
+            line-height: 1.45;
+            margin-top: 3px;
+        }
+        .banner-thumbnail {
+            width: 170px;
+            height: 92px;
+            position: relative;
+            overflow: hidden;
+            border-radius: 12px;
+            border: 1px solid #dce8f8;
+            background: #f8fbff;
+        }
+        .banner-thumbnail img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+        .banner-thumbnail-placeholder {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #edf7fd, #dceeff);
+            color: #4DA6D9;
+            font-size: 24px;
+        }
+        .banner-thumbnail-fallback {
+            position: absolute;
+            left: 7px;
+            bottom: 7px;
+            padding: 3px 7px;
+            border-radius: 999px;
+            background: rgba(11,36,71,.82);
+            color: #fff;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .02em;
+        }
+        .banner-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 168px;
+            gap: 16px;
+            align-items: center;
+            min-width: 0;
+        }
+        .banner-state { min-width: 0; }
+        .banner-status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .banner-status-pill.custom { background: #ecfdf3; color: #0f9f6e; }
+        .banner-status-pill.fallback { background: #fff7ed; color: #c36a09; }
+        .banner-status-pill.ready { background: #eaf5ff; color: #2879ad; }
+        .banner-state small {
+            display: block;
+            margin-top: 6px;
+            color: #64748b;
+            font-size: 11px;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }
+        .banner-actions {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            justify-content: center;
+            gap: 7px;
+            min-width: 0;
+        }
+        .banner-file-input {
+            position: absolute !important;
+            width: 1px !important;
+            height: 1px !important;
+            padding: 0 !important;
+            margin: -1px !important;
+            overflow: hidden !important;
+            clip: rect(0, 0, 0, 0) !important;
+            white-space: nowrap !important;
+            border: 0 !important;
+        }
+        .banner-select-btn,
+        .banner-save-btn,
+        .banner-reset-btn {
+            min-height: 38px;
+            border-radius: 9px;
+            padding: 9px 12px;
+            font-size: 11px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            text-decoration: none;
+            cursor: pointer;
+            transition: background .2s ease, border-color .2s ease, color .2s ease, transform .2s ease;
+            white-space: nowrap;
+        }
+        .banner-select-btn {
+            border: 1px solid #cfe0f5;
+            background: #fff;
+            color: #2879ad;
+        }
+        .banner-select-btn:hover {
+            border-color: #4DA6D9;
+            background: #f1f9fe;
+            transform: translateY(-1px);
+        }
+        .banner-save-btn {
+            border: 1px solid #4DA6D9;
+            background: #4DA6D9;
+            color: #fff;
+        }
+        .banner-save-btn:hover:not(:disabled) {
+            background: #3a8bbf;
+            border-color: #3a8bbf;
+            transform: translateY(-1px);
+        }
+        .banner-save-btn:disabled {
+            display: none;
+            border-color: #dbe3ec;
+            background: #e2e8f0;
+            color: #94a3b8;
+            cursor: not-allowed;
+        }
+        .banner-reset-btn {
+            min-height: 32px;
+            padding: 6px 9px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: #64748b;
+        }
+        .banner-reset-btn:hover {
+            background: #f8fafc;
+            color: #dc2626;
+        }
+        .banner-readonly {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #94a3b8;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .banner-guidance {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-top: 14px;
+            color: #64748b;
+            font-size: 11px;
+            line-height: 1.55;
+        }
+        .banner-guidance i { color: #4DA6D9; margin-top: 2px; }
+        @container (max-width: 930px) {
+            .banner-row {
+                grid-template-columns: minmax(170px, 1fr) 150px minmax(230px, 1.35fr);
+                gap: 14px;
+                padding: 15px 16px;
+            }
+            .banner-thumbnail { width: 150px; height: 82px; }
+            .banner-controls {
+                grid-template-columns: 1fr 150px;
+                gap: 12px;
+            }
+        }
+        @container (max-width: 760px) {
+            .banner-row {
+                grid-template-columns: 138px minmax(0, 1fr);
+                gap: 12px;
+                padding: 14px;
+            }
+            .banner-page { grid-column: 1 / -1; }
+            .banner-thumbnail { width: 138px; height: 76px; }
+            .banner-controls {
+                grid-template-columns: minmax(0, 1fr) 150px;
+                gap: 12px;
+            }
+        }
+        @container (max-width: 560px) {
+            .banner-row { grid-template-columns: 1fr; }
+            .banner-thumbnail { width: 100%; height: 150px; }
+            .banner-controls {
+                grid-template-columns: 1fr;
+                gap: 10px;
+            }
+            .banner-actions { width: 100%; }
+            .banner-select-btn, .banner-save-btn, .banner-reset-btn { width: 100%; }
+        }
+        @media (max-width: 760px) {
+            .banner-content-section { padding: 20px 16px; }
         }
         .btn-save {
             background: #10b981; color: white; border: none;
@@ -1111,6 +1806,75 @@ $current_terms_version = substr(md5(
             margin: 20px 0 15px; border-bottom: 1px solid #e8f0fe;
             padding-bottom: 10px;
         }
+        .section-description {
+            margin: -10px 0 22px;
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .system-actions-preview {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 16px;
+            background: #f8fafc;
+            border: 1px solid #e8f0fe;
+            border-radius: 12px;
+            color: #64748b;
+            font-size: 12px;
+        }
+        .system-actions-preview strong { color: #1e293b; }
+        .system-action-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: white;
+            border: 1px solid #dbeafe;
+            color: #0B2447;
+            font-weight: 600;
+        }
+        .help-disclosure {
+            margin-top: 10px;
+            border: 1px solid #e8f0fe;
+            border-radius: 10px;
+            background: #f8fafc;
+            overflow: hidden;
+        }
+        .help-disclosure summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 11px 13px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #475569;
+        }
+        .help-disclosure summary::-webkit-details-marker { display: none; }
+        .help-disclosure summary i { color: #4DA6D9; margin-right: 7px; }
+        .help-disclosure__body {
+            padding: 0 13px 13px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .content-subsection {
+            margin-top: 24px;
+            padding-top: 20px;
+            border-top: 1px solid #e8f0fe;
+        }
+        .content-subsection:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+        .content-subsection__title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 14px;
+            color: #0B2447;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .content-subsection__title i { color: #4DA6D9; }
         .footer {
             background: #0B2447; color: #b3d9ff;
             padding: 15px 0; text-align: center;
@@ -1130,7 +1894,6 @@ $current_terms_version = substr(md5(
             .content-section { padding: 18px 15px; border-radius: 14px; margin-bottom: 20px; }
             .content-section h2 { font-size: 17px; }
             .row { grid-template-columns: 1fr; gap: 12px; }
-            .hero-grid { grid-template-columns: 1fr; }
             .action-buttons { flex-direction: column-reverse; }
             .action-buttons .btn-back,
             .action-buttons .btn-save { width: 100%; justify-content: center; }
@@ -1390,7 +2153,7 @@ $current_terms_version = substr(md5(
                         <?php endif; ?>
                     </span>
                 </h1>
-                <p>Manage website content, logos, hero images, and GCash payment settings</p>
+                <p>Manage website branding, page banners, content, and GCash payment settings</p>
             </div>
             <div class="user-profile">
                 <div class="user-info" style="text-align: right;">
@@ -1426,7 +2189,7 @@ $current_terms_version = substr(md5(
                 <h1><i class="fas fa-edit"></i> Edit Content</h1>
                 <div class="underline"></div>
                 <p>
-                    Manage website content, logos, hero images, and GCash payment settings
+                    Manage website branding, page banners, content, and GCash payment settings
                     <?php if($is_staff): ?>
                         <br><span class="staff-notice"><i class="fas fa-info-circle"></i> You are in View-Only mode. Contact Admin for changes.</span>
                     <?php endif; ?>
@@ -1447,100 +2210,259 @@ $current_terms_version = substr(md5(
         <form method="POST" enctype="multipart/form-data">
 
             <!-- LOGO SECTION -->
-            <div class="content-section">
-                <h2><i class="fas fa-image"></i> Site Logo</h2>
-                <div class="preview-section">
-                    <h5 style="color: #1e293b; font-weight: 600; margin-bottom: 15px;">Current Logo</h5>
-                    <div class="image-display">
-                        <?php if($logo_exists): ?>
-                            <img src="<?php echo htmlspecialchars($logo_path); ?>?<?php echo $cache_buster; ?>" alt="Site Logo" style="max-width: 150px; max-height: 150px;">
-                            <div class="status active"><i class="fas fa-check-circle"></i> Logo is active</div>
-                        <?php else: ?>
-                            <div class="placeholder-icon"><i class="fas fa-home"></i></div>
-                            <div class="status inactive"><i class="fas fa-info-circle"></i> No logo uploaded</div>
-                        <?php endif; ?>
-                    </div>
-                    <?php if($is_admin): ?>
-                        <div class="actions">
-                            <div class="file-input-wrapper">
-                                <input type="file" name="logo_image" id="logoInput" accept="image/*">
-                                <div class="custom-file-label" id="fileLabel">
-                                    <i class="fas fa-upload"></i>
-                                    <span id="fileLabelText">Choose logo image</span>
-                                </div>
-                            </div>
-                            <button type="submit" name="upload_logo" class="btn-upload">
-                                <i class="fas fa-upload"></i> Upload Logo
-                            </button>
+            <div class="content-section logo-content-section">
+                <div class="logo-section-intro">
+                    <h2><i class="fas fa-image"></i> Website Logo</h2>
+                    <p>Shown in the website header, navigation, and other branded areas.</p>
+                </div>
+
+                <div class="logo-manager">
+                    <div class="logo-panel">
+                        <div class="logo-card-label"><i class="fas fa-eye"></i> Current logo</div>
+                        <div class="logo-current-preview">
                             <?php if($logo_exists): ?>
-                                <a href="?remove_logo=1" class="btn-remove" onclick="return confirm('Remove the site logo?')">
-                                    <i class="fas fa-trash"></i> Remove Logo
-                                </a>
+                                <img src="<?php echo htmlspecialchars($logo_path); ?>?<?php echo $cache_buster; ?>" alt="Current website logo">
+                            <?php else: ?>
+                                <div class="logo-current-placeholder" aria-label="No custom logo">
+                                    <i class="fas fa-image"></i>
+                                </div>
                             <?php endif; ?>
                         </div>
-                        <div class="file-name-display" id="fileNameDisplay">No file selected</div>
-                        <div class="size-info"><i class="fas fa-info-circle"></i> Recommended: Square image, minimum 200x200px. Supports JPG, PNG, GIF, WEBP</div>
+                        <div class="logo-current-details">
+                            <div class="logo-current-name">
+                                <strong><?php echo htmlspecialchars($site_name); ?></strong>
+                                <span><?php echo $logo_exists ? 'Custom website logo' : 'No custom logo uploaded'; ?></span>
+                            </div>
+                            <?php if($logo_exists): ?>
+                                <span class="logo-status-pill active"><i class="fas fa-check-circle"></i> Currently in use</span>
+                            <?php else: ?>
+                                <span class="logo-status-pill fallback"><i class="fas fa-info-circle"></i> Default branding</span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <?php if($is_admin): ?>
+                        <div class="logo-panel">
+                            <h3 class="logo-panel-title">Change website logo</h3>
+                            <p class="logo-panel-copy">Select a new image below. Your current logo stays unchanged until you save the replacement.</p>
+
+                            <label class="logo-upload-dropzone" id="logoDropzone" for="logoInput">
+                                <input type="file" name="logo_image" id="logoInput" accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp">
+                                <div class="logo-dropzone-default" id="logoDropzoneDefault">
+                                    <div class="logo-upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+                                    <strong>Select an image</strong>
+                                    <span>or drag and drop it here</span>
+                                </div>
+                                <div class="logo-selected-state" id="logoSelectedState">
+                                    <img class="logo-selected-preview" id="logoSelectedPreview" alt="Selected logo preview">
+                                    <div class="logo-selected-info">
+                                        <strong id="logoSelectedName">Selected image</strong>
+                                        <span id="logoSelectedMeta">Ready to upload</span>
+                                    </div>
+                                    <span class="logo-ready-badge"><i class="fas fa-check"></i> Ready to save</span>
+                                </div>
+                            </label>
+
+                            <div class="logo-upload-requirements">
+                                <i class="fas fa-info-circle"></i>
+                                <span>Use a square image for best results. PNG, JPG, GIF, or WEBP; recommended size 200 × 200 px or larger.</span>
+                            </div>
+                            <div class="logo-save-row">
+                                <button type="submit" name="upload_logo" id="logoSaveBtn" class="logo-save-btn" disabled>
+                                    <i class="fas fa-save"></i> Save New Logo
+                                </button>
+                            </div>
+                        </div>
+
+                        <?php if($logo_exists): ?>
+                            <div class="logo-danger-zone">
+                                <div>
+                                    <strong>Remove website logo</strong>
+                                    <p>The custom logo will be removed and the website will fall back to its default branding.</p>
+                                </div>
+                                <button type="button" class="logo-remove-button" onclick="openLogoRemoveModal()">
+                                    <i class="fas fa-trash-alt"></i> Remove Logo
+                                </button>
+                            </div>
+                        <?php endif; ?>
                     <?php else: ?>
-                        <div style="padding: 10px; background: #f1f5f9; border-radius: 8px; color: #94a3b8;">
-                            <i class="fas fa-lock" style="color: #f59e0b;"></i> Only Admin can upload or change the logo
+                        <div class="logo-readonly-panel">
+                            <i class="fas fa-lock"></i>
+                            <div><strong>Logo management is restricted.</strong><br>Only administrators can replace or remove the website logo.</div>
                         </div>
                     <?php endif; ?>
                 </div>
             </div>
 
-            <!-- HERO IMAGES SECTION -->
-            <div class="content-section">
-                <h2><i class="fas fa-image"></i> Hero Images</h2>
-                <div class="hero-grid">
+            <!-- PAGE BANNERS SECTION -->
+            <div class="content-section banner-content-section">
+                <div class="banner-section-intro">
+                    <h2><i class="fas fa-images"></i> Page Banners</h2>
+                    <p>Customize the large banner shown at the top of each guest page. Pages without their own banner automatically use the Homepage banner.</p>
+                </div>
+
+                <div class="banner-list">
                     <?php
                     $hero_sections = [
-                        ['label' => 'Homepage', 'exists' => $home_hero_exists, 'path' => $home_hero_path, 'input' => 'home_hero_image', 'btn' => 'upload_home_hero', 'remove' => 'remove_home_hero', 'icon' => 'fa-image', 'prefix' => 'homeHero'],
-                        ['label' => 'Houses', 'exists' => $houses_hero_exists, 'path' => $houses_hero_path, 'input' => 'houses_hero_image', 'btn' => 'upload_houses_hero', 'remove' => 'remove_houses_hero', 'icon' => 'fa-home', 'prefix' => 'housesHero'],
-                        ['label' => 'Tours', 'exists' => $tours_hero_exists, 'path' => $tours_hero_path, 'input' => 'tours_hero_image', 'btn' => 'upload_tours_hero', 'remove' => 'remove_tours_hero', 'icon' => 'fa-umbrella-beach', 'prefix' => 'toursHero'],
-                        ['label' => 'Activities', 'exists' => $activities_hero_exists, 'path' => $activities_hero_path, 'input' => 'activities_hero_image', 'btn' => 'upload_activities_hero', 'remove' => 'remove_activities_hero', 'icon' => 'fa-water', 'prefix' => 'activitiesHero'],
-                        ['label' => 'Food', 'exists' => $food_hero_exists, 'path' => $food_hero_path, 'input' => 'food_hero_image', 'btn' => 'upload_food_hero', 'remove' => 'remove_food_hero', 'icon' => 'fa-utensils', 'prefix' => 'foodHero'],
+                        [
+                            'label' => 'Homepage',
+                            'description' => 'Main website landing page',
+                            'exists' => $home_hero_exists,
+                            'path' => $home_hero_path,
+                            'fallback_exists' => false,
+                            'fallback_path' => '',
+                            'input' => 'home_hero_image',
+                            'btn' => 'upload_home_hero',
+                            'remove' => 'remove_home_hero',
+                            'icon' => 'fa-home',
+                            'prefix' => 'homeHero',
+                        ],
+                        [
+                            'label' => 'Houses',
+                            'description' => 'Guest accommodation page',
+                            'exists' => $houses_hero_exists,
+                            'path' => $houses_hero_path,
+                            'fallback_exists' => $home_hero_exists,
+                            'fallback_path' => $home_hero_path,
+                            'input' => 'houses_hero_image',
+                            'btn' => 'upload_houses_hero',
+                            'remove' => 'remove_houses_hero',
+                            'icon' => 'fa-home',
+                            'prefix' => 'housesHero',
+                        ],
+                        [
+                            'label' => 'Tours',
+                            'description' => 'Boat and island tour page',
+                            'exists' => $tours_hero_exists,
+                            'path' => $tours_hero_path,
+                            'fallback_exists' => $home_hero_exists,
+                            'fallback_path' => $home_hero_path,
+                            'input' => 'tours_hero_image',
+                            'btn' => 'upload_tours_hero',
+                            'remove' => 'remove_tours_hero',
+                            'icon' => 'fa-umbrella-beach',
+                            'prefix' => 'toursHero',
+                        ],
+                        [
+                            'label' => 'Activities',
+                            'description' => 'Guest activities page',
+                            'exists' => $activities_hero_exists,
+                            'path' => $activities_hero_path,
+                            'fallback_exists' => $home_hero_exists,
+                            'fallback_path' => $home_hero_path,
+                            'input' => 'activities_hero_image',
+                            'btn' => 'upload_activities_hero',
+                            'remove' => 'remove_activities_hero',
+                            'icon' => 'fa-water',
+                            'prefix' => 'activitiesHero',
+                        ],
+                        [
+                            'label' => 'Food',
+                            'description' => 'Guest food and dining page',
+                            'exists' => $food_hero_exists,
+                            'path' => $food_hero_path,
+                            'fallback_exists' => $home_hero_exists,
+                            'fallback_path' => $home_hero_path,
+                            'input' => 'food_hero_image',
+                            'btn' => 'upload_food_hero',
+                            'remove' => 'remove_food_hero',
+                            'icon' => 'fa-utensils',
+                            'prefix' => 'foodHero',
+                        ],
                     ];
                     foreach ($hero_sections as $h):
+                        $display_banner_exists = $h['exists'] || $h['fallback_exists'];
+                        $display_banner_path = $h['exists'] ? $h['path'] : $h['fallback_path'];
+                        $is_homepage = $h['prefix'] === 'homeHero';
                     ?>
-                    <div class="preview-section" style="margin-bottom: 0;">
-                        <h5 style="color: #1e293b; font-weight: 600; margin-bottom: 15px; font-size: 14px;"><?php echo $h['label']; ?></h5>
-                        <div class="image-display" style="padding: 10px;">
-                            <?php if($h['exists']): ?>
-                                <img src="<?php echo htmlspecialchars($h['path']); ?>?<?php echo $cache_buster; ?>" alt="<?php echo $h['label']; ?> Hero" style="max-height: 120px;">
-                                <div class="status active" style="font-size: 10px;">Active</div>
+                    <div class="banner-row" id="<?php echo $h['prefix']; ?>Row">
+                        <div class="banner-page">
+                            <div class="banner-page-icon"><i class="fas <?php echo $h['icon']; ?>"></i></div>
+                            <div class="banner-page-copy">
+                                <strong><?php echo htmlspecialchars($h['label']); ?></strong>
+                                <span><?php echo htmlspecialchars($h['description']); ?></span>
+                            </div>
+                        </div>
+
+                        <div class="banner-thumbnail">
+                            <img
+                                id="<?php echo $h['prefix']; ?>Preview"
+                                src="<?php echo $display_banner_exists ? htmlspecialchars($display_banner_path) . '?' . $cache_buster : ''; ?>"
+                                alt="<?php echo htmlspecialchars($h['label']); ?> banner preview"
+                                <?php echo $display_banner_exists ? '' : 'style="display:none;"'; ?>
+                            >
+                            <div
+                                class="banner-thumbnail-placeholder"
+                                id="<?php echo $h['prefix']; ?>Placeholder"
+                                <?php echo $display_banner_exists ? 'style="display:none;"' : ''; ?>
+                            >
+                                <i class="fas <?php echo $h['icon']; ?>"></i>
+                            </div>
+                            <?php if(!$h['exists'] && $h['fallback_exists']): ?>
+                                <span class="banner-thumbnail-fallback" id="<?php echo $h['prefix']; ?>FallbackBadge">Homepage fallback</span>
                             <?php else: ?>
-                                <div class="placeholder-icon" style="height: 120px;">
-                                    <i class="fas <?php echo $h['icon']; ?>" style="font-size: 40px;"></i>
-                                </div>
-                                <div class="status inactive" style="font-size: 10px;">No image</div>
+                                <span class="banner-thumbnail-fallback" id="<?php echo $h['prefix']; ?>FallbackBadge" style="display:none;">Homepage fallback</span>
                             <?php endif; ?>
                         </div>
-                        <?php if($is_admin): ?>
-                            <div class="actions" style="gap: 5px;">
-                                <div class="file-input-wrapper">
-                                    <input type="file" name="<?php echo $h['input']; ?>" id="<?php echo $h['prefix']; ?>Input" accept="image/*">
-                                    <div class="custom-file-label" id="<?php echo $h['prefix']; ?>FileLabel" style="padding: 5px 12px; font-size: 11px;">
-                                        <i class="fas fa-upload"></i>
-                                        <span id="<?php echo $h['prefix']; ?>FileLabelText">Choose</span>
-                                    </div>
-                                </div>
-                                <button type="submit" name="<?php echo $h['btn']; ?>" class="btn-upload" style="padding: 5px 12px; font-size: 11px;">
-                                    Upload
-                                </button>
+
+                        <div class="banner-controls">
+                            <div class="banner-state">
                                 <?php if($h['exists']): ?>
-                                    <a href="?<?php echo $h['remove']; ?>=1" class="btn-remove" style="padding: 5px 12px; font-size: 11px;" onclick="return confirm('Remove <?php echo strtolower($h['label']); ?> hero image?')">
-                                        <i class="fas fa-trash"></i>
-                                    </a>
+                                    <span class="banner-status-pill custom" id="<?php echo $h['prefix']; ?>Status"><i class="fas fa-check-circle"></i> Custom banner</span>
+                                    <small id="<?php echo $h['prefix']; ?>Meta">Currently shown on this page</small>
+                                <?php elseif($h['fallback_exists']): ?>
+                                    <span class="banner-status-pill fallback" id="<?php echo $h['prefix']; ?>Status"><i class="fas fa-layer-group"></i> Using Homepage banner</span>
+                                    <small id="<?php echo $h['prefix']; ?>Meta">Add a custom banner only when this page needs a different image.</small>
+                                <?php else: ?>
+                                    <span class="banner-status-pill fallback" id="<?php echo $h['prefix']; ?>Status"><i class="fas fa-image"></i> Default background</span>
+                                    <small id="<?php echo $h['prefix']; ?>Meta">No custom banner is currently stored.</small>
                                 <?php endif; ?>
                             </div>
-                            <div class="file-name-display" id="<?php echo $h['prefix']; ?>FileNameDisplay" style="font-size: 10px;">No file</div>
-                        <?php else: ?>
-                            <div style="padding: 5px; background: #f1f5f9; border-radius: 8px; color: #94a3b8; font-size: 11px;">
-                                <i class="fas fa-lock" style="color: #f59e0b;"></i> Admin only
+
+                            <div class="banner-actions">
+                                <?php if($is_admin): ?>
+                                    <input
+                                        class="banner-file-input"
+                                        type="file"
+                                        name="<?php echo $h['input']; ?>"
+                                        id="<?php echo $h['prefix']; ?>Input"
+                                        accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                                    >
+                                    <label class="banner-select-btn" for="<?php echo $h['prefix']; ?>Input" id="<?php echo $h['prefix']; ?>SelectLabel">
+                                        <i class="fas fa-image"></i>
+                                        <span><?php echo $h['exists'] ? 'Change Banner' : 'Add Banner'; ?></span>
+                                    </label>
+                                    <button
+                                        type="submit"
+                                        name="<?php echo $h['btn']; ?>"
+                                        class="banner-save-btn"
+                                        id="<?php echo $h['prefix']; ?>SaveBtn"
+                                        disabled
+                                    >
+                                        <i class="fas fa-save"></i> Save Banner
+                                    </button>
+                                    <?php if($h['exists']): ?>
+                                        <a
+                                            href="?<?php echo $h['remove']; ?>=1"
+                                            class="banner-reset-btn"
+                                            onclick="return confirm('<?php echo $is_homepage ? 'Remove the Homepage banner? Pages without a custom banner will use the default background.' : 'Remove this custom banner and use the Homepage banner instead?'; ?>')"
+                                        >
+                                            <i class="fas fa-undo-alt"></i>
+                                            <?php echo $is_homepage ? 'Remove Custom' : 'Use Homepage'; ?>
+                                        </a>
+                                    <?php endif; ?>
+                                <?php else: ?>
+                                    <span class="banner-readonly"><i class="fas fa-lock"></i> Admin only</span>
+                                <?php endif; ?>
                             </div>
-                        <?php endif; ?>
+                        </div>
                     </div>
                     <?php endforeach; ?>
+                </div>
+
+                <div class="banner-guidance">
+                    <i class="fas fa-info-circle"></i>
+                    <span>For best results, use a wide landscape image at 1600 × 600 px or larger. JPG, PNG, GIF, and WEBP are supported.</span>
                 </div>
             </div>
 
@@ -1611,248 +2533,160 @@ $current_terms_version = substr(md5(
                 </div>
             </div>
 
-            <!-- HERO SECTION -->
+            <!-- HOMEPAGE INTRODUCTION -->
             <div class="content-section">
-                <h2><i class="fas fa-star"></i> Hero Section</h2>
+                <h2><i class="fas fa-home"></i> Homepage Introduction</h2>
+                <p class="section-description">Edit the main heading and supporting text shown at the top of the guest homepage.</p>
+
                 <div class="form-group">
-                    <label><i class="fas fa-heading"></i> Main Title</label>
+                    <label><i class="fas fa-heading"></i> Main Heading</label>
                     <input type="text" name="content[hero][title]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
                            value="<?php echo htmlspecialchars($content['hero']['title'] ?? 'Welcome to Transient House & Tours'); ?>"
                            <?php echo $is_staff ? 'disabled' : ''; ?>>
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-paragraph"></i> Subtitle</label>
+                    <label><i class="fas fa-align-left"></i> Supporting Text</label>
                     <textarea name="content[hero][subtitle]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                              <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['hero']['subtitle'] ?? 'Your home away from home and gateway to unforgettable island adventures.'); ?></textarea>
-                </div>
-                <div class="row">
-                    <div class="form-group">
-                        <label>Houses Label</label>
-                        <input type="text" name="content[hero][stats_houses_label]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['hero']['stats_houses_label'] ?? 'Total Houses'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Houses Available Label</label>
-                        <input type="text" name="content[hero][stats_houses_available_label]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['hero']['stats_houses_available_label'] ?? 'Houses Available'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Tours Label</label>
-                        <input type="text" name="content[hero][stats_tours_label]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['hero']['stats_tours_label'] ?? 'Total Tours'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Tours Available Label</label>
-                        <input type="text" name="content[hero][stats_tours_available_label]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['hero']['stats_tours_available_label'] ?? 'Tours Available'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
+                              rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['hero']['subtitle'] ?? 'Your home away from home and gateway to unforgettable island adventures.'); ?></textarea>
                 </div>
             </div>
 
-            <!-- FEATURES SECTION -->
+            <!-- BOOKING CALL TO ACTION -->
             <div class="content-section">
-                <h2><i class="fas fa-th-large"></i> Features Section</h2>
-                <div class="form-group">
-                    <label>Section Title</label>
-                    <input type="text" name="content[features][section_title]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                           value="<?php echo htmlspecialchars($content['features']['section_title'] ?? 'Why Choose Us'); ?>"
-                           <?php echo $is_staff ? 'disabled' : ''; ?>>
-                </div>
-                <div class="row">
-                    <?php for ($i = 1; $i <= 4; $i++):
-                        $defaultTitles = [1 => 'Comfortable Houses', 2 => 'Island Tours', 3 => 'Exciting Activities', 4 => '24/7 Support'];
-                        $defaultDescs  = [
-                            1 => 'Experience true comfort in our well-appointed transient houses.',
-                            2 => 'Explore the beautiful islands with our exciting tour packages.',
-                            3 => 'Enjoy banana boat rides, jet skiing, snorkeling, and many more water activities!',
-                            4 => "We're always here to help you with any questions or concerns."
-                        ];
-                    ?>
-                    <div>
-                        <h4>Feature <?php echo $i; ?></h4>
-                        <div class="form-group">
-                            <label>Title</label>
-                            <input type="text" name="content[features][feature<?php echo $i; ?>_title]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                                   value="<?php echo htmlspecialchars($content['features']['feature'.$i.'_title'] ?? $defaultTitles[$i]); ?>"
-                                   <?php echo $is_staff ? 'disabled' : ''; ?>>
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="content[features][feature<?php echo $i; ?>_desc]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                                      <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['features']['feature'.$i.'_desc'] ?? $defaultDescs[$i]); ?></textarea>
-                        </div>
-                    </div>
-                    <?php endfor; ?>
-                </div>
-            </div>
+                <h2><i class="fas fa-bullhorn"></i> Booking Call to Action</h2>
+                <p class="section-description">Control the short booking message shown near the bottom of the homepage. Navigation button labels and destinations are managed by the system for consistency.</p>
 
-            <!-- CTA SECTION -->
-            <div class="content-section">
-                <h2><i class="fas fa-bullhorn"></i> Call to Action Section</h2>
                 <div class="form-group">
-                    <label>Title</label>
+                    <label><i class="fas fa-heading"></i> Heading</label>
                     <input type="text" name="content[cta][title]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
                            value="<?php echo htmlspecialchars($content['cta']['title'] ?? 'Ready to Book Your Stay?'); ?>"
                            <?php echo $is_staff ? 'disabled' : ''; ?>>
                 </div>
                 <div class="form-group">
-                    <label>Subtitle</label>
+                    <label><i class="fas fa-align-left"></i> Supporting Text</label>
                     <textarea name="content[cta][subtitle]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                              <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses or exciting tour packages for your next adventure.'); ?></textarea>
+                              rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses or exciting tour packages for your next adventure.'); ?></textarea>
                 </div>
-                <div class="row">
-                    <div class="form-group">
-                        <label>Houses Button Text</label>
-                        <input type="text" name="content[cta][button_houses_text]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['cta']['button_houses_text'] ?? 'Browse Houses'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Tours Button Text</label>
-                        <input type="text" name="content[cta][button_tours_text]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['cta']['button_tours_text'] ?? 'Browse Tours'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
+
+                <div class="system-actions-preview" aria-label="System-managed homepage actions">
+                    <strong>Fixed homepage actions:</strong>
+                    <span class="system-action-chip"><i class="fas fa-home"></i> View Houses</span>
+                    <span class="system-action-chip"><i class="fas fa-box-open"></i> Build a Package</span>
                 </div>
             </div>
 
-            <!-- FOOTER SECTION -->
+            <!-- BUSINESS INFORMATION -->
             <div class="content-section">
-                <h2><i class="fas fa-foot"></i> Footer Section</h2>
-                <div class="form-group">
-                    <label>Company Description</label>
-                    <textarea name="content[footer][company_description]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                              <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></textarea>
-                </div>
+                <h2><i class="fas fa-building"></i> Business Information</h2>
+                <p class="section-description">Manage the contact details and location shown to guests across the website.</p>
 
-                <div class="form-section-title">
-                    <i class="fas fa-share-alt"></i> Social Media Links
-                </div>
-                <div class="form-group">
-                    <label><i class="fab fa-facebook-f" style="color: #1877f2;"></i> Facebook Page URL</label>
-                    <input type="url" name="content[social][facebook]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                           value="<?php echo htmlspecialchars($content['social']['facebook'] ?? '#'); ?>"
-                           <?php echo $is_staff ? 'disabled' : ''; ?>
-                           placeholder="https://www.facebook.com/yourpage">
-                    <div class="help-text"><i class="fas fa-info-circle"></i> Enter the full URL of your Facebook page. Leave as # if not set.</div>
-                </div>
-
-                <div class="form-section-title" style="color: #ef4444;">
-                    <i class="fas fa-map-marker-alt"></i> Location Settings
-                </div>
-                <div class="form-group">
-                    <label><i class="fas fa-map-pin"></i> Business Address</label>
-                    <input type="text" name="content[location][address]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                           value="<?php echo htmlspecialchars($location_address); ?>"
-                           <?php echo $is_staff ? 'disabled' : ''; ?>
-                           placeholder="123 Transient Street, Alaminos City, Pangasinan">
-                    <div class="help-text"><i class="fas fa-info-circle"></i> This address will be used for Google Maps link in the footer.</div>
-                </div>
-
-                <div class="form-group">
-                    <label><i class="fas fa-code"></i> Google Maps Embed URL</label>
-                    <textarea name="content[location][google_maps_embed]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                              rows="4" <?php echo $is_staff ? 'disabled' : ''; ?>
-                              placeholder="https://www.google.com/maps/embed?pb=..."><?php echo htmlspecialchars($google_maps_embed); ?></textarea>
-                    <div class="help-text">
-                        <i class="fas fa-info-circle"></i>
-                        <strong>How to get Google Maps Embed URL:</strong><br>
-                        1. Go to <a href="https://www.google.com/maps" target="_blank">Google Maps</a><br>
-                        2. Search for your business location<br>
-                        3. Click the <strong>"Share"</strong> button<br>
-                        4. Click the <strong>"Embed a map"</strong> tab<br>
-                        5. Copy the iframe <strong>src</strong> URL (starts with https://www.google.com/maps/embed?pb=...)<br>
-                        6. Paste it above. Leave empty to hide the map.
+                <div class="content-subsection">
+                    <div class="content-subsection__title"><i class="fas fa-info-circle"></i> About & Contact</div>
+                    <div class="form-group">
+                        <label>Business Description</label>
+                        <textarea name="content[footer][company_description]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                                  rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></textarea>
                     </div>
-                </div>
 
-                <div style="margin-top: 15px; padding: 15px; background: #f8fafc; border-radius: 12px; border: 1px solid #e8f0fe;">
-                    <label style="font-weight: 600; color: #1e293b; margin-bottom: 10px; display: block;">
-                        <i class="fas fa-eye"></i> Map Preview
-                    </label>
-                    <?php if (!empty($google_maps_embed) && $google_maps_embed != '#'): ?>
-                        <iframe src="<?php echo htmlspecialchars($google_maps_embed); ?>" width="100%" height="250"
-                                style="border:0; border-radius: 10px;" allowfullscreen="" loading="lazy"
-                                referrerpolicy="no-referrer-when-downgrade"></iframe>
-                    <?php else: ?>
-                        <div style="text-align: center; padding: 30px; background: #f1f5f9; border-radius: 10px; color: #94a3b8;">
-                            <i class="fas fa-map" style="font-size: 40px; display: block; margin-bottom: 10px; color: #cbd5e1;"></i>
-                            <p>No map embedded yet. Add the Google Maps Embed URL above.</p>
+                    <div class="row">
+                        <div class="form-group">
+                            <label><i class="fas fa-phone"></i> Phone</label>
+                            <input type="text" name="content[footer][phone]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                                   value="<?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?>"
+                                   <?php echo $is_staff ? 'disabled' : ''; ?>>
                         </div>
-                    <?php endif; ?>
+                        <div class="form-group">
+                            <label><i class="fas fa-envelope"></i> Email</label>
+                            <input type="email" name="content[footer][email]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                                   value="<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>"
+                                   <?php echo $is_staff ? 'disabled' : ''; ?>>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label><i class="fas fa-map-marker-alt"></i> Business Address</label>
+                        <input type="text" name="content[location][address]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                               value="<?php echo htmlspecialchars($location_address); ?>"
+                               <?php echo $is_staff ? 'disabled' : ''; ?>
+                               placeholder="Inansuana, Lucap, Alaminos, Philippines, 2404">
+                        <div class="help-text"><i class="fas fa-info-circle"></i> This is the single address used for guest-facing location links and footer information.</div>
+                    </div>
                 </div>
 
-                <div class="row">
+                <div class="content-subsection">
+                    <div class="content-subsection__title"><i class="fas fa-share-alt"></i> Social Media</div>
                     <div class="form-group">
-                        <label>Address (Fallback)</label>
-                        <input type="text" name="content[footer][address]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['address'] ?? '123 Transient Street, City'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                        <div class="help-text"><i class="fas fa-info-circle"></i> Fallback address if Location Settings address is empty.</div>
-                    </div>
-                    <div class="form-group">
-                        <label>Phone</label>
-                        <input type="text" name="content[footer][phone]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Email</label>
-                        <input type="email" name="content[footer][email]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
+                        <label><i class="fab fa-facebook-f" style="color:#1877f2;"></i> Facebook Page URL</label>
+                        <input type="url" name="content[social][facebook]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                               value="<?php echo htmlspecialchars(($content['social']['facebook'] ?? '') === '#' ? '' : ($content['social']['facebook'] ?? '')); ?>"
+                               <?php echo $is_staff ? 'disabled' : ''; ?>
+                               placeholder="https://www.facebook.com/yourpage">
+                        <div class="help-text"><i class="fas fa-info-circle"></i> Leave this empty to hide the Facebook link from the guest footer.</div>
                     </div>
                 </div>
-                <div class="row">
+
+                <div class="content-subsection">
+                    <div class="content-subsection__title"><i class="fas fa-map"></i> Google Maps</div>
                     <div class="form-group">
-                        <label>Copyright Text</label>
-                        <input type="text" name="content[footer][copyright]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Transient House & Tours. All rights reserved.'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
+                        <label>Google Maps Embed Link</label>
+                        <textarea name="content[location][google_maps_embed]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                                  rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>
+                                  placeholder="https://www.google.com/maps/embed?pb=..."><?php echo htmlspecialchars($google_maps_embed); ?></textarea>
+                        <div class="help-text"><i class="fas fa-info-circle"></i> Paste the Google Maps embed link. Leave it empty to hide the map.</div>
+
+                        <details class="help-disclosure">
+                            <summary><i class="fas fa-circle-question"></i> How to get the Google Maps embed link</summary>
+                            <div class="help-disclosure__body">
+                                1. Open <a href="https://www.google.com/maps" target="_blank" rel="noopener">Google Maps</a> and find the business location.<br>
+                                2. Select <strong>Share</strong>, then <strong>Embed a map</strong>.<br>
+                                3. Copy only the iframe <strong>src</strong> link that begins with <strong>https://www.google.com/maps/embed</strong>.<br>
+                                4. Paste that link into the field above.
+                            </div>
+                        </details>
                     </div>
-                    <div class="form-group">
-                        <label>Privacy Policy Text</label>
-                        <input type="text" name="content[footer][privacy_policy]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
-                    </div>
-                    <div class="form-group">
-                        <label>Terms of Service Text</label>
-                        <input type="text" name="content[footer][terms_of_service]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                               value="<?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?>"
-                               <?php echo $is_staff ? 'disabled' : ''; ?>>
+
+                    <div style="margin-top:15px;padding:15px;background:#f8fafc;border-radius:12px;border:1px solid #e8f0fe;">
+                        <label style="font-weight:600;color:#1e293b;margin-bottom:10px;display:block;">
+                            <i class="fas fa-eye" style="color:#4DA6D9;margin-right:6px;"></i> Map Preview
+                        </label>
+                        <?php if (!empty($google_maps_embed) && $google_maps_embed != '#'): ?>
+                            <iframe src="<?php echo htmlspecialchars($google_maps_embed); ?>" width="100%" height="250"
+                                    style="border:0;border-radius:10px;" allowfullscreen="" loading="lazy"
+                                    referrerpolicy="no-referrer-when-downgrade"></iframe>
+                        <?php else: ?>
+                            <div style="text-align:center;padding:28px;background:#f1f5f9;border-radius:10px;color:#94a3b8;">
+                                <i class="fas fa-map" style="font-size:36px;display:block;margin-bottom:10px;color:#cbd5e1;"></i>
+                                <p style="margin:0;">No map configured. Add a Google Maps embed link above to show a preview.</p>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
             </div>
 
             <!-- TERMS & PRIVACY SECTION -->
             <div class="content-section">
-                <h2><i class="fas fa-file-contract"></i> Terms & Privacy Policy</h2>
+                <h2><i class="fas fa-file-contract"></i> Legal Information</h2>
 
-                <div class="form-section-title"><i class="fas fa-scroll"></i> Terms & Conditions</div>
+                <div class="form-section-title"><i class="fas fa-lock"></i> Terms & Conditions <span style="font-size:11px;color:#f59e0b;margin-left:6px;">Locked</span></div>
                 <div class="form-group">
                     <label><i class="fas fa-heading"></i> Terms Title</label>
                     <input type="text" name="content[terms][title]"
-                           class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                           class="form-control form-control-readonly"
                            value="<?php echo htmlspecialchars($content['terms']['title'] ?? 'Terms & Conditions'); ?>"
-                           <?php echo $is_staff ? 'disabled' : ''; ?>>
+                           disabled aria-readonly="true">
                 </div>
                 <div class="form-group">
                     <label><i class="fas fa-paragraph"></i> Terms Content</label>
                     <textarea name="content[terms][body]"
-                              class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
+                              class="form-control form-control-readonly"
                               rows="14"
-                              <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['terms']['body'] ?? 'Welcome to Transient House & Tours. By booking with us, you agree to the following terms:
+                              disabled aria-readonly="true"><?php echo htmlspecialchars($content['terms']['body'] ?? 'Welcome to Transient House & Tours. By booking with us, you agree to the following terms:
 
 1. BOOKING & RESERVATIONS
 • All bookings are subject to availability and confirmation.
 • A valid government-issued ID is required during check-in.
 • The lead guest must be at least 18 years old.'); ?></textarea>
-                    <div class="help-text"><i class="fas fa-info-circle"></i> Basic HTML is supported.</div>
+                    <div class="help-text" style="color:#64748b;"><i class="fas fa-lock" style="color:#f59e0b;"></i> Terms & Conditions are locked and cannot be edited from this panel.</div>
                 </div>
 
                 <div class="form-section-title"><i class="fas fa-shield-alt"></i> Privacy Policy</div>
@@ -1877,7 +2711,7 @@ $current_terms_version = substr(md5(
                         <i class="fas fa-fingerprint" style="color: #4DA6D9;"></i>
                         <strong>Current Version:</strong>
                         <code style="background: #e8f0fe; padding: 2px 8px; border-radius: 4px; color: #0B2447;"><?php echo $current_terms_version; ?></code>
-                        <span style="margin-left: 8px;">— When you change the text and save, this version changes, and all users will need to accept the new terms on next login.</span>
+                        <span style="margin-left: 8px;">— Terms & Conditions are locked. Editing the Privacy Policy will change this acceptance version and require users to accept the updated policy on next login.</span>
                     </div>
                 </div>
             </div>
@@ -1885,7 +2719,7 @@ $current_terms_version = substr(md5(
             <div class="action-buttons">
                 <a href="index.php" target="_blank" class="btn-back"><i class="fas fa-eye"></i> Preview Site</a>
                 <?php if($is_admin): ?>
-                    <button type="submit" name="update_content" class="btn-save"><i class="fas fa-save"></i> Save All Changes</button>
+                    <button type="submit" name="update_content" class="btn-save"><i class="fas fa-save"></i> Save Content Changes</button>
                 <?php else: ?>
                     <button type="button" class="btn-save" disabled>
                         <i class="fas fa-lock"></i> Save Disabled (View-Only)
@@ -1897,7 +2731,7 @@ $current_terms_version = substr(md5(
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Huddled Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i>
@@ -1907,6 +2741,25 @@ $current_terms_version = substr(md5(
         </div>
     </div>
 </div>
+
+<?php if($is_admin && $logo_exists): ?>
+<!-- WEBSITE LOGO REMOVAL CONFIRMATION -->
+<div class="logo-remove-modal-overlay" id="logoRemoveModal" role="dialog" aria-modal="true" aria-labelledby="logoRemoveModalTitle">
+    <div class="logo-remove-modal">
+        <div class="logo-remove-modal-icon"><i class="fas fa-trash-alt"></i></div>
+        <h3 id="logoRemoveModalTitle">Remove website logo?</h3>
+        <p>The current custom logo will no longer appear on the website. Default branding will be used instead.</p>
+        <form method="POST" class="logo-remove-modal-actions">
+            <button type="button" class="logo-modal-cancel" onclick="closeLogoRemoveModal()">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+            <button type="submit" name="remove_logo" value="1" class="logo-modal-confirm">
+                <i class="fas fa-trash-alt"></i> Remove Logo
+            </button>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- LOGOUT CONFIRMATION MODAL -->
 <div class="logout-modal-overlay" id="logoutModal">
@@ -1953,13 +2806,185 @@ function handleFileInput(inputId, labelId, labelTextId, displayId, defaultLabel)
     });
 }
 
-handleFileInput('logoInput', 'fileLabel', 'fileLabelText', 'fileNameDisplay', 'Choose logo image');
-handleFileInput('homeHeroInput', 'homeHeroFileLabel', 'homeHeroFileLabelText', 'homeHeroFileNameDisplay', 'Choose');
-handleFileInput('housesHeroInput', 'housesHeroFileLabel', 'housesHeroFileLabelText', 'housesHeroFileNameDisplay', 'Choose');
-handleFileInput('toursHeroInput', 'toursHeroFileLabel', 'toursHeroFileLabelText', 'toursHeroFileNameDisplay', 'Choose');
-handleFileInput('activitiesHeroInput', 'activitiesHeroFileLabel', 'activitiesHeroFileLabelText', 'activitiesHeroFileNameDisplay', 'Choose');
-handleFileInput('foodHeroInput', 'foodHeroFileLabel', 'foodHeroFileLabelText', 'foodHeroFileNameDisplay', 'Choose');
 handleFileInput('gcashQrInput', 'gcashQrFileLabel', 'gcashQrFileLabelText', 'gcashQrFileNameDisplay', 'Choose QR image');
+
+// PAGE BANNER UPLOADERS
+(function initPageBannerUploaders() {
+    const prefixes = ['homeHero', 'housesHero', 'toursHero', 'activitiesHero', 'foodHero'];
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+    function formatBytes(bytes) {
+        if (!Number.isFinite(bytes) || bytes <= 0) return '';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    prefixes.forEach(function(prefix) {
+        const input = document.getElementById(prefix + 'Input');
+        const row = document.getElementById(prefix + 'Row');
+        const preview = document.getElementById(prefix + 'Preview');
+        const placeholder = document.getElementById(prefix + 'Placeholder');
+        const fallbackBadge = document.getElementById(prefix + 'FallbackBadge');
+        const status = document.getElementById(prefix + 'Status');
+        const meta = document.getElementById(prefix + 'Meta');
+        const selectLabel = document.getElementById(prefix + 'SelectLabel');
+        const saveBtn = document.getElementById(prefix + 'SaveBtn');
+
+        if (!input) return;
+
+        input.addEventListener('change', function() {
+            const file = this.files && this.files[0] ? this.files[0] : null;
+            if (!file) return;
+
+            if (allowedTypes.indexOf(file.type) === -1) {
+                this.value = '';
+                alert('Please choose a JPG, PNG, GIF, or WEBP image.');
+                return;
+            }
+
+            if (row) row.classList.add('is-selected');
+            if (saveBtn) saveBtn.disabled = false;
+            if (fallbackBadge) fallbackBadge.style.display = 'none';
+
+            if (status) {
+                status.className = 'banner-status-pill ready';
+                status.innerHTML = '<i class="fas fa-check"></i> Ready to save';
+            }
+            if (meta) meta.textContent = file.name + ' • ' + formatBytes(file.size);
+            if (selectLabel) {
+                const labelText = selectLabel.querySelector('span');
+                if (labelText) labelText.textContent = 'Choose Different';
+            }
+
+            if (preview && window.FileReader) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                    if (placeholder) placeholder.style.display = 'none';
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+    });
+})();
+
+// WEBSITE LOGO UPLOADER
+(function initLogoUploader() {
+    const input = document.getElementById('logoInput');
+    const dropzone = document.getElementById('logoDropzone');
+    const defaultState = document.getElementById('logoDropzoneDefault');
+    const selectedState = document.getElementById('logoSelectedState');
+    const preview = document.getElementById('logoSelectedPreview');
+    const nameEl = document.getElementById('logoSelectedName');
+    const metaEl = document.getElementById('logoSelectedMeta');
+    const saveBtn = document.getElementById('logoSaveBtn');
+
+    if (!input || !dropzone) return;
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+    function formatBytes(bytes) {
+        if (!Number.isFinite(bytes) || bytes <= 0) return '';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function showSelectedFile(file) {
+        if (!file) {
+            if (defaultState) defaultState.style.display = '';
+            if (selectedState) selectedState.classList.remove('show');
+            if (saveBtn) saveBtn.disabled = true;
+            if (preview) preview.removeAttribute('src');
+            return;
+        }
+
+        if (allowedTypes.indexOf(file.type) === -1) {
+            input.value = '';
+            showSelectedFile(null);
+            alert('Please choose a JPG, PNG, GIF, or WEBP image.');
+            return;
+        }
+
+        if (nameEl) nameEl.textContent = file.name;
+        if (metaEl) metaEl.textContent = formatBytes(file.size) + ' • Click this area to choose a different image';
+        if (defaultState) defaultState.style.display = 'none';
+        if (selectedState) selectedState.classList.add('show');
+        if (saveBtn) saveBtn.disabled = false;
+
+        if (preview && window.FileReader) {
+            const reader = new FileReader();
+            reader.onload = function(e) { preview.src = e.target.result; };
+            reader.readAsDataURL(file);
+        }
+    }
+
+    input.addEventListener('change', function() {
+        showSelectedFile(this.files && this.files[0] ? this.files[0] : null);
+    });
+
+    ['dragenter', 'dragover'].forEach(function(eventName) {
+        dropzone.addEventListener(eventName, function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropzone.classList.add('dragover');
+        });
+    });
+
+    ['dragleave', 'drop'].forEach(function(eventName) {
+        dropzone.addEventListener(eventName, function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropzone.classList.remove('dragover');
+        });
+    });
+
+    dropzone.addEventListener('drop', function(e) {
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (!files || !files.length) return;
+
+        const file = files[0];
+        try {
+            const transfer = new DataTransfer();
+            transfer.items.add(file);
+            input.files = transfer.files;
+        } catch (err) {
+            // Some browsers block programmatic FileList assignment; visual preview still works.
+        }
+        showSelectedFile(file);
+    });
+})();
+
+function openLogoRemoveModal() {
+    const modal = document.getElementById('logoRemoveModal');
+    if (!modal) return;
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    const cancelBtn = modal.querySelector('.logo-modal-cancel');
+    if (cancelBtn) setTimeout(function() { cancelBtn.focus(); }, 50);
+}
+
+function closeLogoRemoveModal() {
+    const modal = document.getElementById('logoRemoveModal');
+    if (!modal) return;
+    modal.classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+(function initLogoRemoveModal() {
+    const modal = document.getElementById('logoRemoveModal');
+    if (!modal) return;
+    modal.addEventListener('click', function(e) {
+        if (e.target === modal) closeLogoRemoveModal();
+    });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && modal.classList.contains('show')) {
+            closeLogoRemoveModal();
+        }
+    });
+})();
 
 // SIDEBAR TOGGLE
 function toggleSidebar() {

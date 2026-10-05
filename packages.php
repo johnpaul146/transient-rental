@@ -892,6 +892,7 @@ foreach ($tours as $t) {
         'price' => (float)($t['price_per_boat'] ?? 0),
         'price_unit' => 'per boat',
         'capacity' => (int)($t['max_guests'] ?? 0),
+        'destinations' => '12–14 islands',
         'amenities' => parseListHelper($t['inclusions'] ?? $t['amenities'] ?? ''),
         'gallery' => $tour_galleries[$t['id']] ?? []
     ];
@@ -1060,14 +1061,14 @@ $cart_data_js = [
             .brand-text .brand-tagline { font-size: 9px; }
         }
 
-        .hero { padding: 80px 20px; color: white; text-align: center; position: relative; <?php if($hero_exists): ?> background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo htmlspecialchars($hero_path); ?>?<?php echo time(); ?>'); background-size: cover; background-position: center; <?php else: ?> background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); <?php endif; ?> }
+        .hero { padding: 120px 20px 70px; color: white; text-align: center; position: relative; <?php if($hero_exists): ?> background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo htmlspecialchars($hero_path); ?>?<?php echo time(); ?>'); background-size: cover; background-position: center; <?php else: ?> background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); <?php endif; ?> }
         .hero-content { max-width: 800px; margin: 0 auto; position: relative; z-index: 1; }
         .hero h1 { font-size: 42px; font-weight: 700; margin-bottom: 15px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); line-height: 1.2; }
         .hero h1 i { color: #F4B400; }
         .hero p { font-size: 17px; opacity: 0.95; text-shadow: 0 1px 15px rgba(0,0,0,0.15); }
 
-        @media (max-width: 768px) { .hero { padding: 60px 16px; } .hero h1 { font-size: 30px; margin-bottom: 10px; } .hero p { font-size: 15px; } }
-        @media (max-width: 480px) { .hero { padding: 45px 14px; } .hero h1 { font-size: 24px; } .hero h1 i { display: block; margin-bottom: 8px; } .hero p { font-size: 13.5px; } }
+        @media (max-width: 768px) { .hero { padding: 100px 16px 50px; } .hero h1 { font-size: 30px; margin-bottom: 10px; } .hero p { font-size: 15px; } }
+        @media (max-width: 480px) { .hero { padding: 95px 14px 45px; } .hero h1 { font-size: 24px; } .hero h1 i { display: block; margin-bottom: 8px; } .hero p { font-size: 13.5px; } }
 
         .main-container { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
         @media (max-width: 768px) { .main-container { padding: 0 15px; margin: 20px auto; } }
@@ -1632,6 +1633,14 @@ $cart_data_js = [
 <body>
 
 <?php include 'components/navbar.php'; ?>
+
+<!-- PAGE HERO -->
+<div class="hero">
+    <div class="hero-content">
+        <h1><i class="fas fa-box-open"></i> Build Your Package</h1>
+        <p>Combine your stay, boat tour, and food in one booking flow</p>
+    </div>
+</div>
 
 <div class="main-container">
 
@@ -2451,6 +2460,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                         <div class="ip-price">₱<?php echo number_format((float)($tour['price_per_boat'] ?? 0)); ?><small>/boat</small></div>
                         <div class="ip-meta">
                             <span class="ip-chip green"><i class="fas fa-users"></i> max <?php echo (int)($tour['max_guests'] ?? 0); ?> pax</span>
+                            <span class="ip-chip"><i class="fas fa-map-marked-alt"></i> 12–14 islands</span>
                         </div>
                         <?php if ($shortDesc): ?>
                             <div class="ip-desc"><?php echo htmlspecialchars($shortDesc); ?></div>
@@ -2995,44 +3005,12 @@ const FOOD_BOOKED_DATES  = <?php echo json_encode($food_booked_dates,  JSON_HEX_
 const ITEMS_DETAIL = <?php echo json_encode($items_detail, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const CART_DATA = <?php echo json_encode($cart_data_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 
-function toggleSidebar() {
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-    if (!sidebar || !overlay || !toggleBtn) return;
-
-    const willOpen = !sidebar.classList.contains('open');
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-
-    if (willOpen && window.innerWidth <= 1100) {
-        document.body.classList.add('sidebar-open-mobile');
-    } else {
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-    document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-}
-
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
         const hd = document.getElementById('houseDetailModal');
         if (hd && hd.classList.contains('show')) { closeHouseDetail(); return; }
         const fb = document.getElementById('overallFeedbackModal');
         if (fb && fb.classList.contains('show')) closeOverallFeedbackModal();
-    }
-});
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar && window.innerWidth > 1100 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
     }
 });
 
@@ -3075,15 +3053,7 @@ window.addEventListener('click', function(e) {
 
 function openLogoutModal(event) {
     if (event) event.preventDefault();
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) {
-        const overlay = document.getElementById('sidebarOverlay');
-        const toggleBtn = document.getElementById('menuToggle');
-        sidebar.classList.remove('open');
-        if (overlay) overlay.classList.remove('active');
-        if (toggleBtn) toggleBtn.classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-    }
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     document.getElementById('logoutModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
@@ -3403,7 +3373,7 @@ function openItemDetail(detailKey) {
         specsHtml += '<div class="hd-spec-item"><i class="fas fa-money-bill-wave"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Base Price</span></div>';
     } else if (itemType === 'tour') {
         specsHtml += '<div class="hd-spec-item"><i class="fas fa-users"></i><span class="hd-spec-value">' + (item.capacity || '—') + '</span><span class="hd-spec-label">Max Pax</span></div>';
-        specsHtml += '<div class="hd-spec-item"><i class="fas fa-ship"></i><span class="hd-spec-value">Boat Tour</span><span class="hd-spec-label">Type</span></div>';
+        specsHtml += '<div class="hd-spec-item"><i class="fas fa-map-marked-alt"></i><span class="hd-spec-value">' + escapeHtml(item.destinations || '12–14 islands') + '</span><span class="hd-spec-label">Destinations</span></div>';
         specsHtml += '<div class="hd-spec-item"><i class="fas fa-tag"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Per Boat</span></div>';
     }
     document.getElementById('hdSpecs').innerHTML = specsHtml;
@@ -4225,8 +4195,7 @@ var overallRatingTexts = { 1: 'Very Poor', 2: 'Poor', 3: 'Average', 4: 'Good', 5
 
 function openOverallFeedbackModal(event) {
     if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     syncBigRatingStars(overallSelectedRating);
     var wordEl = document.getElementById('bigRatingWord');
     if (wordEl) wordEl.textContent = overallSelectedRating > 0 ? overallRatingTexts[overallSelectedRating] : 'Select a rating';

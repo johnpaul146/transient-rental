@@ -11,7 +11,7 @@ $content = $content ?? [
     'footer' => []
 ];
 
-$facebook_link = $facebook_link ?? '#';
+$facebook_link = trim((string)($facebook_link ?? ''));
 $location_address = $location_address ?? 'Hundred Islands, Alaminos, Pangasinan';
 $maps_url = $maps_url ?? '#';
 $map_embed = $map_embed ?? '';
@@ -93,37 +93,37 @@ $map_embed = $map_embed ?? '';
             <!-- Column 4: Map -->
             <div class="site-footer__col">
                 <h4 class="site-footer__heading">Find Us</h4>
-                <div class="site-footer__map">
-                    <iframe
-                        src="<?php echo htmlspecialchars($map_embed); ?>"
-                        width="100%" height="100%"
-                        style="border:0;" allowfullscreen="" loading="lazy"
-                        referrerpolicy="no-referrer-when-downgrade"
-                        title="Location Map">
-                    </iframe>
-                </div>
-                <div class="site-footer__social">
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>"
-                       target="_blank" rel="noopener" title="Facebook" aria-label="Facebook">
-                        <i class="fab fa-facebook-f"></i>
-                    </a>
-                </div>
+                <?php if (!empty($map_embed) && $map_embed !== '#'): ?>
+                    <div class="site-footer__map">
+                        <iframe
+                            src="<?php echo htmlspecialchars($map_embed); ?>"
+                            width="100%" height="100%"
+                            style="border:0;" allowfullscreen="" loading="lazy"
+                            referrerpolicy="no-referrer-when-downgrade"
+                            title="Location Map">
+                        </iframe>
+                    </div>
+                <?php else: ?>
+                    <p class="site-footer__about">Map location is not configured yet.</p>
+                <?php endif; ?>
+                <?php if ($facebook_link !== '' && $facebook_link !== '#'): ?>
+                    <div class="site-footer__social">
+                        <a href="<?php echo htmlspecialchars($facebook_link); ?>"
+                           target="_blank" rel="noopener noreferrer" title="Facebook" aria-label="Facebook">
+                            <i class="fab fa-facebook-f"></i>
+                        </a>
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
 
         <div class="site-footer__bottom">
             <div class="site-footer__copy">
-                &copy; <?php echo date('Y'); ?>
-                <?php echo htmlspecialchars($content['footer']['copyright']
-                    ?? 'Transient House & Tours. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.
             </div>
             <div class="site-footer__links">
-                <a onclick="reopenTermsModal('privacy'); return false;">
-                    <?php echo htmlspecialchars($content['footer']['privacy_policy'] ?? 'Privacy Policy'); ?>
-                </a>
-                <a onclick="reopenTermsModal('terms'); return false;">
-                    <?php echo htmlspecialchars($content['footer']['terms_of_service'] ?? 'Terms of Service'); ?>
-                </a>
+                <a onclick="reopenTermsModal('privacy'); return false;">Privacy Policy</a>
+                <a onclick="reopenTermsModal('terms'); return false;">Terms &amp; Conditions</a>
             </div>
         </div>
     </div>

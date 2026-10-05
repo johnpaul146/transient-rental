@@ -35,10 +35,16 @@ if(isset($content['site_settings']['logo_path']) && !empty($content['site_settin
 }
 
 $hero_path = 'uploads/hero/hero-bg.jpg';
-if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_settings']['hero_image_path'])) {
-    $hero_path = $content['site_settings']['hero_image_path'];
+$home_hero_path = $content['site_settings']['hero_image_path'] ?? $hero_path;
+if (!empty($home_hero_path) && file_exists($home_hero_path) && !is_dir($home_hero_path)) {
+    $hero_path = $home_hero_path;
 }
-$hero_exists = file_exists($hero_path);
+$page_hero_filename = basename((string)($content['site_settings']['activities_hero_image'] ?? ''));
+$page_hero_path = 'uploads/hero/activities/' . $page_hero_filename;
+if ($page_hero_filename !== '' && file_exists($page_hero_path) && !is_dir($page_hero_path)) {
+    $hero_path = $page_hero_path;
+}
+$hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
 
 function getGoogleMapsUrl($address) {
     if (empty($address) || $address == '#') return '#';
@@ -475,7 +481,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             <?php else: ?>
             background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
             <?php endif; ?>
-            padding: 80px 0;
+            padding: 120px 20px 70px;
             color: white; text-align: center; position: relative;
         }
         .hero-content { max-width: 800px; margin: 0 auto; padding: 0 20px; position: relative; z-index: 1; }
@@ -1329,7 +1335,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             .logo-wrapper .logo-image-placeholder { height: 40px; width: 40px; }
             .brand-text .brand-name { font-size: 17px; }
             .brand-text .brand-tagline { font-size: 10px; }
-            .hero { padding: 60px 0; }
+            .hero { padding: 100px 16px 50px; }
             .hero h1 { font-size: 32px; }
             .hero p { font-size: 16px; }
             .activity-grid { grid-template-columns: 1fr; }
@@ -1449,139 +1455,6 @@ $is_logged_in = isset($_SESSION['user_id']);
 </head>
 <body>
 <?php include 'components/navbar.php'; ?>
-
-<!-- SIDEBAR OVERLAY -->
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-
-<!-- HAMBURGER MENU BUTTON -->
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
-<!-- SIDEBAR NAVIGATION -->
-<div class="sidebar" id="sidebar">
-
-    <div class="sidebar-header">
-        <div class="sidebar-header-top">
-            <a href="index.php" class="logo">
-                <?php if($sidebar_logo_exists): ?>
-                    <img src="<?php echo htmlspecialchars($sidebar_logo); ?>?<?php echo time(); ?>" alt="Logo">
-                <?php else: ?>
-                    <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
-                <?php endif; ?>
-                <div class="logo-text">
-                    <span class="main">Transient House</span>
-                    <span class="sub">& Tours</span>
-                </div>
-            </a>
-            <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-    </div>
-
-    <ul class="nav-menu">
-        <li class="nav-item"><a href="index.php" class="nav-link"><i class="fas fa-home"></i><span>Home</span></a></li>
-        <li class="nav-item"><a href="houses.php" class="nav-link"><i class="fas fa-home"></i><span>Houses</span></a></li>
-        <li class="nav-item"><a href="tours.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tours</span></a></li>
-        <li class="nav-item"><a href="activities.php" class="nav-link active-nav"><i class="fas fa-water"></i><span>Activities</span></a></li>
-        <li class="nav-item"><a href="food.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food</span></a></li>
-        <li class="nav-item"><a href="packages.php" class="nav-link"><i class="fas fa-box-open"></i><span>My Package</span></a></li>
-
-        <?php if(isset($_SESSION['user_id'])): ?>
-            <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-cog"></i><span>Dashboard</span></a></li>
-            <?php else: ?>
-                <li class="nav-item"><a href="profile.php" class="nav-link"><i class="fas fa-user"></i><span>Profile</span></a></li>
-                <li class="nav-item">
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Edit Review</span>
-                        </a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                            <i class="fas fa-star"></i><span>Rate Us</span>
-                        </a>
-                    <?php endif; ?>
-                </li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item">
-                <a href="#" class="nav-link" onclick="openLogoutModal(event); return false;" style="color: #ef4444;">
-                    <i class="fas fa-sign-out-alt"></i><span>Logout</span>
-                </a>
-            </li>
-        <?php else: ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item">
-                <a href="login.php" class="nav-link" style="background: #4DA6D9; color: white; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 600;">
-                    <i class="fas fa-sign-in-alt"></i><span>Login</span>
-                </a>
-            </li>
-            <li class="nav-item" style="margin-top: 8px;">
-                <a href="register.php" class="nav-link" style="background: #F4B400; color: #0B2447; border-radius: 8px; margin: 0 20px; justify-content: center; font-weight: 700;">
-                    <i class="fas fa-user-plus"></i><span>Register</span>
-                </a>
-            </li>
-        <?php endif; ?>
-    </ul>
-</div>
-
-<!-- HEADER -->
-<div class="header">
-    <div class="header-content">
-        <a href="index.php" class="logo-wrapper">
-            <?php 
-            $logo_exists = false;
-            $logo_actual_path = 'uploads/logos/logo.png';
-            if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) {
-                $logo_actual_path = $content['site_settings']['logo_path'];
-            }
-            if(!empty($logo_actual_path) && file_exists($logo_actual_path) && !is_dir($logo_actual_path)) {
-                $logo_exists = true;
-            }
-            if(!$logo_exists && file_exists('uploads/logos/logo.png')) {
-                $logo_exists = true;
-                $logo_actual_path = 'uploads/logos/logo.png';
-            }
-            if($logo_exists): 
-            ?>
-                <img src="<?php echo htmlspecialchars($logo_actual_path); ?>?<?php echo time(); ?>" alt="Logo" class="logo-image">
-            <?php else: ?>
-                <div class="logo-image-placeholder"><i class="fas fa-home"></i></div>
-            <?php endif; ?>
-            <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
-                <span class="brand-tagline">Your Home Away From Home</span>
-            </div>
-        </a>
-        
-        <div class="desktop-nav">
-            <a href="index.php"><i class="fas fa-home"></i> Home</a>
-            <a href="houses.php"><i class="fas fa-home"></i> Houses</a>
-            <a href="tours.php"><i class="fas fa-umbrella-beach"></i> Tours</a>
-            <a href="activities.php" class="active-nav"><i class="fas fa-water"></i> Activities</a>
-            <a href="food.php"><i class="fas fa-utensils"></i> Food</a>
-            <a href="packages.php"><i class="fas fa-box-open"></i> My Package</a>
-            
-            <?php if(isset($_SESSION['user_id'])): ?>
-                <?php if(isset($_SESSION['role']) && ($_SESSION['role'] == 'admin' || $_SESSION['role'] == 'staff')): ?>
-                    <a href="admin-dashboard.php"><i class="fas fa-cog"></i> Dashboard</a>
-                <?php else: ?>
-                    <a href="profile.php"><i class="fas fa-user"></i> Profile</a>
-                    <?php if($user_has_feedback): ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Edit</span></a>
-                    <?php else: ?>
-                        <a href="#" onclick="openOverallFeedbackModal(event); return false;" class="btn-rate"><i class="fas fa-star"></i> <span class="rate-text">Rate Us</span></a>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <a href="#" onclick="openLogoutModal(event); return false;" class="btn-logout"><i class="fas fa-sign-out-alt"></i> <span class="logout-text">Logout</span></a>
-            <?php else: ?>
-                <a href="login.php"><i class="fas fa-sign-in-alt"></i> Login</a>
-            <?php endif; ?>
-        </div>
-    </div>
-</div>
 
 <!-- ALERTS -->
 <?php if(isset($success) && !isset($_GET['feedback_success'])): ?>
@@ -1929,58 +1802,6 @@ $is_logged_in = isset($_SESSION['user_id']);
 <!-- JAVASCRIPT -->
 <script>
 // ============================================================
-// SIDEBAR
-// ============================================================
-function toggleSidebar() {
-    if (window.innerWidth > 1100) return;
-
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-
-    const willOpen = !sidebar.classList.contains('open');
-
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-
-    if (willOpen && window.innerWidth <= 1100) {
-        document.body.classList.add('sidebar-open-mobile');
-    } else {
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-
-    if (sidebar.classList.contains('open')) {
-        document.body.style.overflow = 'hidden';
-    } else {
-        document.body.style.overflow = 'auto';
-    }
-}
-
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar.classList.contains('open')) toggleSidebar();
-
-        const logoutModal = document.getElementById('logoutModal');
-        if (logoutModal && logoutModal.classList.contains('show')) {
-            closeLogoutModal();
-        }
-    }
-});
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (window.innerWidth > 1100 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
-    }
-});
-
-// ============================================================
 // ✅ SHOPEE-STYLE VIEW MODAL — ACTIVITY DATA
 // ============================================================
 const activityData = <?php
@@ -2160,8 +1981,7 @@ var overallRatingTexts = { 1: 'Very Poor', 2: 'Poor', 3: 'Average', 4: 'Good', 5
 
 function openOverallFeedbackModal(event) {
     if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
     document.getElementById('overallFeedbackModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
@@ -2197,15 +2017,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function openLogoutModal(event) {
     if (event) event.preventDefault();
 
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) {
-        const overlay = document.getElementById('sidebarOverlay');
-        const toggleBtn = document.getElementById('menuToggle');
-        sidebar.classList.remove('open');
-        if (overlay) overlay.classList.remove('active');
-        if (toggleBtn) toggleBtn.classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-    }
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
 
     document.getElementById('logoutModal').classList.add('show');
     document.body.style.overflow = 'hidden';

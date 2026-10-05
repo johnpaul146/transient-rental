@@ -107,7 +107,7 @@ $navItems = [
                     <span><?php echo $hasFeedback ? 'Edit Review' : 'Rate Us'; ?></span>
                 </a>
             <?php endif; ?>
-            <a href="#" onclick="openLogoutModal(event); return false;"
+            <a href="#" onclick="handleGuestLogout(event); return false;"
                class="nav-drawer__link nav-drawer__link--danger">
                 <i class="fas fa-sign-out-alt"></i><span>Logout</span>
             </a>
@@ -175,7 +175,7 @@ $navItems = [
                         <span class="navbar__user-name"><?php echo htmlspecialchars($_SESSION['username'] ?? 'Profile'); ?></span>
                     </a>
                 <?php endif; ?>
-                <a href="#" onclick="openLogoutModal(event); return false;"
+                <a href="#" onclick="handleGuestLogout(event); return false;"
                    class="btn btn-ghost btn-sm" title="Logout">
                     <i class="fas fa-sign-out-alt"></i>
                 </a>
@@ -190,3 +190,79 @@ $navItems = [
         </div>
     </div>
 </header>
+
+<script>
+(function () {
+    if (window.__guestNavInitialized) return;
+    window.__guestNavInitialized = true;
+
+    var navbar = document.getElementById('siteNavbar');
+    var drawer = document.getElementById('navDrawer');
+    var overlay = document.getElementById('navOverlay');
+    var toggle = document.getElementById('navToggle');
+    var closeBtn = document.getElementById('navDrawerClose');
+
+    function setScrolledState() {
+        if (!navbar) return;
+        navbar.classList.toggle('is-scrolled', window.scrollY > 20);
+    }
+
+    function openDrawer() {
+        if (!drawer || !overlay) return;
+        drawer.classList.add('is-open');
+        overlay.classList.add('is-open');
+        overlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('nav-open');
+        if (toggle) toggle.setAttribute('aria-expanded', 'true');
+        if (closeBtn) setTimeout(function () { closeBtn.focus(); }, 50);
+    }
+
+    function closeDrawer() {
+        if (!drawer || !overlay) return;
+        drawer.classList.remove('is-open');
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('nav-open');
+        if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleDrawer() {
+        if (!drawer) return;
+        if (drawer.classList.contains('is-open')) closeDrawer();
+        else openDrawer();
+    }
+
+    window.handleGuestLogout = function (event) {
+        if (event) event.preventDefault();
+        closeDrawer();
+        if (typeof window.openLogoutModal === 'function') {
+            window.openLogoutModal(event);
+            return;
+        }
+        window.location.href = 'logout.php?redirect=index.php';
+    };
+
+    if (toggle) toggle.addEventListener('click', toggleDrawer);
+    if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+    if (overlay) overlay.addEventListener('click', closeDrawer);
+
+    if (drawer) {
+        drawer.querySelectorAll('a').forEach(function (link) {
+            link.addEventListener('click', closeDrawer);
+        });
+    }
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') closeDrawer();
+    });
+
+    window.addEventListener('resize', function () {
+        if (window.innerWidth > 992) closeDrawer();
+    });
+
+    setScrolledState();
+    window.addEventListener('scroll', setScrolledState, { passive: true });
+
+    window.closeGuestNavDrawer = closeDrawer;
+})();
+</script>

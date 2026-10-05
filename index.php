@@ -784,7 +784,7 @@ $nav_active = 'home';
             <div class="cta-banner__actions">
                 <a href="houses.php" class="btn btn-primary btn-lg">
                     <i class="fas fa-home"></i>
-                    <?php echo htmlspecialchars($content['cta']['button_houses_text'] ?? 'Browse stays'); ?>
+                    View Houses
                 </a>
                 <a href="packages.php" class="btn btn-ghost-light btn-lg">
                     <i class="fas fa-box-open"></i> Build a package
@@ -910,32 +910,6 @@ $nav_active = 'home';
 </div>
 
 <script>
-/* Navbar */
-(function() {
-    var navbar   = document.getElementById('siteNavbar');
-    var drawer   = document.getElementById('navDrawer');
-    var overlay  = document.getElementById('navOverlay');
-    var toggle   = document.getElementById('navToggle');
-    var closeBtn = document.getElementById('navDrawerClose');
-
-    if (navbar) {
-        var onScroll = function() {
-            if (window.scrollY > 20) navbar.classList.add('is-scrolled');
-            else navbar.classList.remove('is-scrolled');
-        };
-        onScroll();
-        window.addEventListener('scroll', onScroll, { passive: true });
-    }
-
-    function openDrawer()  { if (!drawer || !overlay) return; drawer.classList.add('is-open'); overlay.classList.add('is-open'); document.body.classList.add('nav-open'); if (toggle) toggle.setAttribute('aria-expanded','true'); }
-    function closeDrawer() { if (!drawer || !overlay) return; drawer.classList.remove('is-open'); overlay.classList.remove('is-open'); document.body.classList.remove('nav-open'); if (toggle) toggle.setAttribute('aria-expanded','false'); }
-
-    if (toggle)   toggle.addEventListener('click', openDrawer);
-    if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
-    if (overlay)  overlay.addEventListener('click', closeDrawer);
-    document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeDrawer(); });
-})();
-
 /* Logout modal */
 function openLogoutModal(e) {
     if (e) e.preventDefault();
