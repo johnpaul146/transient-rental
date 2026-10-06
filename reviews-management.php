@@ -1179,6 +1179,7 @@ function getRatingText($rating) {
 
 }
    </style>
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 

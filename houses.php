@@ -1535,9 +1535,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .gallery-slider-nav { width: 40px; height: 40px; font-size: 18px; }
             .gallery-thumbnail { width: 55px; height: 40px; }
             .payment-popup { padding: 20px; }
-            .footer-grid { grid-template-columns: 1fr; }
-            .footer-map { max-width: 100%; height: 160px; }
-            .footer-bottom { flex-direction: column; text-align: center; }
         }
 
         @media (max-width: 480px) {
@@ -1549,7 +1546,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .gallery-slider-nav { width: 35px; height: 35px; font-size: 14px; }
             .gallery-thumbnail { width: 45px; height: 35px; }
             .gallery-modal-close { width: 35px; height: 35px; font-size: 24px; top: 10px; right: 12px; }
-            .footer-map { height: 140px; }
         }
 
         /* UTILITY */

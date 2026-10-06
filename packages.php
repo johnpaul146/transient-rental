@@ -1596,37 +1596,6 @@ $cart_data_js = [
             .gcash-actions { flex-direction: column-reverse; }
             .gcash-btn-upload, .gcash-btn-close { flex: unset; width: 100%; }
         }
-
-        .footer { background: #0B2447; color: white; padding: 60px 0 20px; margin-top: 50px; border-top: 2px solid rgba(77, 166, 217, 0.15); }
-        .footer-content { max-width: 1300px; margin: 0 auto; padding: 0 20px; }
-        .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 40px; margin-bottom: 40px; }
-        .footer-col h4 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: white; display: flex; align-items: center; gap: 10px; }
-        .footer-col h4 i { color: #4DA6D9; }
-        .footer-col p { color: #b3d9ff; line-height: 1.7; margin-bottom: 20px; font-size: 14px; }
-        .footer-col ul { list-style: none; }
-        .footer-col ul li { margin-bottom: 12px; color: #b3d9ff; display: flex; align-items: flex-start; gap: 10px; font-size: 14px; }
-        .footer-col ul li i { width: 20px; color: #4DA6D9; flex-shrink: 0; padding-top: 3px; }
-        .footer-col ul li a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; word-break: break-word; }
-        .footer-col ul li a:hover { color: white; }
-        .footer-map { width: 100%; max-width: 300px; height: 180px; border-radius: 10px; overflow: hidden; margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.15); }
-        .footer-map iframe { width: 100%; height: 100%; border: 0; display: block; }
-        .social-links { display: flex; gap: 15px; }
-        .social-links a { width: 40px; height: 40px; background: rgba(255,255,255,0.05); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; text-decoration: none; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.05); }
-        .social-links a:hover { background: #4DA6D9; border-color: #7bb8f0; transform: translateY(-3px); }
-        .footer-bottom { border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; color: #b3d9ff; font-size: 14px; }
-        .footer-bottom-links { display: flex; gap: 20px; flex-wrap: wrap; }
-        .footer-bottom-links a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; cursor: pointer; }
-        .footer-bottom-links a:hover { color: white; }
-
-        @media (max-width: 768px) {
-            .footer { padding: 45px 0 20px; margin-top: 40px; }
-            .footer-content { padding: 0 16px; }
-            .footer-grid { grid-template-columns: 1fr; gap: 30px; margin-bottom: 30px; }
-            .footer-map { max-width: 100%; height: 160px; }
-            .footer-bottom { flex-direction: column; text-align: center; font-size: 13px; }
-            .footer-bottom-links { justify-content: center; }
-        }
-
         .alert-overlay { display: none !important; }
     </style>
 </head>
@@ -3166,6 +3135,14 @@ function unlockBookingTermsAcceptForm() {
 
     scrollHint.classList.add('done');
     scrollHint.innerHTML = '<i class="fas fa-check-circle"></i> You\'ve read everything. Please check the box below.';
+}
+
+// Footer "Privacy Policy" / "Terms & Conditions" links call this on every page that renders the shared footer
+function reopenTermsModal(tabName) {
+    if (document.getElementById('bookingTermsModal')) {
+        openBookingTermsModal();
+    }
+    return false;
 }
 
 function closeBookingTermsModal() {

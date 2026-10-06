@@ -276,7 +276,13 @@ function getBookingStatusLabel($payment_status) {
         .menu-toggle:hover { background: rgba(77, 166, 217, 0.2); transform: scale(1.05); }
         body.sidebar-open-mobile .menu-toggle { opacity: 0; visibility: hidden; pointer-events: none; }
 
-        .sidebar-close-btn { display: flex; }
+        @media (max-width: 1024px) {
+            .sidebar { position: fixed; top: 0; left: 0; height: 100vh; transform: translateX(-100%); width: 280px; z-index: 1000; box-shadow: none; border-radius: 0; transition: transform 0.3s ease; }
+            .sidebar.open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,0.4); }
+            .menu-toggle { display: flex; align-items: center; justify-content: center; }
+            .sidebar-close-btn { display: flex; align-items: center; justify-content: center; }
+            .main-content { width: 100%; padding: 70px 16px 20px !important; }
+        }
 
         @media (max-width: 480px) {
             .sidebar { width: 85%; max-width: 300px; }
@@ -793,6 +799,10 @@ function getBookingStatusLabel($payment_status) {
     height:auto !important;
 }
 
+@media (max-width: 900px) {
+    .main-content .dashboard-grid { grid-template-columns: 1fr !important; }
+}
+
 
 /* FINAL CARD NATURAL HEIGHT */
 
@@ -808,6 +818,7 @@ function getBookingStatusLabel($payment_status) {
             .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
     
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 

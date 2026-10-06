@@ -122,8 +122,8 @@ $map_embed = $map_embed ?? '';
                 &copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.
             </div>
             <div class="site-footer__links">
-                <a onclick="reopenTermsModal('privacy'); return false;">Privacy Policy</a>
-                <a onclick="reopenTermsModal('terms'); return false;">Terms &amp; Conditions</a>
+                <a onclick="if (window.reopenTermsModal) { reopenTermsModal('privacy'); } return false;">Privacy Policy</a>
+                <a onclick="if (window.reopenTermsModal) { reopenTermsModal('terms'); } return false;">Terms &amp; Conditions</a>
             </div>
         </div>
     </div>

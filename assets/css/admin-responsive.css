@@ -1,0 +1,57 @@
+/* ============================================================
+   ADMIN / STAFF SHARED RESPONSIVE RULES
+   Linked last in <head> of the admin/staff pages so these win over
+   each page's inline <style>. Only touch-target / component sizing
+   that is identical across admin pages lives here.
+   ============================================================ */
+
+@media (max-width: 768px) {
+  /* Modal close (X) buttons: reachable with a thumb */
+  .modal .modal-header .close,
+  .modal .close {
+    min-width: 40px;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Quick-fill chips next to number inputs */
+  .quick-suggestions button,
+  .quick-price-suggestions button {
+    min-height: 32px;
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+}
+
+/* Phone number rows: stack the country-code select above the number on very narrow screens */
+@media (max-width: 400px) {
+  .phone-input-group { flex-direction: column; }
+  .phone-input-group .phone-suffix-select { width: 100%; max-width: none; }
+}
+
+/* Long names, emails and URLs must wrap instead of widening cards/grids (tables excluded: they scroll) */
+.main-content :is(h1, h2, h3, h4, h5, h6, p, label, .stat-label, .stat-number, .stat-small,
+                  [class*="title"], [class*="name"], [class*="desc"], [class*="label"], [class*="value"], [class*="badge"], .badge):not(td *, th *) {
+  overflow-wrap: anywhere;
+}
+.main-content .card, .main-content [class*="stat-card"], .main-content .stat-card { min-width: 0; }
+
+/* Top bar: a very long display name must truncate instead of pushing the page wider */
+.top-bar .user-profile { flex-shrink: 1; min-width: 0; max-width: 100%; }
+@media (min-width: 769px) { .top-bar .user-profile { max-width: 50%; } }
+.top-bar .user-profile > * { min-width: 0; }
+.top-bar .user-profile .avatar { flex-shrink: 0; }
+.top-bar .user-profile .user-name,
+.top-bar .user-profile .user-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Phones: the page title sits between the hamburger and the avatar. The desktop-style 84-100px side padding left only ~100px for the title text, so give it room. */
+@media (max-width: 480px) {
+  .top-bar:has(.mobile-avatar, .avatar-mobile) { padding-left: 52px; padding-right: 58px; }
+  .top-bar .page-title h1 .mobile-avatar,
+  .top-bar .page-title h1 .avatar-mobile {
+    width: 48px; height: 48px; font-size: 20px; border-width: 3px; right: 6px;
+    box-shadow: 0 0 0 3px #fff, 0 0 0 5px rgba(77, 166, 217, 0.4);
+  }
+}

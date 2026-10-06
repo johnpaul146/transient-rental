@@ -1125,7 +1125,7 @@ function hasError($field) {
             .register-header { padding: 20px 15px; }
             .register-header h1 { font-size: 19px; }
             .register-body { padding: 18px 15px; }
-            .photo-actions .btn-photo { font-size: 10px; padding: 5px 10px; }
+            .photo-actions .btn-photo { font-size: 12px; padding: 8px 14px; min-height: 36px; }
             .password-wrapper .toggle-password { font-size: 14px; right: 8px; padding: 4px 6px; }
             .password-requirements {
                 font-size: 9px; padding: 4px 8px;
@@ -1135,6 +1135,10 @@ function hasError($field) {
             .phone-suffix-select { min-width: 80px; font-size: 12px; }
             .id-number-wrapper .form-control { padding-right: 60px; font-size: 13px; }
             .id-number-wrapper .id-char-count { font-size: 9px; padding: 2px 6px; right: 8px; }
+        }
+        @media (max-width: 400px) {
+            .phone-input-group { flex-direction: column; }
+            .phone-input-group .phone-suffix-select { width: 100%; max-width: none; }
         }
 /* ==========================================
    REGISTER TYPOGRAPHY + COLOR CONSISTENCY

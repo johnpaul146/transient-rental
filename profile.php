@@ -1578,27 +1578,6 @@ background-position: center top;
         .form-control:focus, .form-select:focus { outline: none; border-color: #4DA6D9; background: white; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
         textarea.form-control { min-height: 90px; resize: vertical; }
 
-        .footer { background: #0B2447; color: white; padding: 60px 0 20px; margin-top: 50px; border-top: 2px solid rgba(77, 166, 217, 0.15); }
-        .footer-content { max-width: 1300px; margin: 0 auto; padding: 0 20px; }
-        .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 40px; margin-bottom: 40px; }
-        .footer-col h4 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: white; display: flex; align-items: center; gap: 10px; }
-        .footer-col h4 i { color: #4DA6D9; flex-shrink: 0; }
-        .footer-col p { color: #b3d9ff; line-height: 1.7; margin-bottom: 20px; font-size: 14px; }
-        .footer-col ul { list-style: none; }
-        .footer-col ul li { margin-bottom: 12px; color: #b3d9ff; display: flex; align-items: flex-start; gap: 10px; font-size: 14px; }
-        .footer-col ul li i { width: 20px; color: #4DA6D9; flex-shrink: 0; padding-top: 3px; }
-        .footer-col ul li a { color: #b3d9ff; text-decoration: none; word-break: break-word; }
-        .footer-col ul li a:hover { color: white; }
-        .social-links { display: flex; gap: 15px; }
-        .social-links a { width: 40px; height: 40px; background: rgba(255,255,255,0.05); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; text-decoration: none; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.05); }
-        .social-links a:hover { background: #4DA6D9; border-color: #7bb8f0; transform: translateY(-3px); }
-        .footer-bottom { border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; color: #b3d9ff; font-size: 14px; }
-        .footer-bottom-links { display: flex; gap: 20px; flex-wrap: wrap; }
-        .footer-bottom-links a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; cursor: pointer; }
-        .footer-bottom-links a:hover { color: white; }
-        .footer-map { width: 100%; max-width: 300px; height: 180px; border-radius: 10px; overflow: hidden; margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
-        .footer-map iframe { width: 100%; height: 100%; border: 0; display: block; }
-
         .terms-modal { z-index: 30000 !important; }
         .terms-modal-content { max-width: 720px !important; padding: 0 !important; overflow: hidden !important; display: flex !important; flex-direction: column; max-height: 92vh !important; }
         .terms-modal-header { background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); color: white; padding: 25px 30px; text-align: center; position: relative; overflow: hidden; flex-shrink: 0; }
@@ -1686,10 +1665,6 @@ background-position: center top;
             .modal-header h3 { font-size: 16px; }
             .view-booking-modal .booking-detail-item { flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 8px; }
             .view-booking-modal .booking-detail-item .value { text-align: left; max-width: 100%; width: 100%; }
-            .footer { padding: 40px 0 15px; }
-            .footer-grid { gap: 25px; margin-bottom: 25px; }
-            .footer-map { max-width: 100%; height: 160px; }
-            .footer-bottom { flex-direction: column; text-align: center; }
             .big-rating-input { font-size: 34px; gap: 6px; }
             .prev-rating-banner .prev-stars { font-size: 22px; }
         }
@@ -1741,14 +1716,6 @@ background-position: center top;
             .prev-rating-banner .prev-stars { font-size: 20px; }
             .update-review-btn { font-size: 13px; padding: 12px; }
             .btn-cancel-review { font-size: 12px; padding: 12px; }
-            .footer { padding: 30px 0 12px; }
-            .footer-content { padding: 0 12px; }
-            .footer-grid { gap: 20px; }
-            .footer-col h4 { font-size: 15px; margin-bottom: 12px; }
-            .footer-col p, .footer-col ul li { font-size: 12px; }
-            .footer-map { height: 140px; }
-            .footer-bottom { font-size: 11px; padding-top: 15px; gap: 10px; }
-            .footer-bottom-links { gap: 12px; }
             .terms-modal-header { padding: 16px 14px; }
             .terms-modal-header h3 { font-size: 15px; }
             .terms-modal-icon { font-size: 28px; }
@@ -1781,8 +1748,7 @@ background-position: center top;
             *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
         }
         @supports (padding: max(0px)) {
-            .header-content, .main-container, .footer-content { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
-            .footer { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+            .header-content, .main-container { padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
         }
 
         /* PROFILE HERO OVERRIDE */
@@ -3930,66 +3896,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
 <?php endif; ?>
 
 <!-- FOOTER -->
-<div class="footer">
-    <div class="footer-content">
-        <div class="footer-grid">
-            <div class="footer-col">
-                <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
-                <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
-                <div class="social-links">
-                    <?php if ($facebook_link !== '' && $facebook_link !== '#'): ?>
-                    <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" title="Facebook" rel="noopener noreferrer">
-                        <i class="fab fa-facebook-f"></i>
-                    </a>
-                    <?php endif; ?>
-                </div>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-link"></i> Quick Links</h4>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
-                    <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Houses</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
-                    <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
-                    <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
-                    <li><a href="packages.php"><i class="fas fa-chevron-right"></i> My Package</a></li>
-                    <li><a href="reviews.php"><i class="fas fa-chevron-right"></i> Reviews</a></li>
-                    <li><a href="profile.php?tab=packages"><i class="fas fa-chevron-right"></i> My Profile</a></li>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                <?php if (!empty($map_embed) && $map_embed !== '#'): ?>
-                    <div class="footer-map">
-                        <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                    </div>
-                <?php endif; ?>
-                <ul>
-                    <li>
-                        <i class="fas fa-map-marker-alt"></i>
-                        <?php if ($maps_url != '#'): ?>
-                            <a href="<?php echo $maps_url; ?>" target="_blank" rel="noopener noreferrer" style="color: #b3d9ff; text-decoration: none;">
-                                <?php echo htmlspecialchars($location_address); ?>
-                                <i class="fas fa-external-link-alt" style="font-size: 10px; margin-left: 4px; opacity: 0.6;"></i>
-                            </a>
-                        <?php else: ?>
-                            <?php echo htmlspecialchars($location_address); ?>
-                        <?php endif; ?>
-                    </li>
-                    <li><i class="fas fa-phone"></i><a href="tel:<?php echo preg_replace('/[^0-9+]/', '', $content['footer']['phone'] ?? '+639123456789'); ?>" style="color: #b3d9ff; text-decoration: none;"><?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?></a></li>
-                    <li><i class="fas fa-envelope"></i><a href="mailto:<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>" style="color: #b3d9ff; text-decoration: none;"><?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?></a></li>
-                </ul>
-            </div>
-        </div>
-        <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.</div>
-            <div class="footer-bottom-links">
-                <a onclick="reopenTermsModal('privacy'); return false;">Privacy Policy</a>
-                <a onclick="reopenTermsModal('terms'); return false;">Terms &amp; Conditions</a>
-            </div>
-        </div>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 <!-- LOGOUT CONFIRMATION MODAL -->
 <div class="logout-modal-overlay" id="logoutModal">

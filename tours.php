@@ -881,27 +881,6 @@ $is_logged_in = isset($_SESSION['user_id']);
         .payment-popup .popup-actions .btn-pay-now:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(16, 185, 129, 0.3); }
         .payment-popup .ref-number { background: #e6f7e6; color: #10b981; padding: 8px 15px; border-radius: 8px; font-weight: 600; display: inline-block; font-size: 14px; }
 
-        .footer { background: #0B2447; color: white; padding: 60px 0 20px; margin-top: 50px; border-top: 2px solid rgba(77, 166, 217, 0.15); }
-        .footer-content { max-width: 1300px; margin: 0 auto; padding: 0 20px; }
-        .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 40px; margin-bottom: 40px; }
-        .footer-col h4 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: white; display: flex; align-items: center; gap: 10px; }
-        .footer-col h4 i { color: #4DA6D9; }
-        .footer-col p { color: #b3d9ff; line-height: 1.7; margin-bottom: 20px; font-size: 14px; }
-        .footer-col ul { list-style: none; }
-        .footer-col ul li { margin-bottom: 12px; color: #b3d9ff; display: flex; align-items: center; gap: 10px; }
-        .footer-col ul li i { width: 20px; color: #4DA6D9; }
-        .footer-col ul li a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; }
-        .footer-col ul li a:hover { color: white; }
-        .footer-map { width: 100%; max-width: 300px; height: 180px; border-radius: 10px; overflow: hidden; margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
-        .footer-map iframe { width: 100%; height: 100%; border: 0; display: block; }
-        .social-links { display: flex; gap: 15px; }
-        .social-links a { width: 40px; height: 40px; background: rgba(255,255,255,0.05); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; text-decoration: none; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.05); }
-        .social-links a:hover { background: #4DA6D9; border-color: #7bb8f0; transform: translateY(-3px); }
-        .footer-bottom { border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; color: #b3d9ff; font-size: 14px; }
-        .footer-bottom-links { display: flex; gap: 20px; }
-        .footer-bottom-links a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; cursor: pointer; }
-        .footer-bottom-links a:hover { color: white; }
-
         .shopee-modal { display: none; position: fixed; inset: 0; z-index: 4000; background: rgba(0,0,0,0.5); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); align-items: center; justify-content: center; padding: 20px; animation: shopeeFadeIn 0.25s ease; overscroll-behavior: contain; }
         .shopee-modal.show { display: flex; }
         @keyframes shopeeFadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -1002,9 +981,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .gallery-thumbnail { width: 55px; height: 40px; }
             .payment-popup { padding: 20px; }
             .bookings-table-wrapper table { min-width: 600px; }
-            .footer-grid { grid-template-columns: 1fr; }
-            .footer-map { max-width: 100%; height: 160px; }
-            .footer-bottom { flex-direction: column; text-align: center; }
         }
         @media (max-width: 480px) {
             .modal-content { padding: 15px; }
@@ -1026,7 +1002,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .bookings-table-wrapper table { min-width: 500px; }
             .bookings-table-wrapper table thead th, .bookings-table-wrapper table tbody td { padding: 8px; font-size: 11px; }
             .btn-sm { font-size: 9px; padding: 3px 8px; }
-            .footer-map { height: 140px; }
             .calendar-grid .day { padding: 6px 0; font-size: 12px; }
         }
 

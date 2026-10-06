@@ -672,6 +672,7 @@ unset($base_qs['page'], $base_qs['export']);
         }
             .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 

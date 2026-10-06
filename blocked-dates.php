@@ -901,6 +901,7 @@ try {
         .wizard-body { padding: 24px 28px; overflow-y: auto; min-height: 300px; max-height: 58vh; }
         .wizard-foot { display: flex; justify-content: space-between; gap: 10px; padding: 16px 28px; background: #f8fafc; border-top: 2px solid #e8f0fe; }
         .wizard-foot .spacer { flex: 1; }
+        @media (max-height: 640px) { .wizard-body { min-height: 0; max-height: none; flex: 1 1 auto; } .wizard-head { padding-top: 14px; } .stepper { padding-bottom: 12px; } .wizard-foot { padding-top: 10px; padding-bottom: 10px; } }
         .btn-blue { padding: 11px 22px; background: #4DA6D9; color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s; font-family: inherit; }
         .btn-blue:hover:not(:disabled) { background: #3a8bbf; transform: translateY(-1px); }
         .btn-blue:disabled { background: #cbd5e1; cursor: not-allowed; }
@@ -958,6 +959,7 @@ try {
             .recent-meta { display: none; }
         }
     </style>
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 
@@ -1773,6 +1775,8 @@ document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
     if (document.getElementById('blockModal').classList.contains('show')) closeBlockWizard();
     if (document.getElementById('unblockModal').classList.contains('show')) closeUnblock();
+    var sb = document.getElementById('sidebar');
+    if (sb && sb.classList.contains('open')) toggleSidebar();
 });
 
 // ============================================================

@@ -1261,6 +1261,7 @@ function formatGuestNames($guest_names) {
 
     #calendar { min-height: 600px; padding: 10px; }
     .fc { font-family: 'Inter', sans-serif !important; }
+    @media (max-width: 768px) { #calendar { padding: 4px; min-height: 480px; } .fc .fc-toolbar { flex-wrap: wrap; justify-content: center; gap: 8px; } .fc .fc-toolbar-title { font-size: 1.1rem; } .fc .fc-view-harness { overflow-x: auto; } }
     .fc-event { cursor: pointer; border-radius: 10px !important; padding: 6px 10px !important; font-size: 12px !important; border: none !important; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     .fc-modern-event { line-height: 1.25; font-size: 11px; padding: 4px 6px; white-space: normal; }
     .fc-modern-event strong { font-size: 10px; letter-spacing: .4px; }
@@ -1546,6 +1547,7 @@ function formatGuestNames($guest_names) {
     box-shadow:0 20px 40px rgba(16,185,129,.25);
 }
     </style>
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 

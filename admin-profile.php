@@ -811,7 +811,7 @@ body.sidebar-open-mobile .menu-toggle {
 /* OTP MODAL */
 .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); z-index: 3000; align-items: center; justify-content: center; padding: 20px; }
 .modal.show { display: flex; }
-.modal-content { background: white; border-radius: 24px; max-width: 480px; width: 100%; padding: 30px; }
+.modal-content { background: white; border-radius: 24px; max-width: 480px; width: 100%; max-height: 100%; overflow-y: auto; padding: 30px; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #e8f0fe; }
 .modal-header h3 { font-size: 20px; font-weight: 700; color: #0B2447; margin: 0; display: flex; align-items: center; gap: 10px; }
 .modal-header h3 i { color: #4DA6D9; }
@@ -843,6 +843,7 @@ body.sidebar-open-mobile .menu-toggle {
     .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
 }
 </style>
+    <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 

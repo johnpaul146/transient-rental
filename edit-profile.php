@@ -1098,7 +1098,11 @@ function splitPhoneForForm($fullPhone) {
 
         @media (max-width: 480px) {
             .edit-card { padding: 20px 15px; }
-            .photo-actions .btn-photo { font-size: 11px; padding: 6px 12px; }
+            .photo-actions .btn-photo { font-size: 12px; padding: 8px 14px; min-height: 36px; }
+        }
+        @media (max-width: 400px) {
+            .phone-input-group { flex-direction: column; }
+            .phone-input-group .phone-suffix-select { width: 100%; max-width: none; }
         }
     </style>
 </head>

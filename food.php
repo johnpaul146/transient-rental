@@ -1021,27 +1021,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             background: #e6a800; color: #0B2447;
         }
 
-        .footer { background: #0B2447; color: white; padding: 60px 0 20px; margin-top: 50px; border-top: 2px solid rgba(77, 166, 217, 0.15); }
-        .footer-content { max-width: 1300px; margin: 0 auto; padding: 0 20px; }
-        .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 40px; margin-bottom: 40px; }
-        .footer-col h4 { font-size: 18px; font-weight: 600; margin-bottom: 20px; color: white; display: flex; align-items: center; gap: 10px; }
-        .footer-col h4 i { color: #4DA6D9; }
-        .footer-col p { color: #b3d9ff; line-height: 1.7; margin-bottom: 20px; font-size: 14px; }
-        .footer-col ul { list-style: none; }
-        .footer-col ul li { margin-bottom: 12px; color: #b3d9ff; display: flex; align-items: center; gap: 10px; }
-        .footer-col ul li i { width: 20px; color: #4DA6D9; }
-        .footer-col ul li a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; }
-        .footer-col ul li a:hover { color: white; }
-        .footer-map { width: 100%; max-width: 300px; height: 180px; border-radius: 10px; overflow: hidden; margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
-        .footer-map iframe { width: 100%; height: 100%; border: 0; display: block; }
-        .social-links { display: flex; gap: 15px; }
-        .social-links a { width: 40px; height: 40px; background: rgba(255,255,255,0.05); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; text-decoration: none; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.05); }
-        .social-links a:hover { background: #4DA6D9; border-color: #7bb8f0; transform: translateY(-3px); }
-        .footer-bottom { border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; color: #b3d9ff; font-size: 14px; }
-        .footer-bottom-links { display: flex; gap: 20px; }
-        .footer-bottom-links a { color: #b3d9ff; text-decoration: none; transition: color 0.2s; cursor: pointer; }
-        .footer-bottom-links a:hover { color: white; }
-
         .order-summary-box { background: linear-gradient(135deg, #f0f7fb 0%, #e8f4fc 100%); padding: 20px; border-radius: 16px; margin: 20px 0; border: 2px dashed #4DA6D9; }
         .order-summary-box .summary-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 14px; color: #1e293b; }
         .order-summary-box .summary-row.total-row { border-top: 2px solid #4DA6D9; padding-top: 12px; margin-top: 8px; font-size: 20px; }
@@ -1115,9 +1094,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .gallery-slider-container { height: 350px; }
             .gallery-slider-nav { width: 40px; height: 40px; font-size: 18px; }
             .gallery-thumbnail { width: 55px; height: 40px; }
-            .footer-grid { grid-template-columns: 1fr; }
-            .footer-map { max-width: 100%; height: 160px; }
-            .footer-bottom { flex-direction: column; text-align: center; }
         }
         @media (max-width: 600px) {
             .terms-modal-content { max-width: 95% !important; max-height: 94vh !important; }
@@ -1148,7 +1124,6 @@ $is_logged_in = isset($_SESSION['user_id']);
             .gallery-slider-nav { width: 35px; height: 35px; font-size: 14px; }
             .gallery-thumbnail { width: 45px; height: 35px; }
             .gallery-modal-close { width: 35px; height: 35px; font-size: 24px; top: 10px; right: 12px; }
-            .footer-map { height: 140px; }
             .calendar-grid .day { padding: 6px 0; font-size: 12px; }
             .fulfillment-method-group { grid-template-columns: 1fr 1fr; gap: 8px; }
             .fulfillment-option-label { padding: 10px 6px; min-height: 80px; }
@@ -2153,66 +2128,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 </div>
 
 <!-- FOOTER -->
-<div class="footer">
-    <div class="footer-content">
-        <div class="footer-grid">
-            <div class="footer-col">
-                <h4><i class="fas fa-home"></i> Transient House & Tours</h4>
-                <p><?php echo htmlspecialchars($content['footer']['company_description'] ?? 'Your trusted partner for comfortable accommodations and exciting island adventures.'); ?></p>
-                <div class="social-links">
-                    <?php if ($facebook_link !== '' && $facebook_link !== '#'): ?>
-                        <a href="<?php echo htmlspecialchars($facebook_link); ?>" target="_blank" rel="noopener noreferrer" title="Facebook"><i class="fab fa-facebook-f"></i></a>
-                    <?php endif; ?>
-                </div>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-link"></i> Quick Links</h4>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
-                    <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Houses</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
-                    <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
-                    <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
-                    <li><a href="packages.php"><i class="fas fa-chevron-right"></i> My Package</a></li>
-                    <li><a href="reviews.php"><i class="fas fa-chevron-right"></i> Reviews</a></li>
-                    <?php if (isset($_SESSION['user_id'])): ?>
-                        <li><a href="profile.php"><i class="fas fa-chevron-right"></i> My Profile</a></li>
-                    <?php endif; ?>
-                </ul>
-            </div>
-            <div class="footer-col">
-                <h4><i class="fas fa-info-circle"></i> Contact Info</h4>
-                <?php if (!empty($map_embed) && $map_embed !== '#'): ?>
-                    <div class="footer-map">
-                        <iframe src="<?php echo htmlspecialchars($map_embed); ?>" width="100%" height="100%" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
-                    </div>
-                <?php endif; ?>
-                <ul>
-                    <li>
-                        <i class="fas fa-map-marker-alt"></i>
-                        <?php if ($maps_url != '#'): ?>
-                            <a href="<?php echo $maps_url; ?>" target="_blank" rel="noopener noreferrer" style="color: #b3d9ff; text-decoration: none;">
-                                <?php echo htmlspecialchars($location_address); ?>
-                                <i class="fas fa-external-link-alt" style="font-size: 10px; margin-left: 4px; opacity: 0.6;"></i>
-                            </a>
-                        <?php else: ?>
-                            <?php echo htmlspecialchars($location_address); ?>
-                        <?php endif; ?>
-                    </li>
-                    <li><i class="fas fa-phone"></i><a href="tel:<?php echo preg_replace('/[^0-9+]/', '', $content['footer']['phone'] ?? '+639123456789'); ?>" style="color: #b3d9ff; text-decoration: none;"><?php echo htmlspecialchars($content['footer']['phone'] ?? '+63 912 345 6789'); ?></a></li>
-                    <li><i class="fas fa-envelope"></i><a href="mailto:<?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?>" style="color: #b3d9ff; text-decoration: none;"><?php echo htmlspecialchars($content['footer']['email'] ?? 'info@transientrental.com'); ?></a></li>
-                </ul>
-            </div>
-        </div>
-        <div class="footer-bottom">
-            <div>&copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.</div>
-            <div class="footer-bottom-links">
-                <a onclick="reopenTermsModal('privacy'); return false;">Privacy Policy</a>
-                <a onclick="reopenTermsModal('terms'); return false;">Terms &amp; Conditions</a>
-            </div>
-        </div>
-    </div>
-</div>
+<?php include 'components/footer.php'; ?>
 
 <!-- TERMS & PRIVACY MODAL -->
 <div class="modal terms-modal" id="termsModal"

@@ -1549,6 +1549,11 @@ ul, ol { list-style: none; }
   flex-direction: column;
   padding: 0 var(--space-4);
   gap: 4px;
+  flex-shrink: 0;
+}
+
+@supports (height: 100dvh) {
+  .nav-drawer { height: 100dvh; }
 }
 
 .nav-drawer__link {
@@ -1706,6 +1711,8 @@ body.nav-open { overflow: hidden; }
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  padding-left: 0;   /* Bootstrap's ul padding must not indent footer links */
+  margin: 0;
 }
 .site-footer__list li a {
   display: inline-flex;
@@ -3024,4 +3031,123 @@ body .site-footer .site-footer__links a {
 
 .listing-card__cta {
     cursor: pointer;
+}
+
+/* ============================================================
+   RESPONSIVE OVERRIDES (must stay last: normalization above uses !important)
+   Breakpoints: 1200 / 992 (nav) / 768 / 480
+   ============================================================ */
+
+/* Guest navbar: tablet + phone */
+@media (max-width: 992px) {
+  .navbar,
+  .navbar--floating,
+  .navbar--solid { padding: 10px 0 !important; }
+
+  .navbar__inner,
+  .navbar--floating .navbar__inner,
+  .navbar--solid .navbar__inner {
+    width: calc(100% - 24px);
+    min-height: 56px !important;
+    padding: 6px 8px !important;
+    gap: 8px !important;
+  }
+
+  .navbar__brand { flex: 1 1 auto; min-width: 0; }
+  .navbar__brand-text { min-width: 0; overflow: hidden; }
+  .navbar__brand-name,
+  .navbar__brand-loc { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .navbar__brand-img,
+  .navbar__brand-fallback { object-fit: contain; }
+  .navbar__actions { gap: 6px; }
+  .navbar__actions .btn { padding: 9px 14px; font-size: 13px; }
+}
+
+@media (max-width: 640px) {
+  /* Login / Dashboard / Logout live in the drawer too */
+  .navbar__actions .btn-ghost { display: none; }
+}
+
+@media (max-width: 479px) {
+  /* Create Account is also in the drawer; keep header to hamburger + logo */
+  .navbar__actions .btn { display: none; }
+  .navbar__brand-loc { display: none; }
+  .navbar__brand-name { font-size: 14px; }
+}
+
+/* Homepage experience cards: balanced ratio on phones */
+@media (max-width: 768px) {
+  .experience-card { aspect-ratio: 4 / 5; }
+}
+
+@media (max-width: 560px) {
+  .experience-grid { grid-template-columns: minmax(0, 1fr); }
+  .experience-card { aspect-ratio: 4 / 3; min-height: 240px; width: 100%; min-width: 0; }
+  .experience-card__body { padding: var(--space-4); }
+  .experience-card__icon { width: 36px; height: 36px; margin-bottom: var(--space-2); }
+  .experience-card__arrow { margin-top: var(--space-2); }
+}
+
+/* Keep hero content clear of the fixed navbar on tablet/phone */
+@media (max-width: 992px) {
+  .hero { padding-top: 104px; }
+}
+
+/* Terms & Privacy modal: keep header legible and give the text more room on short screens */
+.terms-modal-header h3 { color: #FFFFFF !important; }
+
+@media (max-height: 520px) {
+  .terms-modal-header { padding: 10px 16px !important; }
+  .terms-modal-header .terms-modal-icon,
+  .terms-modal-header p { display: none; }
+  .terms-modal-header h3 { font-size: 16px !important; margin: 0 !important; }
+  .terms-modal-footer-note { display: none; }
+}
+
+/* Guest booking/review modals: stacked paddings left ~180px for content on 320px phones */
+@media (max-width: 480px) {
+  body .modal { padding: 8px; }
+  body .modal .modal-content { padding: 14px; max-width: 100%; }
+  body .modal .modal-body { padding: 12px !important; } /* markup sets padding inline */
+  body .modal .calendar-container { padding: 12px; }
+}
+
+/* Booking calendars: let the 7 day columns shrink instead of overflowing narrow modals */
+body .calendar-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+body .calendar-grid > * { min-width: 0; }
+
+/* Navbar: tighten desktop navbar between 993px and 1180px so brand + links + CTAs fit (logged-out has two CTAs) */
+@media (min-width: 993px) and (max-width: 1180px) {
+  .navbar__inner,
+  .navbar--floating .navbar__inner,
+  .navbar--solid .navbar__inner { padding: 8px 12px 8px 18px !important; gap: 10px !important; }
+  .navbar__link { padding: 10px 11px !important; }
+  .navbar__actions .btn { padding: 9px 14px; }
+}
+
+/* Touch targets and narrow-screen component sizing (phones) */
+@media (max-width: 480px) {
+  body .modal .close,
+  body .modal-header .close { min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+  body .btn-sm,
+  body table .btn,
+  body table .btn-sm,
+  body table button,
+  body table a.btn { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; }
+  body .btn-item-view { min-height: 34px; }
+  body .big-rating-input { font-size: 34px; gap: 6px; }
+}
+@media (max-width: 360px) {
+  body .big-rating-input { font-size: 30px; gap: 4px; }
+}
+
+/* Phone number rows: stack the country-code select above the number on very narrow screens */
+@media (max-width: 400px) {
+  body .phone-input-group { flex-direction: column; }
+  body .phone-input-group .phone-suffix-select { width: 100%; max-width: none; }
+}
+
+/* Long names, emails and URLs must wrap instead of widening cards/grids (tables excluded: they scroll) */
+body :is(h1, h2, h3, h4, h5, h6, p, label, li, .stat-label, [class*="title"], [class*="name"], [class*="desc"], [class*="label"], [class*="value"], [class*="badge"], .badge):not(td *, th *, .navbar *, .nav-drawer *) {
+  overflow-wrap: anywhere;
 }
