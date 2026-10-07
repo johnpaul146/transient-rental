@@ -225,7 +225,7 @@ if(isset($_POST['confirm_rebook'])) {
         $today->setTime(0, 0, 0);
         
         if($check_in_date < $today) {
-            throw new Exception("Check-in date cannot be in the past.");
+            throw new Exception("Selected date is no longer available. Please choose a future date.");
         }
         
         if($check_out_date <= $check_in_date) {

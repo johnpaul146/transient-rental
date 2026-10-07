@@ -106,10 +106,8 @@ function buildFullPhone($suffix, $number) {
 }
 
 // Check if user is logged in
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdmin();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -455,7 +453,7 @@ if(isset($_POST['delete_user']) && $is_admin) {
         if ($user['role'] === 'admin') throw new Exception("Cannot delete admin user!");
 
         try {
-            if (file_exists('config/mail_config.php')) {
+            if (file_exists('config/mail_config.php') && !preg_match('/@walkin\.invalid$/i', (string)$user['email'])) { // walk-in placeholder addresses are never emailed
                 require_once 'config/mail_config.php';
                 $mail = MailConfig::getInstance()->getMailer();
                 $mail->clearAddresses();
@@ -2119,7 +2117,7 @@ data-search="<?php echo strtolower(htmlspecialchars(
                                 <div class="table-user">
                                     <div class="table-avatar"><?php echo strtoupper(substr($user['username'],0,1)); ?></div>
                                     <div>
-                                        <strong><?php echo htmlspecialchars($user['username']); ?></strong>
+                                        <strong><?php echo htmlspecialchars($user['username']); ?></strong><?php if (preg_match('/@walkin\.invalid$/i', (string)($user['email'] ?? ''))): ?> <span title="Created by staff for a walk-in booking. This account cannot sign in." style="display:inline-block;margin-left:4px;padding:1px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;vertical-align:middle;">WALK-IN</span><?php endif; ?>
                                     </div>
                                 </div>
                             </td>

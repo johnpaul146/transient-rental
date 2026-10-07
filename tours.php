@@ -262,7 +262,8 @@ if(isset($_POST['tour_booking']) && isset($_SESSION['user_id'])) {
         }
 
         if(empty($booking_date)) throw new Exception("Please select a booking date from the calendar");
-        if($booking_date < $today) throw new Exception("Booking date cannot be in the past");
+        $dateErr = AvailabilityService::futureDateError($booking_date);
+        if($dateErr !== null) throw new Exception($dateErr);
         
         // ✅ GUEST NAME VALIDATION — letters only
         $guest_name_error = validateGuestName($guest_name);
@@ -1091,6 +1092,12 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php include 'components/navbar.php'; ?>
 
 <!-- PAGE HERO -->
+<?php if (isset($error) && strpos((string)$error, 'Booking failed') === 0): ?>
+<div class="alert-overlay">
+    <div class="alert-box error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error); ?></div>
+</div>
+<?php endif; ?>
+
 <div class="hero">
     <div class="hero-content">
         <h1><i class="fas fa-ship"></i> Boat Tours</h1>

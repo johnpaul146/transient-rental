@@ -114,6 +114,20 @@ class AvailabilityService {
         return null;
     }
 
+    const PAST_DATE_MESSAGE = 'Selected date is no longer available. Please choose a future date.';
+
+    /**
+     * Booking/rebooking dates must be real YYYY-MM-DD dates that are today or later
+     * (server time, Asia/Manila). Returns null when valid, otherwise a guest-safe message.
+     */
+    public static function futureDateError($date) {
+        $d = trim((string)$date);
+        $dt = DateTime::createFromFormat('!Y-m-d', $d);
+        if (!$dt || $dt->format('Y-m-d') !== $d) return 'Please choose a valid date.';
+        if ($dt < new DateTime('today')) return self::PAST_DATE_MESSAGE;
+        return null;
+    }
+
     /** Throws AvailabilityConflictException when $message is not null. */
     public static function assertFree($message, $label) {
         if ($message !== null) throw new AvailabilityConflictException($label . ': ' . $message);

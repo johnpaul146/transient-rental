@@ -70,7 +70,7 @@ class RebookService {
         $d = trim((string)$d);
         $dt = DateTime::createFromFormat('!Y-m-d', $d);
         if (!$dt || $dt->format('Y-m-d') !== $d) throw new InvalidArgumentException('Please choose a valid date.');
-        if ($dt < new DateTime('today')) throw new InvalidArgumentException('The new date cannot be in the past.');
+        if ($dt < new DateTime('today')) throw new InvalidArgumentException('Selected date is no longer available. Please choose a future date.');
         if ($dt > (new DateTime('today'))->modify('+365 days')) throw new InvalidArgumentException('Please choose a date within the next 12 months.');
         return $dt;
     }

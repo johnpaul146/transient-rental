@@ -9,18 +9,12 @@ require_once 'includes/sidebar-counts.php';
 // ini_set('display_errors', 1);
 // error_reporting(E_ALL);
 
-if (!isset($_SESSION['user_id'])) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdmin();
 
 $is_admin = (isset($_SESSION['role']) && $_SESSION['role'] === 'admin');
 $is_staff = (isset($_SESSION['role']) && $_SESSION['role'] === 'staff');
 
-if (!$is_admin && !$is_staff) {
-    header("Location: index.php");
-    exit();
-}
 
 // ✅ Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {

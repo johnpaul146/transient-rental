@@ -24,10 +24,8 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdmin();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');

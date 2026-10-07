@@ -1,10 +1,8 @@
 <?php
 session_start();
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -140,7 +138,7 @@ function createTourFolder($tour_name) {
 // ============================================================
 // HANDLE ADD TOUR
 // ============================================================
-if(isset($_POST['add_tour']) && ($is_admin || $is_staff)) {
+if(isset($_POST['add_tour']) && $is_admin) {
     try {
         if (!file_exists('uploads/tours/')) mkdir('uploads/tours/', 0777, true);
 
@@ -187,9 +185,39 @@ if(isset($_POST['add_tour']) && ($is_admin || $is_staff)) {
 }
 
 // ============================================================
+// HANDLE EDIT TOUR — STAFF: availability (status) only
+// ============================================================
+if(isset($_POST['edit_tour']) && $is_staff && !$is_admin) {
+    try {
+        $tour_id = (int)($_POST['tour_id'] ?? 0);
+        $stmt = $pdo->prepare('SELECT tour_name, status FROM tours WHERE id = ?');
+        $stmt->execute([$tour_id]);
+        $current = $stmt->fetch();
+        if (!$current) throw new Exception('Boat not found.');
+
+        $status = $_POST['status'] ?? '';
+        if (!in_array($status, ['available', 'fully_booked', 'seasonal'], true)) throw new Exception('Invalid availability status.');
+
+        if ($current['status'] !== $status) {
+            $pdo->prepare('UPDATE tours SET status = ? WHERE id = ?')->execute([$status, $tour_id]);
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'update', 'tour',
+                    "Staff updated boat availability: {$current['tour_name']} ({$current['status']} → {$status})",
+                    $tour_id, 'tour', ['status' => $current['status']], ['status' => $status]);
+            }
+        }
+        $_SESSION['flash_success'] = 'Boat availability updated.';
+        header('Location: tour-dashboard.php');
+        exit();
+    } catch(Exception $e) {
+        $error = 'Failed to update boat: ' . $e->getMessage();
+    }
+}
+
+// ============================================================
 // HANDLE EDIT TOUR
 // ============================================================
-if(isset($_POST['edit_tour']) && ($is_admin || $is_staff)) {
+if(isset($_POST['edit_tour']) && $is_admin) {
     try {
         $tour_id = (int)($_POST['tour_id'] ?? 0);
         $boat_name = trim($_POST['tour_name'] ?? '');
@@ -254,7 +282,7 @@ if(isset($_POST['edit_tour']) && ($is_admin || $is_staff)) {
 // ============================================================
 // HANDLE DELETE TOUR
 // ============================================================
-if(isset($_GET['delete_tour']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_tour']) && $is_admin) {
     try {
         $tour = $pdo->prepare("SELECT tour_name, folder_name, places_to_visit FROM tours WHERE id = ?");
         $tour->execute([$_GET['delete_tour']]);
@@ -750,7 +778,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
 
@@ -829,7 +857,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 <p>
                     Manage boat information, pricing, capacity, and availability
                     <?php if($is_staff): ?>
-                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
+                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - View &amp; update availability</span>
                     <?php endif; ?>
                 </p>
             </div>
@@ -863,10 +891,10 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         </div>
 
 
-        <button class="btn btn-primary" onclick="showModal('addTour')">
+        <?php if($is_admin): ?><button class="btn btn-primary" onclick="showModal('addTour')">
             <i class="fas fa-plus"></i>
             Add New Boat
-        </button>
+        </button><?php endif; ?>
 
     </div>
 
@@ -926,9 +954,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                     <button class="btn-action btn-edit" onclick='editTour(<?php echo htmlspecialchars(json_encode($tour), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-edit"></i> <span>Edit</span>
                                     </button>
-                                    <a href="?delete_tour=<?php echo $tour['id']; ?>" class="btn-action btn-delete" onclick="return confirm('Delete this boat? Existing related records may also be affected.')">
+                                    <?php if($is_admin): ?><a href="?delete_tour=<?php echo $tour['id']; ?>" class="btn-action btn-delete" onclick="return confirm('Delete this boat? Existing related records may also be affected.')">
                                         <i class="fas fa-trash"></i> <span>Delete</span>
-                                    </a>
+                                    </a><?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -1002,11 +1030,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                     onclick='editTour(<?php echo htmlspecialchars(json_encode($tour), ENT_QUOTES, "UTF-8"); ?>)'>
                                 <i class="fas fa-edit"></i> Edit
                             </button>
-                            <a href="?delete_tour=<?php echo $tour['id']; ?>"
+                            <?php if($is_admin): ?><a href="?delete_tour=<?php echo $tour['id']; ?>"
                                class="btn-card btn-delete-card"
                                onclick="return confirm('Delete this boat? Existing related records may also be affected.')">
                                 <i class="fas fa-trash"></i> Delete
-                            </a>
+                            </a><?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -1347,5 +1375,6 @@ document.addEventListener("DOMContentLoaded", function(){
 });
 </script>
 
+<?php require __DIR__ . '/includes/staff-edit-lock.php'; ?>
 </body>
 </html>

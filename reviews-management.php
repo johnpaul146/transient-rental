@@ -10,10 +10,8 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 // Check if user is logged in and is admin or staff
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -60,7 +58,7 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 
 
 // Handle Delete Review
-if(isset($_GET['delete_review']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_review']) && $is_admin) {
     try {
         $review_id = $_GET['delete_review'];
 
@@ -1291,12 +1289,12 @@ function getRatingText($rating) {
                 </a>
             </li>
 
-            <li class="nav-item">
+            <?php if(!empty($is_admin)): ?><li class="nav-item">
                 <a href="reports.php" class="nav-link">
                     <i class="fas fa-file-alt"></i>
                     <span>Sales Report</span>
                 </a>
-            </li>
+            </li><?php endif; ?>
 
             <?php if($is_admin): ?>
             <li class="nav-item">
@@ -1399,7 +1397,7 @@ function getRatingText($rating) {
                 <p>
                     View and manage all customer reviews and feedback
                     <?php if($is_staff): ?>
-                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
+                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - View reviews (delete is admin-only)</span>
                     <?php endif; ?>
                 </p>
             </div>
@@ -1576,11 +1574,11 @@ function getRatingText($rating) {
                                 <small style="color: #94a3b8; font-size: 10px;"><?php echo date('h:i A', strtotime($review['created_at'])); ?></small>
                             </td>
                             <td>
-                                <a href="?delete_review=<?php echo $review['id']; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?><?php echo $rating_filter != 'all' ? '&rating='.$rating_filter : ''; ?><?php echo $sort != 'newest' ? '&sort='.$sort : ''; ?>"
+                                <?php if($is_admin): ?><a href="?delete_review=<?php echo $review['id']; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?><?php echo $rating_filter != 'all' ? '&rating='.$rating_filter : ''; ?><?php echo $sort != 'newest' ? '&sort='.$sort : ''; ?>"
                                    class="btn-sm btn-danger"
                                    onclick="return confirm('Delete this review from <?php echo addslashes($review['username']); ?>? This action cannot be undone.')">
                                     <i class="fas fa-trash-alt"></i> Remove
-                                </a>
+                                </a><?php endif; ?>
                             </td>
                         </tr>
                         <?php endforeach; ?>
@@ -1636,11 +1634,11 @@ function getRatingText($rating) {
                         </div>
 
                         <div class="card-actions">
-                            <a href="?delete_review=<?php echo $review['id']; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?><?php echo $rating_filter != 'all' ? '&rating='.$rating_filter : ''; ?><?php echo $sort != 'newest' ? '&sort='.$sort : ''; ?>"
+                            <?php if($is_admin): ?><a href="?delete_review=<?php echo $review['id']; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?><?php echo $rating_filter != 'all' ? '&rating='.$rating_filter : ''; ?><?php echo $sort != 'newest' ? '&sort='.$sort : ''; ?>"
                                class="btn-card-action btn-delete-mobile"
                                onclick="return confirm('Delete this review from <?php echo addslashes($review['username']); ?>? This action cannot be undone.')">
                                 <i class="fas fa-trash"></i> Delete
-                            </a>
+                            </a><?php endif; ?>
                         </div>
                     </div>
                     <?php endforeach; ?>

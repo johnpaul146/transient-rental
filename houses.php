@@ -165,11 +165,13 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
     try {
         $pdo->beginTransaction();
         
+        $dateErr = AvailabilityService::futureDateError($_POST['check_in'] ?? '');
+        if ($dateErr !== null) throw new Exception($dateErr);
+        $dateErr = AvailabilityService::futureDateError($_POST['check_out'] ?? '');
+        if ($dateErr !== null) throw new Exception($dateErr);
         $check_in = new DateTime($_POST['check_in']);
         $check_out = new DateTime($_POST['check_out']);
-        $today = new DateTime();
         
-        if($check_in < $today) throw new Exception("Check-in date cannot be in the past");
         if($check_out <= $check_in) throw new Exception("Check-out must be after check-in");
         
         // ✅ NEW: Validate & sanitize time inputs
@@ -2396,6 +2398,12 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php include 'components/navbar.php'; ?>
 
 <!-- PAGE HERO -->
+<?php if (isset($error) && strpos((string)$error, 'Booking failed') === 0): ?>
+<div class="alert-overlay">
+    <div class="alert-box error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error); ?></div>
+</div>
+<?php endif; ?>
+
 <div class="hero">
     <div class="hero-content">
         <h1><i class="fas fa-home"></i> Houses</h1>
@@ -2676,11 +2684,11 @@ $is_logged_in = isset($_SESSION['user_id']);
                 <div class="form-row">
                     <div class="form-group">
                         <label><i class="fas fa-calendar-alt"></i> Check-in Date *</label>
-                        <input type="date" name="check_in" id="check_in" class="form-control" required onchange="updateCalendarSelection()">
+                        <input type="date" name="check_in" id="check_in" class="form-control" min="<?php echo date('Y-m-d'); ?>" required onchange="updateCalendarSelection()">
                     </div>
                     <div class="form-group">
                         <label><i class="fas fa-calendar-alt"></i> Check-out Date *</label>
-                        <input type="date" name="check_out" id="check_out" class="form-control" required onchange="updateCalendarSelection()">
+                        <input type="date" name="check_out" id="check_out" class="form-control" min="<?php echo date('Y-m-d'); ?>" required onchange="updateCalendarSelection()">
                     </div>
                 </div>
                 
@@ -3769,6 +3777,16 @@ function updateCalendarInfo() {
 }
 
 function updateCalendarSelection() {
+    // Typed dates bypass the calendar: reject anything before today
+    var _t = new Date();
+    var _today = _t.getFullYear() + '-' + String(_t.getMonth() + 1).padStart(2, '0') + '-' + String(_t.getDate()).padStart(2, '0');
+    ['check_in', 'check_out'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el && el.value && el.value < _today) {
+            el.value = '';
+            alert('Selected date is no longer available. Please choose a future date.');
+        }
+    });
     const checkIn = document.getElementById('check_in').value;
     const checkOut = document.getElementById('check_out').value;
     

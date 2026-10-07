@@ -331,7 +331,12 @@ class PaymentService {
      * Returns ['status' => 'recorded'|'already', 'amount' => fee, 'payment_status' => ...,
      *          'components' => [ ['type'=>..,'id'=>..], ... ] ]
      */
-    public static function confirmReservation(PDO $pdo, $type, $id, $userId) {
+    public static function confirmReservation(PDO $pdo, $type, $id, $userId, $method = 'gcash', $notes = null) {
+        // $method / $notes are optional: the default (gcash + "from payment proof") is the
+        // online flow. Walk-in cash/GCash at the counter passes its own method and note.
+        if (!isset(self::METHODS[$method])) throw new InvalidArgumentException('Unknown payment method.');
+        if ($notes === null || $notes === '') $notes = 'Reservation fee confirmed from payment proof';
+        $notes = mb_substr((string)$notes, 0, 255);
         $table = self::tableFor($type);
         $pdo->beginTransaction();
         try {
@@ -355,7 +360,7 @@ class PaymentService {
             self::assertDatesFree($pdo, $type, $row);
 
             try {
-                self::insertLedger($pdo, $type, $row, 'reservation_fee', $fee, 'gcash', $userId, date('Y-m-d H:i:s'), 'Reservation fee confirmed from payment proof');
+                self::insertLedger($pdo, $type, $row, 'reservation_fee', $fee, $method, $userId, date('Y-m-d H:i:s'), $notes);
             } catch (PDOException $e) {
                 if (self::isDuplicateKey($e)) { $pdo->rollBack(); return ['status' => 'already', 'amount' => 0, 'payment_status' => $row['payment_status'], 'components' => []]; }
                 throw $e;
@@ -485,6 +490,11 @@ class PaymentService {
             if (self::isComponent($row)) throw new RuntimeException('This item is part of a package. Cancel the whole package instead.');
             if ($row['booking_status'] === 'cancelled') throw new RuntimeException('This booking is already cancelled.');
             if ($row['booking_status'] === 'completed') throw new RuntimeException('Completed bookings cannot be cancelled.');
+            if ($guestId !== null) {
+                // Guest cancellation only before a payment proof is sent and before the booking is confirmed.
+                if (!empty($row['payment_proof'])) throw new RuntimeException("Cancellation is unavailable after payment proof submission. Please wait for verification.");
+                if ($row['booking_status'] === 'confirmed') throw new RuntimeException('Confirmed bookings cannot be cancelled. You may rebook your reservation subject to availability and the rebooking rules.');
+            }
             $a = self::amounts($row);
             $extra = ($type === 'house') ? ', rebooked_at = NULL, rebook_confirmed_at = NULL' : '';
             $reasonSql = ", cancellation_reason = ?";

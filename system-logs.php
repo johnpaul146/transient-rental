@@ -3,10 +3,8 @@ session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
 
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdmin();
 
 $is_admin = true;
 $user_info = [];
@@ -676,8 +674,7 @@ unset($base_qs['page'], $base_qs['export']);
         /* DETAILS (friendly view) */
         .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
         .act-cell { display: flex; align-items: center; gap: 8px; }
-        .act-name { line-height: 1.25; text-align: left; }
-        .act-cell { text-align: left; }
+        .act-name { line-height: 1.25; }
         .act-name { font-weight: 600; color: #0B2447; font-size: 13px; }
         .item-text { color: #0B2447; font-weight: 500; overflow-wrap: anywhere; }
         .btn-details { width: 38px; height: 38px; flex-shrink: 0; border: 1px solid #c9d9e8; background: #fff; color: #2f8dc4; border-radius: 10px; cursor: pointer; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; }

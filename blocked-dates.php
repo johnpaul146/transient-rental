@@ -10,10 +10,8 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -33,6 +31,25 @@ try {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_block (item_type, item_id, block_date),
         INDEX idx_item (item_type, item_id, block_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+} catch(PDOException $e) {}
+
+// Staff block requests (staff cannot block directly; an administrator approves)
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS blocked_date_requests (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        item_type ENUM('house', 'tour', 'food') NOT NULL,
+        item_id INT NOT NULL,
+        dates_json TEXT NOT NULL,
+        block_type ENUM('walk_in', 'maintenance', 'special_occasion', 'owner_use', 'other') NOT NULL DEFAULT 'other',
+        note VARCHAR(255) DEFAULT NULL,
+        status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
+        requested_by INT NOT NULL,
+        requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reviewed_by INT DEFAULT NULL,
+        reviewed_at DATETIME DEFAULT NULL,
+        review_note VARCHAR(255) DEFAULT NULL,
+        INDEX idx_status (status, requested_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 } catch(PDOException $e) {}
 
@@ -88,9 +105,10 @@ function bd_reasons(): array {
     ];
 }
 
-// Block types STAFF may unblock (operational). Everything else = admin only.
+// Block types STAFF may unblock. None: unblocking re-opens dates for booking, so it is
+// admin-only. Staff submit block requests instead (see 'request' action below).
 function bd_staff_unblock_types(): array {
-    return ['walk_in', 'maintenance', 'special_occasion', 'other'];
+    return [];
 }
 
 function bd_is_booking_linked(array $b): bool {
@@ -298,10 +316,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
         exit();
     }
 
+    // ---------- STAFF: REQUEST A BLOCK (nothing is blocked until an admin approves) ----------
+    if ($act === 'request') {
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please try again.");
+            if (!$is_staff) throw new Exception("Administrators can block dates directly.");
+            $v = bd_validate_request($pdo, $_POST, $today);
+            $a = $v['analysis'];
+            if (!empty($a['past'])) throw new Exception("Past dates can't be blocked (" . count($a['past']) . " selected).");
+            if (!empty($a['conflicts'])) {
+                throw new Exception("Can't request a block — active booking(s) exist on: " . implode(', ', array_map('bd_fmt_date', array_slice(array_keys($a['conflicts']), 0, 5))) . ". Cancel or reschedule the booking first.");
+            }
+            if (empty($a['blockable'])) throw new Exception("Nothing to request — every selected date is already blocked.");
+
+            $dj = json_encode(array_values($a['blockable']));
+            $dup = $pdo->prepare("SELECT id FROM blocked_date_requests WHERE status='pending' AND item_type=? AND item_id=? AND dates_json=? LIMIT 1");
+            $dup->execute([$v['type'], $v['id'], $dj]);
+            if ($dup->fetchColumn()) throw new Exception("An identical block request is already waiting for admin approval.");
+
+            $pdo->prepare("INSERT INTO blocked_date_requests (item_type, item_id, dates_json, block_type, note, requested_by) VALUES (?, ?, ?, ?, ?, ?)")
+                ->execute([$v['type'], $v['id'], $dj, $v['block_type'], $v['note'] !== '' ? $v['note'] : null, $_SESSION['user_id']]);
+            $rid = (int)$pdo->lastInsertId();
+
+            if (class_exists('SystemLogger')) {
+                SystemLogger::created($pdo, 'blocked_dates',
+                    "Staff requested block — {$v['cfg']['label']} \"{$v['name']}\" · " . count($a['blockable']) . " date(s) (pending admin approval)",
+                    $rid, ['item_type' => $v['type'], 'item_id' => $v['id'], 'item_name' => $v['name'], 'dates' => $a['blockable'], 'block_type' => $v['block_type'], 'request_id' => $rid]);
+            }
+            bd_flash_set('success', "Block request submitted for <strong>" . htmlspecialchars($v['name']) . "</strong> (" . count($a['blockable']) . " date(s)). An administrator will review it; nothing is blocked until it is approved.");
+        } catch (PDOException $e) {
+            error_log('blocked-dates request failed: ' . $e->getMessage());
+            bd_flash_set('danger', 'A database error occurred. Your request was not saved.');
+        } catch (Exception $e) {
+            bd_flash_set('danger', $e->getMessage());
+        }
+        header('Location: ' . bd_return_url());
+        exit();
+    }
+
+    // ---------- ADMIN: REJECT A REQUEST ----------
+    if ($act === 'reject_request') {
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please try again.");
+            if (!$is_admin) throw new Exception("Only an administrator can review block requests.");
+            $rid = (int)($_POST['request_id'] ?? 0);
+            $note = mb_substr(trim((string)($_POST['review_note'] ?? '')), 0, 255);
+            $u = $pdo->prepare("UPDATE blocked_date_requests SET status='rejected', reviewed_by=?, reviewed_at=NOW(), review_note=? WHERE id=? AND status='pending'");
+            $u->execute([$_SESSION['user_id'], $note !== '' ? $note : null, $rid]);
+            if ($u->rowCount() < 1) throw new Exception("That request was already reviewed.");
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'update', 'blocked_dates', "Block request #{$rid} rejected", $rid, 'blocked_dates', null, ['status' => 'rejected', 'note' => $note]);
+            }
+            bd_flash_set('success', "Block request #{$rid} rejected.");
+        } catch (PDOException $e) {
+            error_log('blocked-dates reject failed: ' . $e->getMessage());
+            bd_flash_set('danger', 'A database error occurred. Nothing was changed.');
+        } catch (Exception $e) {
+            bd_flash_set('danger', $e->getMessage());
+        }
+        header('Location: ' . bd_return_url());
+        exit();
+    }
+
+    // ---------- ADMIN: APPROVE A REQUEST -> runs through the normal BLOCK path below ----------
+    $bd_from_request = 0;
+    if ($act === 'approve_request') {
+        $act = 'approve_failed';
+        try {
+            if (!$is_admin) throw new Exception("Only an administrator can review block requests.");
+            $rid = (int)($_POST['request_id'] ?? 0);
+            $q = $pdo->prepare("SELECT * FROM blocked_date_requests WHERE id = ? AND status = 'pending'");
+            $q->execute([$rid]);
+            $rq = $q->fetch();
+            if (!$rq) throw new Exception("That request was already reviewed.");
+            $_POST['item_type']  = $rq['item_type'];
+            $_POST['item_id']    = $rq['item_id'];
+            $_POST['dates_json'] = $rq['dates_json'];
+            $_POST['block_type'] = $rq['block_type'];
+            $_POST['note']       = (string)($rq['note'] ?? '');
+            $bd_from_request = $rid;
+            $act = 'block';
+        } catch (Exception $e) {
+            bd_flash_set('danger', $e->getMessage());
+            header('Location: ' . bd_return_url());
+            exit();
+        }
+    }
+
     // ---------- BLOCK ----------
     if ($act === 'block') {
         try {
             if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please try again.");
+            if (!$is_admin) throw new Exception("Only an administrator can block dates directly. Please submit a block request instead.");
             $v = bd_validate_request($pdo, $_POST, $today);
             $a = $v['analysis'];
 
@@ -366,6 +472,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
                         'dates' => $inserted, 'block_type' => $v['block_type'], 'note' => $v['note'],
                         'skipped_duplicates' => $skipped,
                     ]);
+            }
+
+            if ($bd_from_request > 0) {
+                $pdo->prepare("UPDATE blocked_date_requests SET status='approved', reviewed_by=?, reviewed_at=NOW() WHERE id=? AND status='pending'")
+                    ->execute([$_SESSION['user_id'], $bd_from_request]);
+                if (class_exists('SystemLogger')) {
+                    SystemLogger::log($pdo, 'update', 'blocked_dates', "Block request #{$bd_from_request} approved ({$n} date(s) blocked)", $bd_from_request, 'blocked_dates', null, ['status' => 'approved']);
+                }
             }
 
             $msg = "Blocked <strong>" . htmlspecialchars($v['name']) . "</strong> for <strong>{$n}</strong> date(s)";
@@ -458,6 +572,31 @@ if(isset($_GET['logout'])) {
 // ============================================================
 // FILTERS
 // ============================================================
+// ---- Block requests (admin: pending queue · staff: own recent requests) ----
+$block_requests = [];
+try {
+    if ($is_admin) {
+        $rq = $pdo->query("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.status = 'pending' ORDER BY r.requested_at ASC LIMIT 50");
+    } else {
+        $rq = $pdo->prepare("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.requested_by = ? ORDER BY r.requested_at DESC LIMIT 10");
+        $rq->execute([$_SESSION['user_id']]);
+    }
+    $block_requests = $rq->fetchAll();
+    $bd_cfgs = bd_resources();
+    foreach ($block_requests as &$__r) {
+        $__r['item_name'] = 'Unknown resource';
+        if (isset($bd_cfgs[$__r['item_type']])) {
+            $c = $bd_cfgs[$__r['item_type']];
+            $nq = $pdo->prepare("SELECT `{$c['name_col']}` FROM `{$c['table']}` WHERE id = ?");
+            $nq->execute([$__r['item_id']]);
+            $nm = $nq->fetchColumn();
+            if ($nm !== false) $__r['item_name'] = (string)$nm;
+        }
+        $__r['dates'] = json_decode((string)$__r['dates_json'], true) ?: [];
+    }
+    unset($__r);
+} catch (PDOException $e) { $block_requests = []; }
+
 $type_keys     = array_keys(bd_resources());
 $current_tab = 'list';
 $filter_type   = in_array($_GET['filter_type'] ?? 'all', array_merge(['all'], $type_keys), true) ? ($_GET['filter_type'] ?? 'all') : 'all';
@@ -963,6 +1102,43 @@ try {
             .btn-block-availability { width: 100%; justify-content: center; }
             .recent-meta { display: none; }
         }
+
+        /* =====================================================
+           MOBILE COMPACT LAYOUT (CSS only; desktop untouched)
+           ===================================================== */
+        @media (max-width: 768px) {
+            .main-content { padding-top: 12px !important; }
+            .main-content .top-bar { flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; margin-bottom: 12px; padding: 0 0 10px 54px; }
+            .main-content .top-bar .page-title { flex: 1 1 auto; min-width: 0; }
+            .main-content .top-bar .page-title h1 { font-size: 17px; line-height: 1.2; }
+            .main-content .top-bar .page-title p { display: none; }
+            .main-content .top-bar .user-profile { flex: 0 0 auto; flex-direction: row-reverse; gap: 8px; margin-left: auto; max-width: 55%; }
+            .main-content .top-bar .user-profile > div[style] { line-height: 1.2; }
+            .main-content .top-bar .user-profile .user-name { font-size: 12px; max-width: 110px; }
+            .main-content .top-bar .user-profile .user-role { font-size: 11px; }
+            .main-content .top-bar .user-profile .avatar { width: 34px; height: 34px; font-size: 14px; }
+
+            .main-content .page-title-banner { padding: 16px; margin-bottom: 14px; border-radius: 16px; gap: 12px; }
+            .main-content .page-title-banner h1 { font-size: 19px; margin-bottom: 0; }
+            .main-content .page-title-banner .underline { margin-top: 6px; height: 2px; }
+            .main-content .page-title-banner p { font-size: 13px; line-height: 1.4; margin-top: 6px !important; }
+            .main-content .page-title-banner .btn-block-availability { width: 100%; justify-content: center; padding: 11px 16px; font-size: 13.5px; }
+
+            .section-title { margin-bottom: 8px; font-size: 12px; }
+            .main-content .blocked-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+            .main-content .blocked-stats .stat-card { display: grid; grid-template-columns: 34px minmax(0, 1fr); column-gap: 10px; row-gap: 0; align-items: center; min-height: 0; padding: 12px; border-radius: 14px; }
+            .main-content .blocked-stats .stat-icon { grid-row: 1 / span 2; width: 34px; height: 34px; margin: 0; border-radius: 10px; font-size: 15px; }
+            .main-content .blocked-stats .stat-number { grid-column: 2; font-size: 20px; line-height: 1.1; }
+            .main-content .blocked-stats .stat-label { grid-column: 2; font-size: 11.5px; line-height: 1.25; margin-top: 1px; }
+            .main-content .blocked-stats .stat-description { grid-column: 1 / -1; font-size: 10.5px; line-height: 1.3; margin-top: 6px; }
+        }
+        @media (max-width: 480px) {
+            .main-content { padding-top: 10px !important; }
+            .main-content .top-bar { padding-left: 50px; }
+            .main-content .top-bar .page-title h1 { font-size: 15.5px; }
+            .main-content .top-bar .user-profile .user-name { max-width: 80px; }
+            .main-content .blocked-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
     </style>
     <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
@@ -1017,7 +1193,7 @@ try {
         <span>Blocked Dates</span>
     </a>
 </li>            <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span><?php if($sidebar_pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span><?php endif; ?></a></li>
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
             <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span><?php if($sidebar_failed_logs > 0): ?><span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span><?php endif; ?></a></li>
@@ -1062,9 +1238,58 @@ try {
                 <p style="margin-top: 8px;">Dates listed here can't be booked online. Walk-ins, maintenance, owner use and special events all start here.</p>
             </div>
             <button type="button" class="btn-block-availability" onclick="openBlockWizard()">
-                <i class="fas fa-plus"></i> Block Availability
+                <i class="fas fa-plus"></i> <?php echo $is_admin ? 'Block Availability' : 'Request a Block'; ?>
             </button>
         </div>
+
+        <?php if (!$is_admin): ?>
+        <div class="alert alert-info" style="background:#e0f2fe;border:1px solid #bae6fd;color:#075985;"><i class="fas fa-info-circle"></i> <span>Staff access: you can view blocked dates and submit block requests. An administrator approves requests before any date is blocked.</span></div>
+        <?php endif; ?>
+
+        <?php if (!empty($block_requests)): ?>
+        <div class="card" id="blockRequests">
+            <div class="card-header">
+                <h2><i class="fas fa-inbox"></i> <?php echo $is_admin ? 'Pending Block Requests (' . count($block_requests) . ')' : 'My Block Requests'; ?></h2>
+            </div>
+            <ul class="recent-list">
+                <?php foreach ($block_requests as $br):
+                    $bcfg   = bd_resources()[$br['item_type']] ?? null;
+                    $blabel = bd_reasons()[$br['block_type']]['label'] ?? ucwords(str_replace('_', ' ', (string)$br['block_type']));
+                    $bd_dates = $br['dates']; sort($bd_dates);
+                    $bcount = count($bd_dates);
+                    $bfirst = $bcount ? $bd_dates[0] : null; $blast = $bcount ? $bd_dates[$bcount - 1] : null;
+                    $bstat  = $br['status'];
+                    $bcolor = $bstat === 'approved' ? '#047857' : ($bstat === 'rejected' ? '#b91c1c' : '#b45309');
+                ?>
+                <li class="recent-item" style="flex-wrap:wrap;gap:10px;">
+                    <div class="recent-icon"><i class="fas fa-<?php echo $bcfg ? $bcfg['icon'] : 'ban'; ?>"></i></div>
+                    <div class="recent-body" style="min-width:200px;">
+                        <div class="r-title"><?php echo htmlspecialchars($br['item_name']); ?></div>
+                        <div class="r-sub">
+                            <?php if ($bfirst): echo bd_fmt_date($bfirst); if ($bfirst !== $blast) echo ' – ' . bd_fmt_date($blast); endif; ?>
+                            · <?php echo $bcount; ?> day<?php echo $bcount === 1 ? '' : 's'; ?>
+                            · <?php echo htmlspecialchars($blabel); ?>
+                            <?php if (!empty($br['note'])): ?> · “<?php echo htmlspecialchars($br['note']); ?>”<?php endif; ?>
+                        </div>
+                        <div class="r-sub">Requested by <?php echo htmlspecialchars($br['requester_name'] ?: ($br['requester_username'] ?? 'staff')); ?> · <?php echo date('M d, h:i A', strtotime($br['requested_at'])); ?>
+                            <?php if (!$is_admin): ?> · <strong style="color:<?php echo $bcolor; ?>;"><?php echo ucfirst($bstat); ?></strong><?php if (!empty($br['review_note'])): ?> (<?php echo htmlspecialchars($br['review_note']); ?>)<?php endif; ?><?php endif; ?>
+                        </div>
+                    </div>
+                    <?php if ($is_admin && $bstat === 'pending'): ?>
+                    <form method="POST" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                        <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($bd_csrf); ?>">
+                        <input type="hidden" name="request_id" value="<?php echo (int)$br['id']; ?>">
+                        <input type="hidden" name="return_qs" value="<?php echo htmlspecialchars($_SERVER['QUERY_STRING'] ?? ''); ?>">
+                        <input type="text" name="review_note" maxlength="255" placeholder="Note (optional)" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;min-width:140px;">
+                        <button type="submit" name="bd_action" value="approve_request" class="btn-blue" style="padding:7px 14px;"><i class="fas fa-check"></i> Approve</button>
+                        <button type="submit" name="bd_action" value="reject_request" class="btn-danger-sm"><i class="fas fa-times"></i> Reject</button>
+                    </form>
+                    <?php endif; ?>
+                </li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+        <?php endif; ?>
 
         <!-- ===================== 1. OVERVIEW ===================== -->
         <div class="section-title">Overview</div>
@@ -1292,7 +1517,7 @@ try {
     <div class="modal-content wizard">
         <div class="wizard-head">
             <div class="modal-header">
-                <h3><i class="fas fa-ban"></i> Block Availability</h3>
+                <h3><i class="fas fa-ban"></i> <?php echo $is_admin ? 'Block Availability' : 'Request a Block'; ?></h3>
                 <button type="button" class="close" onclick="closeBlockWizard()" aria-label="Close">&times;</button>
             </div>
         </div>
@@ -1347,6 +1572,7 @@ var BD = <?php
         'csrf'      => $bd_csrf,
         'maxDates'  => BD_MAX_DATES,
         'returnQs'  => $_SERVER['QUERY_STRING'] ?? '',
+        'isStaff'   => !$is_admin,
     ];
     foreach (bd_resources() as $t => $cfg) {
         $bd_js['resources'][$t] = [
@@ -1535,7 +1761,7 @@ function renderWizard() {
         };
     } else {
         next.className = 'btn-blue btn-navy';
-        next.innerHTML = '<i class="fas fa-check"></i> Confirm &amp; Block';
+        next.innerHTML = BD.isStaff ? '<i class="fas fa-paper-plane"></i> Submit Request' : '<i class="fas fa-check"></i> Confirm &amp; Block';
         next.disabled = !(W.preview && W.preview.ok && W.preview.can_save) || W.previewing;
         next.onclick = submitBlock;
     }
@@ -1758,12 +1984,12 @@ function submitBlock() {
     if (!W || !W.preview || !W.preview.can_save) return;
     var btn = document.getElementById('wizNext');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Saving…';
+    btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ' + (BD.isStaff ? 'Submitting…' : 'Saving…');
 
     var form = document.createElement('form');
     form.method = 'POST';
     function add(n, v) { var i = document.createElement('input'); i.type = 'hidden'; i.name = n; i.value = v; form.appendChild(i); }
-    add('bd_action', 'block');
+    add('bd_action', BD.isStaff ? 'request' : 'block');
     add('csrf', BD.csrf);
     add('item_type', W.type);
     add('item_id', W.id);

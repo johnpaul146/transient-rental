@@ -1,10 +1,8 @@
 <?php
 session_start();
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -83,7 +81,7 @@ if (!function_exists('getActivityMainImage')) {
 }
 
 // HANDLE ADD
-if(isset($_POST['add_activity']) && ($is_admin || $is_staff)) {
+if(isset($_POST['add_activity']) && $is_admin) {
     try {
         if (!file_exists('uploads/activities/')) mkdir('uploads/activities/', 0777, true);
         $activity_image = 'default-activity.jpg';
@@ -128,8 +126,34 @@ if(isset($_POST['add_activity']) && ($is_admin || $is_staff)) {
     }
 }
 
-// HANDLE EDIT
-if(isset($_POST['edit_activity']) && ($is_admin || $is_staff)) {
+// HANDLE EDIT — STAFF: availability (status) only
+if(isset($_POST['edit_activity']) && $is_staff && !$is_admin) {
+    try {
+        $stmt = $pdo->prepare("SELECT name, status FROM activities WHERE id = ?");
+        $stmt->execute([(int)($_POST['activity_id'] ?? 0)]);
+        $current = $stmt->fetch();
+        if (!$current) throw new Exception("Activity not found.");
+
+        $status = $_POST['status'] ?? '';
+        if (!in_array($status, ['available', 'unavailable'], true)) throw new Exception("Invalid availability status.");
+
+        if ($current['status'] !== $status) {
+            $pdo->prepare("UPDATE activities SET status = ? WHERE id = ?")->execute([$status, (int)$_POST['activity_id']]);
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'update', 'activity',
+                    "Staff updated activity availability: {$current['name']} ({$current['status']} → {$status})",
+                    (int)$_POST['activity_id'], 'activity', ['status' => $current['status']], ['status' => $status]);
+            }
+        }
+        header("Location: activities-dashboard.php?updated=1");
+        exit();
+    } catch(Exception $e) {
+        $error = "Failed to update activity: " . $e->getMessage();
+    }
+}
+
+// HANDLE EDIT (admin: full edit)
+if(isset($_POST['edit_activity']) && $is_admin) {
     try {
         $stmt = $pdo->prepare("SELECT * FROM activities WHERE id = ?");
         $stmt->execute([$_POST['activity_id']]);
@@ -186,7 +210,7 @@ if(isset($_POST['edit_activity']) && ($is_admin || $is_staff)) {
 }
 
 // HANDLE DELETE
-if(isset($_GET['delete_activity']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_activity']) && $is_admin) {
     try {
         $stmt = $pdo->prepare("SELECT image, name, category, price FROM activities WHERE id = ?");
         $stmt->execute([$_GET['delete_activity']]);
@@ -672,7 +696,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
 
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
@@ -756,7 +780,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 <p>
                     Manage activities with prices, durations (minutes), and lengths (meters)
                     <?php if($is_staff): ?>
-                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
+                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - View &amp; update availability</span>
                     <?php endif; ?>
                 </p>
             </div>
@@ -792,10 +816,10 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         </div>
 
 
-        <button class="btn btn-primary" onclick="showModal('addActivity')">
+        <?php if($is_admin): ?><button class="btn btn-primary" onclick="showModal('addActivity')">
             <i class="fas fa-plus"></i>
             Add New Activity
-        </button>
+        </button><?php endif; ?>
 
     </div>
 
@@ -892,9 +916,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                     <button class="btn" style="padding: 4px 12px; font-size: 11px; background: #f59e0b; color: white; font-weight: 600; border-radius: 6px;" onclick='editActivity(<?php echo json_encode($activity); ?>)'>
                                         <i class="fas fa-edit"></i> Edit
                                     </button>
-                                    <a href="?delete_activity=<?php echo $activity['id']; ?>" class="btn" style="padding: 4px 12px; font-size: 11px; background: #ef4444; color: white; font-weight: 600; border-radius: 6px; text-decoration: none;" onclick="return confirm('Delete this activity?')">
+                                    <?php if($is_admin): ?><a href="?delete_activity=<?php echo $activity['id']; ?>" class="btn" style="padding: 4px 12px; font-size: 11px; background: #ef4444; color: white; font-weight: 600; border-radius: 6px; text-decoration: none;" onclick="return confirm('Delete this activity?')">
                                         <i class="fas fa-trash"></i> Delete
-                                    </a>
+                                    </a><?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -983,11 +1007,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                                     onclick='editActivity(<?php echo json_encode($activity); ?>)'>
                                 <i class="fas fa-edit"></i> Edit
                             </button>
-                            <a href="?delete_activity=<?php echo $activity['id']; ?>"
+                            <?php if($is_admin): ?><a href="?delete_activity=<?php echo $activity['id']; ?>"
                                class="btn-card btn-delete-card"
                                onclick="return confirm('Delete this activity?')">
                                 <i class="fas fa-trash"></i> Delete
-                            </a>
+                            </a><?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -1442,5 +1466,6 @@ document.addEventListener("DOMContentLoaded", function(){
 });
 </script>
 
+<?php require __DIR__ . '/includes/staff-edit-lock.php'; ?>
 </body>
 </html>

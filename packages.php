@@ -156,12 +156,16 @@ if (isset($_POST['add_house_to_package'])) {
         if ($guests < 1) $guests = 1;
         if ($guests > 20) $guests = 20;
 
+        foreach ([$check_in, $check_out] as $_d) {
+            $dateErr = AvailabilityService::futureDateError($_d);
+            if ($dateErr !== null) throw new Exception($dateErr);
+        }
         $check_in_dt = new DateTime($check_in);
         $check_out_dt = new DateTime($check_out);
         $today = new DateTime();
         $today->setTime(0,0,0);
 
-        if ($check_in_dt < $today) throw new Exception("Check-in date cannot be in the past.");
+        if ($check_in_dt < $today) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
         if ($check_out_dt <= $check_in_dt) throw new Exception("Check-out must be after check-in.");
 
         $nights = $check_out_dt->diff($check_in_dt)->days;
@@ -239,7 +243,8 @@ if (isset($_POST['add_food_to_package'])) {
         if (!in_array($fulfillment_method, ['delivery', 'pickup'])) $fulfillment_method = 'pickup';
 
         $today = date('Y-m-d');
-        if ($preferred_date < $today) throw new Exception("Preferred date cannot be in the past.");
+        $dateErr = AvailabilityService::futureDateError($preferred_date);
+        if ($dateErr !== null) throw new Exception($dateErr);
 
         $contact_number = preg_replace('/[^0-9]/', '', $contact_number);
         if (substr($contact_number, 0, 1) === '0') $contact_number = substr($contact_number, 1);
@@ -311,7 +316,8 @@ if (isset($_POST['add_tour_to_package'])) {
         if (empty($guest_name)) throw new Exception("Guest name is required.");
 
         $today = date('Y-m-d');
-        if ($booking_date < $today) throw new Exception("Booking date cannot be in the past.");
+        $dateErr = AvailabilityService::futureDateError($booking_date);
+        if ($dateErr !== null) throw new Exception($dateErr);
 
         $contact_number = preg_replace('/[^0-9]/', '', $contact_number);
         if (substr($contact_number, 0, 1) === '0') $contact_number = substr($contact_number, 1);
@@ -381,7 +387,7 @@ if (isset($_POST['confirm_package_booking'])) {
         if ($has_house) {
             $h = $cart['house'];
 
-            if ($h['check_in'] < date('Y-m-d')) throw new Exception("Your stay dates have already passed. Please choose new dates.");
+            if ($h['check_in'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
             if (AvailabilityService::houseConflict($pdo, $h['id'], $h['check_in'], $h['check_out']) !== null) {
                 throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
             }
@@ -411,7 +417,7 @@ if (isset($_POST['confirm_package_booking'])) {
         if ($has_food) {
             $f = $cart['food'];
             $ref = $package_ref . '-F';
-            if ($f['preferred_date'] < date('Y-m-d')) throw new Exception("Your food date has already passed. Please choose a new date.");
+            if ($f['preferred_date'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
             if (AvailabilityService::foodConflict($pdo, $f['id'], $f['preferred_date']) !== null) throw new Exception("'{$f['name']}' is no longer available on " . date('M d, Y', strtotime($f['preferred_date'])) . ".");
 
             if (!empty($f['contact_number'])) $package_contact = $f['contact_number'];
@@ -437,7 +443,7 @@ if (isset($_POST['confirm_package_booking'])) {
 
         if ($has_tour) {
             $t = $cart['tour'];
-            if ($t['booking_date'] < date('Y-m-d')) throw new Exception("Your tour date has already passed. Please choose a new date.");
+            if ($t['booking_date'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
             if (AvailabilityService::tourConflict($pdo, $t['id'], $t['booking_date']) !== null) {
                 throw new Exception("Tour '{$t['name']}' is no longer available on " . date('M d, Y', strtotime($t['booking_date'])) . ".");
             }

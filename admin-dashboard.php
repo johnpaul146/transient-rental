@@ -11,10 +11,8 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -151,6 +149,73 @@ try {
         $content[$row['section_name']][$row['content_key']] = $row['content_value'];
     }
 } catch(PDOException $e) {}
+
+// ============================================================
+// OPERATIONAL OVERVIEW (no revenue / payment totals — safe for staff)
+// Package component rows (package_id set) are excluded from "bookings created"
+// so a package counts once; arrivals/departures use the real component dates.
+// ============================================================
+$ops = ['bookings_today' => 0, 'arrivals_today' => 0, 'departures_today' => 0, 'arrivals_week' => 0,
+        'proofs_to_verify' => 0, 'awaiting_payment' => 0, 'block_requests' => 0];
+$ops_arrivals_today = [];
+$ops_arrivals_upcoming = [];
+$ops_recent_activity = [];
+try {
+    $ops_today = date('Y-m-d');
+    $ops_week_end = date('Y-m-d', strtotime('+7 days'));
+
+    $live = "booking_status NOT IN ('cancelled','completed','rejected')";
+    foreach (['house_bookings' => 'package_id IS NULL', 'tour_bookings' => 'package_id IS NULL', 'food_bookings' => 'package_id IS NULL', 'package_bookings' => '1=1'] as $tbl => $own) {
+        $q = $pdo->prepare("SELECT COUNT(*) FROM `$tbl` WHERE $own AND DATE(created_at) = ? AND booking_status <> 'cancelled'");
+        $q->execute([$ops_today]);
+        $ops['bookings_today'] += (int)$q->fetchColumn();
+
+        $q = $pdo->query("SELECT SUM(payment_proof IS NOT NULL AND payment_proof <> '' AND payment_status = 'pending'),
+                                 SUM((payment_proof IS NULL OR payment_proof = '') AND payment_status = 'pending')
+                          FROM `$tbl` WHERE $own AND booking_status = 'pending'");
+        $r = $q->fetch(PDO::FETCH_NUM);
+        $ops['proofs_to_verify'] += (int)($r[0] ?? 0);
+        $ops['awaiting_payment'] += (int)($r[1] ?? 0);
+    }
+
+    $arrivalSql = "
+        SELECT 'House' AS type, b.reference_number AS ref, b.check_in_date AS d, h.house_name AS item, COALESCE(u.fullname, '') AS guest, b.booking_status AS st
+          FROM house_bookings b LEFT JOIN houses h ON h.id = b.house_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
+         WHERE b.check_in_date BETWEEN :f1 AND :t1 AND b.booking_status IN ('pending','confirmed')
+        UNION ALL
+        SELECT 'Tour', b.reference_number, b.booking_date, t.tour_name, COALESCE(u.fullname, b.guest_name, ''), b.booking_status
+          FROM tour_bookings b LEFT JOIN tours t ON t.id = b.tour_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
+         WHERE b.booking_date BETWEEN :f2 AND :t2 AND b.booking_status IN ('pending','confirmed')
+        UNION ALL
+        SELECT 'Food', b.reference_number, b.preferred_date, f.name, COALESCE(u.fullname, b.guest_name, ''), b.booking_status
+          FROM food_bookings b LEFT JOIN food_items f ON f.id = b.food_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
+         WHERE b.preferred_date BETWEEN :f3 AND :t3 AND b.booking_status IN ('pending','confirmed')
+        ORDER BY d ASC, ref ASC LIMIT 12";
+    $runArrivals = function ($from, $to) use ($pdo, $arrivalSql) {
+        $q = $pdo->prepare($arrivalSql);
+        $q->execute([':f1' => $from, ':t1' => $to, ':f2' => $from, ':t2' => $to, ':f3' => $from, ':t3' => $to]);
+        return $q->fetchAll(PDO::FETCH_ASSOC);
+    };
+    $ops_arrivals_today = $runArrivals($ops_today, $ops_today);
+    $ops['arrivals_today'] = count($ops_arrivals_today);
+    $ops_arrivals_upcoming = $runArrivals(date('Y-m-d', strtotime('+1 day')), $ops_week_end);
+    $ops['arrivals_week'] = count($ops_arrivals_upcoming);
+
+    $q = $pdo->prepare("SELECT COUNT(*) FROM house_bookings WHERE check_out_date = ? AND booking_status = 'confirmed'");
+    $q->execute([$ops_today]);
+    $ops['departures_today'] = (int)$q->fetchColumn();
+
+    try {
+        $ops['block_requests'] = (int)$pdo->query("SELECT COUNT(*) FROM blocked_date_requests WHERE status = 'pending'")->fetchColumn();
+    } catch (PDOException $e) {}
+
+    $q = $pdo->query("SELECT description, fullname, username, role, status, created_at FROM system_logs
+                      WHERE module IN ('booking','house','tour','food','activity','blocked_dates','review')
+                      ORDER BY created_at DESC, id DESC LIMIT 6");
+    $ops_recent_activity = $q->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    error_log('admin-dashboard ops overview failed: ' . $e->getMessage());
+}
 
 // Logout
 if(isset($_GET['logout'])) {
@@ -923,12 +988,12 @@ function getBookingStatusLabel($payment_status) {
                 </a>
             </li>
 
-            <li class="nav-item">
+            <?php if(!empty($is_admin)): ?><li class="nav-item">
                 <a href="reports.php" class="nav-link">
                     <i class="fas fa-file-alt"></i>
                     <span>Sales Report</span>
                 </a>
-            </li>
+            </li><?php endif; ?>
 
             <?php if($is_admin): ?>
             <li class="nav-item">
@@ -1122,6 +1187,83 @@ function getBookingStatusLabel($payment_status) {
         </div>
 
         <!-- ============================================================
+             OPERATIONAL OVERVIEW (counts only — no revenue / payment totals)
+             ============================================================ -->
+        <style>
+            .ops-wrap{margin:0 0 24px}
+            .ops-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+            .ops-tile{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 2px 10px rgba(15,23,42,.06);text-decoration:none;color:inherit;display:block;border-left:4px solid #4DA6D9}
+            .ops-tile .n{font-size:26px;font-weight:800;color:#0f172a;line-height:1.1}
+            .ops-tile .l{font-size:12px;color:#64748b;font-weight:600;margin-top:4px;text-transform:uppercase;letter-spacing:.03em}
+            .ops-tile.warn{border-left-color:#f59e0b}.ops-tile.ok{border-left-color:#10b981}.ops-tile.vio{border-left-color:#8b5cf6}
+            .ops-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+            .ops-card{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 10px rgba(15,23,42,.06);min-width:0}
+            .ops-card h3{margin:0 0 10px;font-size:15px;color:#0f172a}
+            .ops-card h3 i{color:#4DA6D9;margin-right:6px}
+            .ops-list{list-style:none;margin:0;padding:0}
+            .ops-list li{padding:9px 0;border-bottom:1px solid #eef2f7;font-size:13px;color:#334155;display:flex;gap:10px;justify-content:space-between;align-items:flex-start}
+            .ops-list li:last-child{border-bottom:0}
+            .ops-list .sub{display:block;color:#94a3b8;font-size:12px;margin-top:2px}
+            .ops-list .when{white-space:nowrap;color:#64748b;font-size:12px}
+            .ops-empty{color:#94a3b8;font-size:13px;padding:6px 0}
+            .ops-task{text-decoration:none;color:inherit}
+            .ops-task b{background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 10px;font-size:12px}
+            @media (max-width:600px){.ops-grid{grid-template-columns:repeat(2,1fr)}}
+        </style>
+        <section class="ops-wrap" id="operationalOverview">
+            <div class="section-heading" style="margin-bottom:12px;">
+                <h2><i class="fas fa-clipboard-list"></i> Operational Overview</h2>
+                <span><?php echo date('l, M d'); ?></span>
+            </div>
+            <div class="ops-grid">
+                <a class="ops-tile" href="booking-management.php"><div class="n"><?php echo (int)$ops['bookings_today']; ?></div><div class="l">Bookings today</div></a>
+                <a class="ops-tile ok" href="#opsArrivals"><div class="n"><?php echo (int)$ops['arrivals_today']; ?></div><div class="l">Arrivals today</div></a>
+                <a class="ops-tile vio" href="booking-management.php"><div class="n"><?php echo (int)$ops['departures_today']; ?></div><div class="l">Departures today</div></a>
+                <a class="ops-tile" href="#opsArrivals"><div class="n"><?php echo (int)$ops['arrivals_week']; ?></div><div class="l">Arrivals next 7 days</div></a>
+                <a class="ops-tile warn" href="booking-management.php?status=pending"><div class="n"><?php echo (int)$ops['proofs_to_verify']; ?></div><div class="l">Payments to verify</div></a>
+            </div>
+            <div class="ops-cols">
+                <div class="ops-card" id="opsArrivals">
+                    <h3><i class="fas fa-plane-arrival"></i> Today's Arrivals</h3>
+                    <?php if (empty($ops_arrivals_today)): ?><div class="ops-empty">No arrivals scheduled today.</div><?php else: ?>
+                    <ul class="ops-list">
+                        <?php foreach ($ops_arrivals_today as $a): ?>
+                        <li><span><strong><?php echo htmlspecialchars($a['guest'] !== '' ? $a['guest'] : 'Guest'); ?></strong><span class="sub"><?php echo htmlspecialchars($a['type'] . ' · ' . ($a['item'] ?? '') . ' · ' . $a['ref']); ?></span></span><span class="when"><?php echo ucfirst(htmlspecialchars($a['st'])); ?></span></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php endif; ?>
+                    <h3 style="margin-top:16px;"><i class="fas fa-calendar-day"></i> Upcoming Arrivals</h3>
+                    <?php if (empty($ops_arrivals_upcoming)): ?><div class="ops-empty">Nothing scheduled in the next 7 days.</div><?php else: ?>
+                    <ul class="ops-list">
+                        <?php foreach (array_slice($ops_arrivals_upcoming, 0, 6) as $a): ?>
+                        <li><span><strong><?php echo htmlspecialchars($a['guest'] !== '' ? $a['guest'] : 'Guest'); ?></strong><span class="sub"><?php echo htmlspecialchars($a['type'] . ' · ' . ($a['item'] ?? '') . ' · ' . $a['ref']); ?></span></span><span class="when"><?php echo date('M d', strtotime($a['d'])); ?></span></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php endif; ?>
+                </div>
+                <div class="ops-card">
+                    <h3><i class="fas fa-tasks"></i> Pending Tasks</h3>
+                    <ul class="ops-list">
+                        <li><a class="ops-task" href="booking-management.php?status=pending">Payment proofs waiting for verification</a><b class="ops-task" style="background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['proofs_to_verify']; ?></b></li>
+                        <li><a class="ops-task" href="booking-management.php?status=pending">Bookings awaiting the guest's payment</a><b class="ops-task" style="background:#e0f2fe;color:#075985;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['awaiting_payment']; ?></b></li>
+                        <li><a class="ops-task" href="reviews-management.php">Reviews to look at</a><b class="ops-task" style="background:#dcfce7;color:#166534;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$sidebar_pending_reviews; ?></b></li>
+                        <?php if ($is_admin): ?>
+                        <li><a class="ops-task" href="blocked-dates.php#blockRequests">Staff block requests to approve</a><b class="ops-task" style="background:#ede9fe;color:#5b21b6;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['block_requests']; ?></b></li>
+                        <?php endif; ?>
+                    </ul>
+                    <h3 style="margin-top:16px;"><i class="fas fa-history"></i> Recent Activity</h3>
+                    <?php if (empty($ops_recent_activity)): ?><div class="ops-empty">No recent activity.</div><?php else: ?>
+                    <ul class="ops-list">
+                        <?php foreach ($ops_recent_activity as $act): ?>
+                        <li><span><?php echo htmlspecialchars(mb_strimwidth((string)$act['description'], 0, 90, '…')); ?><span class="sub"><?php echo htmlspecialchars($act['fullname'] ?: ($act['username'] ?? 'System')); ?></span></span><span class="when"><?php echo date('M d, h:i A', strtotime($act['created_at'])); ?></span></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================
              DASHBOARD GRID
              LEFT:  Quick Actions + Recent Tour Bookings
              RIGHT: Recent House Bookings + Recent Reviews
@@ -1139,15 +1281,15 @@ function getBookingStatusLabel($payment_status) {
 
                     <div class="quick-actions">
                         <a href="house-dashboard.php" class="action-btn">
-                            <i class="fas fa-plus"></i>
-                            <span>Add House</span>
-                            <small>Create new accommodation</small>
+                            <i class="fas fa-<?php echo $is_admin ? 'plus' : 'home'; ?>"></i>
+                            <span><?php echo $is_admin ? 'Add House' : 'View Houses'; ?></span>
+                            <small><?php echo $is_admin ? 'Create new accommodation' : 'Check availability'; ?></small>
                         </a>
 
                         <a href="tour-dashboard.php" class="action-btn">
                             <i class="fas fa-ship"></i>
-                            <span>Add Tour</span>
-                            <small>Create tour package</small>
+                            <span><?php echo $is_admin ? 'Add Tour' : 'View Tours'; ?></span>
+                            <small><?php echo $is_admin ? 'Create tour package' : 'Check schedules'; ?></small>
                         </a>
 
                         <a href="booking-management.php" class="action-btn">
@@ -1156,10 +1298,16 @@ function getBookingStatusLabel($payment_status) {
                             <small>Verify payments</small>
                         </a>
 
+                        <a href="booking-management.php?new_walkin=1" class="action-btn">
+                            <i class="fas fa-user-plus"></i>
+                            <span>Walk-in Booking</span>
+                            <small>Book for a guest at the counter</small>
+                        </a>
+
                         <a href="blocked-dates.php" class="action-btn blocked-action">
                             <i class="fas fa-ban"></i>
-                            <span>Block Date</span>
-                            <small>Manage availability</small>
+                            <span><?php echo $is_admin ? 'Block Date' : 'Blocked Dates'; ?></span>
+                            <small><?php echo $is_admin ? 'Manage availability' : 'View &amp; request blocks'; ?></small>
                         </a>
                     </div>
                 </div>

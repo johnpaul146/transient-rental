@@ -212,6 +212,25 @@ function handlePhotoUpload($file, $user_id, $type) {
     return ['error' => 'Failed to upload file'];
 }
 
+// True only when a real image (JPG/PNG/GIF/WEBP, max 5MB) was sent as the ID photo,
+// either as an uploaded file or as camera data — same precedence as the save logic below.
+function hasValidIdPhoto() {
+    $allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    $max = 5 * 1024 * 1024;
+    if (isset($_FILES['id_photo']) && ($_FILES['id_photo']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) {
+        $tmp = $_FILES['id_photo']['tmp_name'] ?? '';
+        if ($tmp === '' || !is_uploaded_file($tmp) || ($_FILES['id_photo']['size'] ?? 0) > $max) return false;
+        $info = @getimagesize($tmp);
+        return $info && in_array($info['mime'], $allowed, true);
+    }
+    $b64 = $_POST['id_photo_base64'] ?? '';
+    if (!is_string($b64) || !preg_match('#^data:image/[a-zA-Z0-9.+\-]+;base64,(.+)$#s', $b64, $m)) return false;
+    $data = base64_decode($m[1], true);
+    if ($data === false || $data === '' || strlen($data) > $max) return false;
+    $info = @getimagesizefromstring($data);
+    return $info && in_array($info['mime'], $allowed, true);
+}
+
 function handleBase64Image($base64_data, $user_id, $type) {
     $target_dir = "uploads/profile/user_" . $user_id . "/";
     if (!file_exists($target_dir)) mkdir($target_dir, 0777, true);
@@ -298,6 +317,16 @@ if(isset($_POST['register'])) {
             $emergencyError = validatePhoneNumberOptional($_POST['emergency_number']);
             if ($emergencyError) $errors['emergency_number'] = $emergencyError;
         }
+
+        // ID PHOTO — required (valid image file or camera capture)
+        if (!hasValidIdPhoto()) $errors['id_photo'] = "Please upload your valid ID photo before continuing.";
+
+        // PROFILE PHOTO — required (uploaded file or camera capture)
+        $has_profile_photo =
+            (isset($_FILES['profile_photo']) && ($_FILES['profile_photo']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK && !empty($_FILES['profile_photo']['tmp_name']))
+            || (!empty($_POST['profile_photo_base64']) && is_string($_POST['profile_photo_base64'])
+                && preg_match('#^data:image/[a-zA-Z0-9.+\-]+;base64,.+#s', $_POST['profile_photo_base64']));
+        if (!$has_profile_photo) $errors['profile_photo'] = "Please upload your profile photo before continuing.";
 
         // EMERGENCY CONTACT NAME — letters, spaces and hyphens only (optional field)
         $emergency_name_clean = trim(preg_replace('/\s+/u', ' ', (string)($_POST['emergency_name'] ?? '')));
@@ -1556,7 +1585,7 @@ i.fab {
         <!-- PROFILE PHOTO -->
         <h4>
             <span class="section-icon"><i class="fas fa-user-circle"></i></span>
-            Profile Photo
+            Profile Photo <span class="required-field">*</span>
         </h4>
         <div class="section-divider"></div>
 
@@ -1584,6 +1613,7 @@ i.fab {
                 </div>
                 <input type="file" id="profile_photo_input" name="profile_photo" class="hidden-file-input" accept="image/*" onchange="previewPhoto(this, 'profile')">
                 <input type="hidden" id="profile_photo_base64" name="profile_photo_base64">
+                <div class="error-field-label" id="profilePhotoMsg" style="text-align:center; <?php echo hasError('profile_photo') ? '' : 'display:none;'; ?>"><i class="fas fa-exclamation-circle"></i> <span><?php echo hasError('profile_photo') ? htmlspecialchars($errors['profile_photo']) : ''; ?></span></div>
             </div>
         </div>
 
@@ -1807,6 +1837,7 @@ i.fab {
                     </div>
                     <input type="file" id="id_photo_input" name="id_photo" class="hidden-file-input" accept="image/*" onchange="previewPhoto(this, 'id')">
                     <input type="hidden" id="id_photo_base64" name="id_photo_base64">
+                    <div class="error-field-label" id="idPhotoMsg" style="<?php echo hasError('id_photo') ? '' : 'display:none;'; ?>"><i class="fas fa-exclamation-circle"></i> <span><?php echo hasError('id_photo') ? htmlspecialchars($errors['id_photo']) : ''; ?></span></div>
                 </div>
             </div>
         </div>
@@ -2568,6 +2599,13 @@ const submitBtn = document.getElementById('submitBtn');
 
 function showStep(step){
 
+    if (step > 1 && (!hasProfilePhoto() || !hasIdPhoto())) {
+        step = 1;
+        currentStep = 1;
+        checkProfilePhoto();
+        checkIdPhoto();
+    }
+
     panels.forEach(panel=>{
         panel.classList.remove('active');
 
@@ -2636,7 +2674,53 @@ function checkEmergencyName(focus){
     });
 })();
 
+// Profile photo is required (uploaded file or camera capture)
+function hasProfilePhoto(){
+    const f = document.getElementById('profile_photo_input');
+    const b = document.getElementById('profile_photo_base64');
+    return !!((f && f.files && f.files.length > 0) || (b && b.value && b.value.indexOf('data:image/') === 0));
+}
+function checkProfilePhoto(){
+    const msg = document.getElementById('profilePhotoMsg');
+    const ok = hasProfilePhoto();
+    if (msg) {
+        msg.style.display = ok ? 'none' : '';
+        if (!ok) msg.querySelector('span').textContent = 'Please upload your profile photo before continuing.';
+    }
+    return ok;
+}
+document.getElementById('profile_photo_input')?.addEventListener('change', function(){ setTimeout(checkProfilePhoto, 0); });
+
+// ID photo is required (uploaded image file or camera capture)
+function hasIdPhoto(){
+    const f = document.getElementById('id_photo_input');
+    const b = document.getElementById('id_photo_base64');
+    const fileOk = !!(f && f.files && f.files.length > 0 && /^image\//.test(f.files[0].type || ''));
+    const camOk = !!(b && b.value && b.value.indexOf('data:image/') === 0);
+    return fileOk || camOk;
+}
+function checkIdPhoto(){
+    const msg = document.getElementById('idPhotoMsg');
+    const ok = hasIdPhoto();
+    if (msg) {
+        msg.style.display = ok ? 'none' : '';
+        if (!ok) msg.querySelector('span').textContent = 'Please upload your valid ID photo before continuing.';
+    }
+    return ok;
+}
+document.getElementById('id_photo_input')?.addEventListener('change', function(){ setTimeout(checkIdPhoto, 0); });
+
 function validateStep(step){
+    if (step === 1) {
+        // Profile photo first, then ID photo; both messages are shown if both are missing
+        const profileOk = checkProfilePhoto();
+        const idOk = checkIdPhoto();
+        if (!profileOk || !idOk) {
+            const target = document.getElementById(!profileOk ? 'profilePreview' : 'idPreview');
+            if (target) { target.setAttribute('tabindex', '-1'); target.focus({preventScroll:true}); if (target.scrollIntoView) target.scrollIntoView({behavior:'smooth', block:'center'}); }
+            return false;
+        }
+    }
 
     let panel=document.querySelector(
         `.wizard-panel[data-step="${step}"]`

@@ -11,6 +11,11 @@ class EmailNotifications {
     // ============================================================
     // COLUMN DETECTION HELPERS
     // ============================================================
+    /** Walk-in guests get a placeholder address (@walkin.invalid) that must never be emailed. */
+    private static function isPlaceholderEmail($email) {
+        return is_string($email) && preg_match('/@walkin\.invalid$/i', trim($email)) === 1;
+    }
+
     private static function getGuestNameColumn($pdo) {
         if (isset(self::$columnCache['guest_name'])) return self::$columnCache['guest_name'];
         $cols = $pdo->query("SHOW COLUMNS FROM guests")->fetchAll(PDO::FETCH_COLUMN);
@@ -495,7 +500,7 @@ class EmailNotifications {
     public static function sendBookingConfirmation($booking_id, $booking_type, $pdo) {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || empty($booking['email'])) {
+            if (!$booking || (empty($booking['email']) || self::isPlaceholderEmail($booking['email']))) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -566,7 +571,7 @@ class EmailNotifications {
     public static function sendPaymentUnderReview($booking_id, $booking_type, $pdo) {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || empty($booking['email'])) {
+            if (!$booking || (empty($booking['email']) || self::isPlaceholderEmail($booking['email']))) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -598,7 +603,7 @@ class EmailNotifications {
     public static function sendPaymentConfirmation($booking_id, $booking_type, $pdo) {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || !$booking['email']) {
+            if (!$booking || !$booking['email'] || self::isPlaceholderEmail($booking['email'])) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -630,7 +635,7 @@ class EmailNotifications {
     public static function sendPaymentRejected($booking_id, $booking_type, $pdo, $reason = '', $rejected_by = '') {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || !$booking['email']) {
+            if (!$booking || !$booking['email'] || self::isPlaceholderEmail($booking['email'])) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -662,7 +667,7 @@ class EmailNotifications {
     public static function sendBookingCompleted($booking_id, $booking_type, $pdo) {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || !$booking['email']) return false;
+            if (!$booking || !$booking['email'] || self::isPlaceholderEmail($booking['email'])) return false;
 
             $mail = MailConfig::getInstance()->getMailer();
             $mail->clearAddresses();
@@ -691,7 +696,7 @@ class EmailNotifications {
     public static function sendBookingCancelled($booking_id, $booking_type, $pdo, $reason = '', $cancelled_by = '') {
         try {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
-            if (!$booking || !$booking['email']) {
+            if (!$booking || !$booking['email'] || self::isPlaceholderEmail($booking['email'])) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -798,7 +803,7 @@ class EmailNotifications {
     public static function sendRebookConfirmation($booking_id, $pdo) {
         try {
             $booking = self::getBookingDetails($booking_id, 'house', $pdo);
-            if (!$booking || empty($booking['email'])) {
+            if (!$booking || (empty($booking['email']) || self::isPlaceholderEmail($booking['email']))) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }
@@ -827,7 +832,7 @@ class EmailNotifications {
     public static function sendRebookRejected($booking_id, $pdo, $reason = '', $rejected_by = '') {
         try {
             $booking = self::getBookingDetails($booking_id, 'house', $pdo);
-            if (!$booking || empty($booking['email'])) {
+            if (!$booking || (empty($booking['email']) || self::isPlaceholderEmail($booking['email']))) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
                 return false;
             }

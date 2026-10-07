@@ -10,10 +10,8 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 // Auth check — admin or staff only
-if(!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', ['admin','staff'])) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] === 'admin');
 $is_staff = ($_SESSION['role'] === 'staff');
@@ -225,6 +223,8 @@ if (isset($_POST['update_profile'])) {
     try {
         $fullname = trim($_POST['fullname'] ?? '');
         $email    = trim($_POST['email'] ?? '');
+        // Staff may change name, photo and password only — the account email stays as set by an administrator.
+        if (!$is_admin) $email = (string)$user['email'];
 
         if (empty($fullname)) throw new Exception("Full name is required.");
         if (empty($email))    throw new Exception("Email is required.");
@@ -726,7 +726,7 @@ body.sidebar-open-mobile .menu-toggle {
 .password-requirements { font-size: 12.5px; margin: 4px 0 16px; padding: 12px 14px; background: #f5f9fd; border-radius: 12px; border: 1px solid #dce8f3; }
 .password-requirements .req-title { font-weight: 700; color: #0B2447; font-size: 12px; margin-bottom: 6px; }
 .password-requirements .req-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
-.password-requirements .req { display: block; color: #334e68; }
+.password-requirements .req { display: inline-flex; align-items: center; gap: 6px; color: #334e68; }
 .password-requirements .req small { color: #64748b; }
 @media (max-width: 380px) { .password-requirements .req-list { grid-template-columns: minmax(0, 1fr); } }
 .password-requirements .check { color: #10b981; }
@@ -734,8 +734,8 @@ body.sidebar-open-mobile .menu-toggle {
 .password-requirements .pending { color: #94a3b8; }
 
 /* BUTTONS */
-.btn-primary { width: auto; min-width: 200px; min-height: 46px; padding: 12px 22px; background: #4DA6D9; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(244,180,0,0.25); }
-.btn-primary:hover { background: #4DA6D9; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244,180,0,0.4); }
+.btn-primary { width: auto; min-width: 200px; min-height: 46px; padding: 12px 22px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(244,180,0,0.25); }
+.btn-primary:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244,180,0,0.4); }
 .btn-success { width: auto; min-width: 200px; min-height: 46px; padding: 12px 22px; background: linear-gradient(135deg,#10b981,#059669); color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .btn-success:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(16,185,129,0.4); }
 
@@ -893,7 +893,7 @@ body.sidebar-open-mobile .menu-toggle {
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
 
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
@@ -1060,10 +1060,10 @@ body.sidebar-open-mobile .menu-toggle {
 
                     <div class="form-group">
                         <label for="email"><i class="fas fa-envelope"></i> Email Address</label>
-                        <input type="email" id="email" name="email" class="form-control" required
+                        <input type="email" id="email" name="email" class="form-control" required<?php echo $is_admin ? '' : ' readonly'; ?>
                                value="<?php echo htmlspecialchars($user['email']); ?>"
                                placeholder="your@email.com">
-                        <div class="field-note"><i class="fas fa-info-circle"></i> Verification codes for password changes are sent to this address</div>
+                        <div class="field-note"><i class="fas fa-info-circle"></i> Verification codes for password changes are sent to this address<?php if (!$is_admin): ?> · contact an administrator to change it<?php endif; ?></div>
                     </div>
 
                     <button type="submit" name="update_profile" class="btn-primary">
@@ -1116,6 +1116,7 @@ body.sidebar-open-mobile .menu-toggle {
                             <span class="req" id="reqLength"><span class="pending"><i class="fas fa-circle"></i></span> Minimum 8 characters</span>
                             <span class="req" id="reqUpper"><span class="pending"><i class="fas fa-circle"></i></span> Uppercase letter</span>
                             <span class="req" id="reqNum"><span class="pending"><i class="fas fa-circle"></i></span> Number</span>
+                            <span class="req" id="reqSpecial"><span class="pending"><i class="fas fa-circle"></i></span> Special character <small>(recommended)</small></span>
                         </div>
                     </div>
 
@@ -1264,6 +1265,7 @@ if (pwInput) {
         set('reqLength', p.length >= 8, 'Minimum 8 characters');
         set('reqUpper', /[A-Z]/.test(p), 'Uppercase letter');
         set('reqNum', /[0-9]/.test(p), 'Number');
+        set('reqSpecial', /[^A-Za-z0-9]/.test(p), 'Special character <small>(recommended)</small>');
     });
 }
 

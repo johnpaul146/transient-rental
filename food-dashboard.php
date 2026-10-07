@@ -14,10 +14,8 @@ session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -135,7 +133,7 @@ function getGalleryImages($food_id, $food_name) {
 // ============================================================
 // HANDLE ADD FOOD ITEM
 // ============================================================
-if(isset($_POST['add_food']) && ($is_admin || $is_staff)) {
+if(isset($_POST['add_food']) && $is_admin) {
     try {
         if (!file_exists('uploads/foods/')) mkdir('uploads/foods/', 0777, true);
 
@@ -194,9 +192,37 @@ if(isset($_POST['add_food']) && ($is_admin || $is_staff)) {
 }
 
 // ============================================================
+// HANDLE EDIT FOOD — STAFF: availability (is_available) only
+// ============================================================
+if(isset($_POST['edit_food']) && $is_staff && !$is_admin) {
+    try {
+        $food_id = (int)($_POST['food_id'] ?? 0);
+        $stmt = $pdo->prepare("SELECT name, is_available FROM food_items WHERE id = ?");
+        $stmt->execute([$food_id]);
+        $current = $stmt->fetch();
+        if (!$current) throw new Exception("Food item not found.");
+
+        $avail = isset($_POST['is_available']) ? 1 : 0;
+        if ((int)$current['is_available'] !== $avail) {
+            $pdo->prepare("UPDATE food_items SET is_available = ? WHERE id = ?")->execute([$avail, $food_id]);
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'update', 'food',
+                    "Staff updated food availability: {$current['name']} (" . ((int)$current['is_available'] ? 'available' : 'unavailable') . " → " . ($avail ? 'available' : 'unavailable') . ")",
+                    $food_id, 'food', ['is_available' => (int)$current['is_available']], ['is_available' => $avail]);
+            }
+        }
+        $_SESSION['flash_success'] = "Food availability updated.";
+        header("Location: food-dashboard.php");
+        exit();
+    } catch(Exception $e) {
+        $error = "Failed to update food: " . $e->getMessage();
+    }
+}
+
+// ============================================================
 // HANDLE EDIT FOOD
 // ============================================================
-if(isset($_POST['edit_food']) && ($is_admin || $is_staff)) {
+if(isset($_POST['edit_food']) && $is_admin) {
     try {
         $category = normalizeFoodCategory(!empty($_POST['category_custom']) ? $_POST['category_custom'] : ($_POST['category'] ?? ''));
 
@@ -249,7 +275,7 @@ if(isset($_POST['edit_food']) && ($is_admin || $is_staff)) {
 // ============================================================
 // HANDLE DELETE GALLERY IMAGE
 // ============================================================
-if(isset($_GET['delete_gallery_image']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_gallery_image']) && $is_admin) {
     try {
         $food_id = $_GET['food_id'];
         $image = $_GET['delete_gallery_image'];
@@ -283,7 +309,7 @@ if(isset($_GET['delete_gallery_image']) && ($is_admin || $is_staff)) {
 // ============================================================
 // HANDLE DELETE FOOD ITEM
 // ============================================================
-if(isset($_GET['delete_food']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_food']) && $is_admin) {
     try {
         $stmt = $pdo->prepare("SELECT image, name, gallery_images FROM food_items WHERE id = ?");
         $stmt->execute([$_GET['delete_food']]);
@@ -1178,7 +1204,7 @@ $all_categories = array_values(array_filter(array_unique(array_merge($default_ca
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
 
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
@@ -1256,7 +1282,7 @@ $all_categories = array_values(array_filter(array_unique(array_merge($default_ca
                 <p>
                     Manage food items, packages, and orders
                     <?php if($is_staff): ?>
-                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
+                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - View &amp; update availability</span>
                     <?php endif; ?>
                 </p>
             </div>
@@ -1311,12 +1337,12 @@ $all_categories = array_values(array_filter(array_unique(array_merge($default_ca
         </div>
 
 
-        <button class="btn btn-primary" onclick="showModal('addFood')">
+        <?php if($is_admin): ?><button class="btn btn-primary" onclick="showModal('addFood')">
 
             <i class="fas fa-plus"></i>
             Add Food Item
 
-        </button>
+        </button><?php endif; ?>
 
     </div>
 
@@ -1436,11 +1462,11 @@ data-search="<?php echo strtolower(htmlspecialchars(
                                     onclick='editFood(<?php echo htmlspecialchars(json_encode($food), ENT_QUOTES, "UTF-8"); ?>)'>
                                 <i class="fas fa-edit"></i> Edit
                             </button>
-                            <a href="?delete_food=<?php echo $food['id']; ?>"
+                            <?php if($is_admin): ?><a href="?delete_food=<?php echo $food['id']; ?>"
                                class="btn-card btn-delete-card"
                                onclick="return confirm('Delete this food item?')">
                                 <i class="fas fa-trash"></i> Delete
-                            </a>
+                            </a><?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -2067,5 +2093,6 @@ function toggleSizes(button){
 }
 </script>
 
+<?php require __DIR__ . '/includes/staff-edit-lock.php'; ?>
 </body>
 </html>

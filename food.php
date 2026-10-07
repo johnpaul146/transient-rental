@@ -170,7 +170,8 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
         if ($guest_name_error) throw new Exception($guest_name_error);
 
         if (empty($preferred_date)) throw new Exception("Please select a preferred date.");
-        if ($preferred_date < date('Y-m-d')) throw new Exception("Preferred date cannot be in the past.");
+        $dateErr = AvailabilityService::futureDateError($preferred_date);
+        if ($dateErr !== null) throw new Exception($dateErr);
         if (empty($preferred_time)) throw new Exception("Please select a preferred time.");
 
         if (empty($contact_number_raw)) {

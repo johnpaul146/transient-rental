@@ -6,6 +6,7 @@ require_once 'includes/sidebar-counts.php';
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
+require_once 'includes/WalkInBookingService.php';
 require_once 'includes/RebookService.php';
 
 // ✅ Load SystemLogger (for logout logging)
@@ -14,10 +15,8 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 // Check if user is logged in and is admin or staff
-if(!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', ['admin', 'staff'], true)) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 // ============================================================
 // ✅ ROLE-BASED PERMISSIONS (Booking Management)
@@ -37,6 +36,30 @@ $can_view_reports     = $is_admin;   // reports
 $can_view_logs        = $is_admin;   // system logs
 $can_manage_users     = $is_admin;   // user management
 $can_manage_system    = $is_admin;   // system configuration
+
+if (!function_exists('walkInChip')) {
+    /** Small "Walk-in" label next to the reference for bookings created at the counter. */
+    function walkInChip(array $row): string {
+        if (($row['booking_source'] ?? 'online') !== 'walk_in') return '';
+        return ' <span title="Created by staff for a walk-in guest" style="display:inline-block;margin-left:4px;padding:1px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;letter-spacing:.03em;vertical-align:middle;white-space:nowrap;">WALK-IN</span>';
+    }
+}
+
+/**
+ * May the current user cancel this booking row from the list?
+ * Admin: always (the server decides the details). Staff: only a pending booking with
+ * no payment proof and no money received (same rule the cancel handler enforces).
+ */
+if (!function_exists('bookingCancelAllowed')) {
+    function bookingCancelAllowed(array $row): bool {
+        if (($_SESSION['role'] ?? '') === 'admin') return true;
+        if (($row['booking_status'] ?? '') !== 'pending') return false;
+        if (!empty($row['payment_proof'])) return false;
+        if (in_array(strtolower((string)($row['payment_status'] ?? '')), ['paid', 'reservation_paid'], true)) return false;
+        $a = PaymentService::amounts($row);
+        return $a['paid'] <= 0;
+    }
+}
 
 /**
  * Stop the request with HTTP 403 (used for server-side permission enforcement).
@@ -58,7 +81,7 @@ foreach (['delete_booking', 'permanent_delete_booking', 'override_booking', 'ove
 }
 
 // Server-side guard: every booking operation requires booking-management permission.
-foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment', 'mark_balance_paid'] as $bookingAction) {
+foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
     if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
         denyBookingPermission();
     }
@@ -300,6 +323,47 @@ try {
 // ============================================================
 // Handle Confirm Rebook
 // ============================================================
+// ============================================================
+// WALK-IN BOOKINGS (admin + staff) — logic lives in includes/WalkInBookingService.php
+// ============================================================
+if (isset($_GET['walkin_guest_search']) && $can_manage_booking) {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        echo json_encode(['results' => WalkInBookingService::searchGuests($pdo, (string)($_GET['q'] ?? ''))]);
+    } catch (Throwable $e) {
+        error_log('walkin guest search failed: ' . $e->getMessage());
+        echo json_encode(['results' => [], 'error' => 'Search failed.']);
+    }
+    exit();
+}
+
+if (isset($_POST['create_walkin_booking']) && $can_manage_booking) {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        if (!hash_equals((string)($_SESSION['wk_csrf'] ?? ''), (string)($_POST['wk_csrf'] ?? ''))) {
+            throw new InvalidArgumentException('Your session expired. Please refresh the page and try again.');
+        }
+        $nonce = (string)($_POST['wk_nonce'] ?? '');
+        if (!preg_match('/^[a-f0-9]{24}$/', $nonce)) throw new InvalidArgumentException('Invalid request. Please refresh the page and try again.');
+        $used = $_SESSION['wk_nonces'] ?? [];
+        if (isset($used[$nonce])) throw new InvalidArgumentException('This walk-in booking was already submitted. Check the booking list before creating it again.');
+        $used[$nonce] = time();
+        $_SESSION['wk_nonces'] = array_slice($used, -50, null, true);
+
+        $res = WalkInBookingService::create($pdo, $_POST, (int)$_SESSION['user_id'], (string)$_SESSION['role']);
+        echo json_encode(['ok' => true, 'reference' => $res['reference'], 'guest' => $res['guest_name'], 'total' => $res['total'],
+                          'type' => $res['type'], 'payment_message' => $res['payment']['message'], 'payment_recorded' => $res['payment']['recorded']]);
+    } catch (InvalidArgumentException | AvailabilityConflictException $e) {
+        if (!empty($nonce) && isset($_SESSION['wk_nonces'][$nonce])) unset($_SESSION['wk_nonces'][$nonce]); // allow a corrected retry
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    } catch (Throwable $e) {
+        if (!empty($nonce) && isset($_SESSION['wk_nonces'][$nonce])) unset($_SESSION['wk_nonces'][$nonce]);
+        error_log('walk-in booking failed: ' . $e->getMessage());
+        echo json_encode(['ok' => false, 'error' => 'Something went wrong and nothing was saved. Please try again.']);
+    }
+    exit();
+}
+
 if(isset($_POST['confirm_rebook']) && $can_manage_booking) {
     try {
         $booking_id = (int)$_POST['booking_id'];
@@ -419,6 +483,21 @@ if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
         $booking = $stmt->fetch();
         if (!$booking) throw new Exception("Booking not found.");
         if ($booking['booking_status'] === 'cancelled') throw new Exception("This booking is already cancelled.");
+
+        // STAFF may cancel only pending bookings with no payment proof and no money received.
+        // Proof-submitted, paid or confirmed bookings are cancelled by an administrator.
+        if (!$is_admin) {
+            $cancelAmounts = PaymentService::amounts($booking);
+            if (($booking['booking_status'] ?? '') !== 'pending'
+                || !empty($booking['payment_proof'])
+                || $cancelAmounts['paid'] > 0
+                || in_array(strtolower((string)($booking['payment_status'] ?? '')), ['paid', 'reservation_paid'], true)) {
+                if (class_exists('SystemLogger')) {
+                    SystemLogger::log($pdo, 'error', 'booking', "Staff cancellation denied for {$booking_type} booking {$booking['reference_number']} (proof submitted, paid or confirmed)", $booking_id, $booking_type, null, null, 'warning');
+                }
+                throw new Exception("Staff can cancel only pending bookings that have no payment proof or payment. Please ask an administrator to cancel this booking.");
+            }
+        }
 
         // Unpaid -> normal cancellation. Paid -> no refund: payment kept as rebooking credit.
         $cancelResult = PaymentService::cancelBooking($pdo, $booking_type, $booking_id, $final_reason);
@@ -1637,6 +1716,9 @@ function formatGuestNames($guest_names) {
                     Manage all house, tour, food, and package bookings, verify payments, and update status
                     <?php if($is_staff): ?><br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Daily Operations</span><?php endif; ?>
                 </p>
+                <?php if($can_manage_booking): ?>
+                <button type="button" class="wk-open-btn" onclick="wkOpen()"><i class="fas fa-plus"></i> Create Walk-in Booking</button>
+                <?php endif; ?>
             </div>
         </div>
 
@@ -1795,7 +1877,7 @@ data-search="<?php echo strtolower(htmlspecialchars(
     $booking['house_name']
 )); ?>"
 style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">                                <td>
-                                    <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong>
+                                    <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?>
                                     <?php if($is_row_rebook): ?>
                                         <span class="rebook-badge"><i class="fas fa-redo"></i> #<?php echo $booking['rebook_count'] ?: 1; ?>/2</span>
                                     <?php endif; ?>
@@ -1871,9 +1953,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                        <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
-                                        </button>
+                                        </button><?php endif; ?>
                                         <?php endif; ?>
                                     </div>
                                 </td>
@@ -1899,7 +1981,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($booking['reference_number']); ?>
+                                    <?php echo htmlspecialchars($booking['reference_number']); ?><?php echo walkInChip($booking); ?>
                                     <?php if($is_row_rebook): ?>
                                         <span class="rebook-badge"><i class="fas fa-redo"></i> #<?php echo $booking['rebook_count'] ?: 1; ?>/2</span>
                                     <?php endif; ?>
@@ -1976,9 +2058,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                     </button>
                                     <?php endif; ?>
-                                    <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                    <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                         <i class="fas fa-ban"></i> Cancel
-                                    </button>
+                                    </button><?php endif; ?>
                                 <?php endif; ?>
                             </div>
                         </div>
@@ -2012,7 +2094,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                         <tbody>
                             <?php foreach($active_tour as $booking): ?>
                             <tr>
-                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong></td>
+                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?></td>
                                 <td><?php echo htmlspecialchars($booking['guest_name']); ?></td>
                                 <td><?php echo htmlspecialchars($booking['tour_name']); ?></td>
                                 <td><?php echo formatDateDisplay($booking['booking_date']); ?></td>
@@ -2050,9 +2132,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                        <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
-                                        </button>
+                                        </button><?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -2074,7 +2156,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($booking['reference_number']); ?>
+                                    <?php echo htmlspecialchars($booking['reference_number']); ?><?php echo walkInChip($booking); ?>
                                 </div>
                                 <div class="card-badges">
                                     <?php echo PaymentService::adminBadge($booking); ?>
@@ -2118,9 +2200,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                 </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
-                                </button>
+                                </button><?php endif; ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -2157,7 +2239,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                 $is_delivery = ($fulfillment === 'delivery');
                             ?>
                             <tr>
-                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong></td>
+                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?></td>
                                 <td><?php echo htmlspecialchars($booking['guest_name']); ?></td>
                                 <td><?php echo htmlspecialchars($booking['food_name']); ?></td>
                                 <td><?php echo $booking['quantity']; ?></td>
@@ -2209,9 +2291,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                        <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
-                                        </button>
+                                        </button><?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -2236,7 +2318,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($booking['reference_number']); ?>
+                                    <?php echo htmlspecialchars($booking['reference_number']); ?><?php echo walkInChip($booking); ?>
                                 </div>
                                 <div class="card-badges">
                                     <?php echo PaymentService::adminBadge($booking); ?>
@@ -2287,9 +2369,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                 </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
+                                <?php if(bookingCancelAllowed($booking)): ?><button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
-                                </button>
+                                </button><?php endif; ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -2328,7 +2410,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             ?>
                             <tr>
                                 <td>
-                                    <strong><?php echo htmlspecialchars($pkg['reference_number']); ?></strong>
+                                    <strong><?php echo htmlspecialchars($pkg['reference_number']); ?></strong><?php echo walkInChip($pkg); ?>
                                     <span class="package-badge"><i class="fas fa-box-open"></i> <?php echo $itemCount; ?> items</span>
                                 </td>
                                 <td><?php echo htmlspecialchars($pkg['guest_name']); ?></td>
@@ -2379,9 +2461,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
+                                        <?php if(bookingCancelAllowed($pkg)): ?><button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
-                                        </button>
+                                        </button><?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -2408,7 +2490,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#0ea5e9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($pkg['reference_number']); ?>
+                                    <?php echo htmlspecialchars($pkg['reference_number']); ?><?php echo walkInChip($pkg); ?>
                                     <span class="package-badge"><i class="fas fa-box-open"></i> <?php echo $itemCount; ?> items</span>
                                 </div>
                                 <div class="card-badges">
@@ -2461,9 +2543,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
                                 </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
+                                <?php if(bookingCancelAllowed($pkg)): ?><button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
-                                </button>
+                                </button><?php endif; ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -2502,7 +2584,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <?php foreach($pending_rebooks as $booking): ?>
                             <tr>
                                 <td>
-                                    <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong>
+                                    <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?>
                                     <span class="rebook-badge"><i class="fas fa-redo"></i> #<?php echo $booking['rebook_count']; ?>/2</span>
                                 </td>
                                 <td><?php echo htmlspecialchars($booking['guest_name']); ?></td>
@@ -4092,5 +4174,6 @@ row.dataset.search.includes(keyword)
 
 </script>
 
+<?php require __DIR__ . '/includes/walkin-modal.php'; ?>
 </body>
 </html>

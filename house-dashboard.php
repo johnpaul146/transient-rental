@@ -1,10 +1,8 @@
 <?php
 session_start();
 
-if(!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['role'] != 'staff')) {
-    header("Location: index.php");
-    exit();
-}
+require_once 'includes/auth.php';
+requireAdminOrStaff();
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -79,7 +77,7 @@ if (isset($_GET['ajax_get_gallery'])) {
 if (isset($_POST['ajax_upload_multiple'])) {
     header('Content-Type: application/json');
     try {
-        if (!$is_admin && !$is_staff) throw new Exception("Unauthorized");
+        if (!$is_admin) throw new Exception("Unauthorized: gallery changes are limited to administrators.");
         
         if (!file_exists('uploads/houses/gallery/')) {
             mkdir('uploads/houses/gallery/', 0755, true);
@@ -172,7 +170,7 @@ if (isset($_POST['ajax_upload_multiple'])) {
 if (isset($_POST['ajax_delete_gallery'])) {
     header('Content-Type: application/json');
     try {
-        if (!$is_admin && !$is_staff) throw new Exception("Unauthorized");
+        if (!$is_admin) throw new Exception("Unauthorized: gallery changes are limited to administrators.");
         
         $img_id = (int)$_POST['img_id'];
         
@@ -235,7 +233,7 @@ if (isset($_POST['ajax_delete_gallery'])) {
 if (isset($_POST['ajax_set_main'])) {
     header('Content-Type: application/json');
     try {
-        if (!$is_admin && !$is_staff) throw new Exception("Unauthorized");
+        if (!$is_admin) throw new Exception("Unauthorized: gallery changes are limited to administrators.");
         
         $img_id = (int)$_POST['img_id'];
         
@@ -306,7 +304,7 @@ if (!function_exists('resolveHouseMainImage')) {
 }
 
 // HANDLE ADD HOUSE
-if(isset($_POST['add_house']) && ($is_admin || $is_staff)) {
+if(isset($_POST['add_house']) && $is_admin) {
     try {
         if (!file_exists('uploads/houses/')) mkdir('uploads/houses/', 0755, true);
         if (!file_exists('uploads/houses/gallery/')) mkdir('uploads/houses/gallery/', 0755, true);
@@ -393,8 +391,35 @@ if(isset($_POST['add_house']) && ($is_admin || $is_staff)) {
     }
 }
 
-// HANDLE EDIT HOUSE
-if(isset($_POST['edit_house']) && ($is_admin || $is_staff)) {
+// HANDLE EDIT HOUSE — STAFF: availability (status) only; name/price/capacity/images stay admin-only
+if(isset($_POST['edit_house']) && $is_staff && !$is_admin) {
+    try {
+        $house_id = (int)$_POST['house_id'];
+        $stmt = $pdo->prepare("SELECT house_name, status FROM houses WHERE id = ?");
+        $stmt->execute([$house_id]);
+        $current = $stmt->fetch();
+        if (!$current) throw new Exception("House not found.");
+
+        $new_status = $_POST['status'] ?? '';
+        if (!in_array($new_status, ['available', 'maintenance'], true)) throw new Exception("Invalid availability status.");
+
+        if ($current['status'] !== $new_status) {
+            $pdo->prepare("UPDATE houses SET status = ? WHERE id = ?")->execute([$new_status, $house_id]);
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'update', 'house',
+                    "Staff updated house availability: {$current['house_name']} ({$current['status']} → {$new_status})",
+                    $house_id, 'house',
+                    ['status' => $current['status']], ['status' => $new_status]);
+            }
+        }
+        $success = "House availability updated.";
+    } catch(Exception $e) {
+        $error = "Failed to update house: " . $e->getMessage();
+    }
+}
+
+// HANDLE EDIT HOUSE (admin: full edit)
+if(isset($_POST['edit_house']) && $is_admin) {
     try {
         $house_id = (int)$_POST['house_id'];
         
@@ -493,7 +518,7 @@ if(isset($_POST['edit_house']) && ($is_admin || $is_staff)) {
 }
 
 // HANDLE DELETE HOUSE
-if(isset($_GET['delete_house']) && ($is_admin || $is_staff)) {
+if(isset($_GET['delete_house']) && $is_admin) {
     try {
         $house_id = (int)$_GET['delete_house'];
         
@@ -1684,7 +1709,7 @@ min-width:75px;
                 </a>
             </li>
 
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
+            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
             <?php if($is_admin): ?>
             <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
             <!-- ✅ System Logs — badge lang kung may FAILED logs -->
@@ -1770,7 +1795,7 @@ min-width:75px;
                 <p>
                     Manage all transient houses, view availability, and update details
                     <?php if($is_staff): ?>
-                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - Full Management</span>
+                        <br><span class="staff-notice"><i class="fas fa-user-tie"></i> Staff Access - View &amp; update availability</span>
                     <?php endif; ?>
                 </p>
             </div>
@@ -1807,12 +1832,14 @@ min-width:75px;
         </div>
 
 
+        <?php if($is_admin): ?>
         <button class="btn btn-primary" onclick="showModal('addHouse')">
 
             <i class="fas fa-plus"></i>
             Add New House
 
         </button>
+        <?php endif; ?>
 
     </div>
 
@@ -1877,10 +1904,10 @@ min-width:75px;
                                 </span>
                             </td>
                             <td>
-                                <button type="button" class="btn-gallery-count"
+                                <?php if($is_admin): ?><button type="button" class="btn-gallery-count"
                                         onclick="showGallery(<?php echo $house['id']; ?>, '<?php echo addslashes($house['house_name']); ?>')">
                                     <i class="fas fa-images"></i> (<?php echo count($gallery); ?>)
-                                </button>
+                                </button><?php else: ?><span class="btn-gallery-count" style="cursor:default;"><i class="fas fa-images"></i> (<?php echo count($gallery); ?>)</span><?php endif; ?>
                             </td>
                             <td>
                                 <div class="action-buttons">
@@ -1888,11 +1915,11 @@ min-width:75px;
                                             onclick='editHouse(<?php echo htmlspecialchars(json_encode($house), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-edit"></i> Edit
                                     </button>
-                                    <a href="?delete_house=<?php echo $house['id']; ?>" 
+                                    <?php if($is_admin): ?><a href="?delete_house=<?php echo $house['id']; ?>" 
                                        class="btn-action btn-delete"
                                        onclick="return confirm('Delete this house and all its gallery images? This cannot be undone!')">
                                         <i class="fas fa-trash"></i> Delete
-                                    </a>
+                                    </a><?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -1987,19 +2014,19 @@ min-width:75px;
                         <?php endif; ?>
                         
                         <div class="house-actions">
-                            <button type="button" class="btn-card btn-gallery-card"
+                            <?php if($is_admin): ?><button type="button" class="btn-card btn-gallery-card"
                                     onclick="showGallery(<?php echo $house['id']; ?>, '<?php echo addslashes($house['house_name']); ?>')">
                                 <i class="fas fa-images"></i> Gallery
-                            </button>
+                            </button><?php endif; ?>
                             <button type="button" class="btn-card btn-edit-card"
                                     onclick='editHouse(<?php echo htmlspecialchars(json_encode($house), ENT_QUOTES, "UTF-8"); ?>)'>
                                 <i class="fas fa-edit"></i> Edit
                             </button>
-                            <a href="?delete_house=<?php echo $house['id']; ?>" 
+                            <?php if($is_admin): ?><a href="?delete_house=<?php echo $house['id']; ?>" 
                                class="btn-card btn-delete-card"
                                onclick="return confirm('Delete this house and all its gallery images? This cannot be undone!')">
                                 <i class="fas fa-trash"></i> Delete
-                            </a>
+                            </a><?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -3012,5 +3039,6 @@ setTimeout(function() {
 }, 5000);
 </script>
 
+<?php require __DIR__ . '/includes/staff-edit-lock.php'; ?>
 </body>
 </html>

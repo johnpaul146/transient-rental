@@ -83,3 +83,57 @@ function redirectIfLoggedIn(): void {
         exit();
     }
 }
+
+/**
+ * Send a 403 "Access denied" page and stop. Used when a logged-in user
+ * has the wrong role for a page (e.g. staff opening an admin-only URL).
+ */
+function denyAccess(string $message = 'You do not have permission to access this page.'): void {
+    if (!headers_sent()) {
+        http_response_code(403);
+        header('Content-Type: text/html; charset=utf-8');
+    }
+    $msg  = htmlspecialchars($message, ENT_QUOTES, 'UTF-8');
+    $home = htmlspecialchars(dashboardUrlForRole(currentRole() ?? 'guest'), ENT_QUOTES, 'UTF-8');
+    echo '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+       . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<title>Access denied</title>'
+       . '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+       . 'background:#f1f5f9;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;padding:16px}'
+       . '.c{max-width:420px;width:100%;background:#fff;border-radius:16px;padding:32px 24px;text-align:center;'
+       . 'box-shadow:0 10px 30px rgba(15,23,42,.08)}h1{font-size:1.25rem;margin:0 0 8px}p{margin:0 0 20px;color:#475569;line-height:1.5}'
+       . 'a{display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;padding:10px 20px;border-radius:10px;font-weight:600}</style>'
+       . '</head><body><div class="c"><h1>Access denied</h1><p>' . $msg . '</p>'
+       . '<a href="' . $home . '">Back to dashboard</a></div></body></html>';
+    exit();
+}
+
+/**
+ * Require one of the given roles. Not logged in -> login.php;
+ * wrong role -> 403 page (no redirect, so a manual URL is clearly refused).
+ */
+function requireRoleOrDeny(array $roles, string $message): void {
+    if (!isLoggedIn()) {
+        $redirect = urlencode($_SERVER['REQUEST_URI'] ?? 'index.php');
+        header("Location: login.php?redirect={$redirect}");
+        exit();
+    }
+    if (!hasRole(...$roles)) {
+        denyAccess($message);
+    }
+}
+
+/** Admin only (user management, content, system logs, sales reports ...). */
+function requireAdmin(): void {
+    requireRoleOrDeny(['admin'], 'This page is available to administrators only.');
+}
+
+/** Staff only. */
+function requireStaff(): void {
+    requireRoleOrDeny(['staff'], 'This page is available to staff only.');
+}
+
+/** Admin or staff (back-office pages). */
+function requireAdminOrStaff(): void {
+    requireRoleOrDeny(['admin', 'staff'], 'This page is available to administrators and staff only.');
+}
