@@ -9,7 +9,8 @@ if (file_exists('includes/SystemLogger.php')) {
 
 // Enable error reporting for debugging
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', '0');   // never show errors to visitors (production)
+ini_set('log_errors', '1');
 
 // ============================================================
 // PASSWORD VALIDATION FUNCTION
@@ -275,10 +276,9 @@ if(isset($_POST['update_profile'])) {
             }
 
             if($_POST['new_password'] == $_POST['confirm_password']) {
-                // ⚠️ Note: this stores plaintext — kept as-is from original code.
-                // For production, use password_hash($_POST['new_password'], PASSWORD_DEFAULT)
+                // Always store a password_hash() hash, never the plain password
                 $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-                $stmt->execute([$_POST['new_password'], $user_id]);
+                $stmt->execute([password_hash($_POST['new_password'], PASSWORD_DEFAULT), $user_id]);
                 $password_changed = true;
             } else {
                 throw new Exception("Passwords do not match!");
@@ -690,7 +690,8 @@ function splitPhoneForForm($fullPhone) {
         }
         .avatar-overlay i { color: white; font-size: 24px; }
 
-        .avatar-name { font-size: 18px; font-weight: 600; color: #0B2447; }
+        .avatar-name { font-size: 18px; font-weight: 600; color: #0B2447; overflow-wrap: anywhere; }
+        .avatar-sub { font-size: 13px; color: #4a6a8c; margin: 2px 0 12px; }
 
         /* ---------- PHOTO ACTIONS ---------- */
         .photo-actions {
@@ -1024,18 +1025,18 @@ function splitPhoneForForm($fullPhone) {
         .btn-save {
             flex: 2;
             padding: 15px;
-            background: linear-gradient(135deg, #F4B400, #e6a800);
+            background: linear-gradient(135deg, #4DA6D9, #4DA6D9);
             color: #0B2447;
             border: none; border-radius: 12px;
             font-weight: 700; font-size: 15px;
             cursor: pointer; transition: all 0.3s;
             display: flex; align-items: center; justify-content: center; gap: 10px;
-            box-shadow: 0 6px 20px rgba(244, 180, 0, 0.3);
+            box-shadow: 0 6px 20px #4DA6D9;
             min-width: 200px;
         }
         .btn-save:hover {
             transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(244, 180, 0, 0.45);
+            box-shadow: 0 10px 30px #4DA6D9;
         }
 
         .btn-cancel {
@@ -1104,6 +1105,30 @@ function splitPhoneForForm($fullPhone) {
             .phone-input-group { flex-direction: column; }
             .phone-input-group .phone-suffix-select { width: 100%; max-width: none; }
         }
+
+        /* ===== UX POLISH: spacing, photo controls, security, mobile ===== */
+        .form-section, .health-section { margin-bottom: 22px; }
+        .section-title { gap: 12px; flex-wrap: wrap; }
+        .section-title h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+        .readonly-badge { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+        .readonly-badge i { font-size: 10px; background: none; width: auto; height: auto; padding: 0; color: inherit; }
+        .avatar-section { padding-bottom: 6px; }
+        .photo-hint { font-size: 12.5px; color: #5b6b7e; margin: 10px auto 0; max-width: 420px; line-height: 1.5; }
+        .photo-actions { gap: 10px; flex-wrap: wrap; justify-content: center; }
+        .photo-actions .btn-photo { min-height: 42px; padding: 9px 18px; border-radius: 10px; font-size: 13px; }
+        .photo-actions .btn-photo:focus-visible, .btn-save:focus-visible, .btn-cancel:focus-visible { outline: 3px solid rgba(77,166,217,.5); outline-offset: 2px; }
+        .form-control:focus { outline: 3px solid rgba(77,166,217,.3); outline-offset: 0; }
+        .sub-heading { font-size: 14px; font-weight: 700; color: #0B2447; margin: 22px 0 4px; display: flex; align-items: center; gap: 8px; padding-top: 16px; border-top: 1px solid #e8f0fe; }
+        .sub-heading i { color: #4DA6D9; }
+        .sub-note { font-size: 12.5px; color: #5b6b7e; margin: 0 0 14px; }
+        .input-hint { color: #5b6b7e; }
+        @media (max-width: 600px) {
+            .main-container { padding-left: 10px; padding-right: 10px; }
+            .form-section, .health-section { padding: 16px 14px; margin-bottom: 16px; }
+            .photo-actions { flex-direction: column; align-items: stretch; max-width: 280px; margin: 0 auto; }
+            .photo-actions .btn-photo { width: 100%; justify-content: center; }
+            .checkbox-group { padding: 12px; }
+        }
     </style>
 </head>
 <body>
@@ -1165,9 +1190,10 @@ function splitPhoneForForm($fullPhone) {
                 <div class="avatar-name">
                     <?php echo $guest ? htmlspecialchars($guest['full_name']) : htmlspecialchars($user['username']); ?>
                 </div>
+                <div class="avatar-sub">Update your personal information</div>
                 <div class="photo-actions">
                     <button type="button" class="btn-photo btn-upload" onclick="document.getElementById('profile_photo_input').click()">
-                        <i class="fas fa-upload"></i> Upload
+                        <i class="fas fa-upload"></i> Upload Photo
                     </button>
                     <button type="button" class="btn-photo btn-camera" onclick="openCamera('profile')">
                         <i class="fas fa-camera"></i> Camera
@@ -1182,6 +1208,7 @@ function splitPhoneForForm($fullPhone) {
                         </button>
                     <?php endif; ?>
                 </div>
+                <div class="photo-hint"><i class="fas fa-info-circle"></i> Choose a photo from your device or take one with your camera. Tap the picture to change it.</div>
                 <input type="file" id="profile_photo_input" name="profile_photo" class="hidden-file-input" accept="image/*" onchange="previewPhoto(this, 'profile')">
                 <input type="hidden" id="profile_photo_base64" name="profile_photo_base64">
                 <input type="hidden" name="remove_photo" id="remove_photo" value="0">
@@ -1284,6 +1311,11 @@ function splitPhoneForForm($fullPhone) {
                     <h3>Identification <span class="readonly-badge"><i class="fas fa-lock"></i> Read-only</span></h3>
                 </div>
 
+                <div class="info-box">
+                    <i class="fas fa-shield-alt"></i>
+                    <p>For security reasons, submitted identification cannot be changed. Please contact support for corrections.</p>
+                </div>
+
                 <div class="form-row">
                     <div class="form-group">
                         <label><i class="fas fa-id-card"></i> ID Type</label>
@@ -1320,7 +1352,7 @@ function splitPhoneForForm($fullPhone) {
                             </div>
                         <?php endif; ?>
                         <div style="font-size: 12px; color: #94a3b8;">
-                            <i class="fas fa-info-circle"></i> ID photo cannot be edited. Please contact admin for changes.
+                            <i class="fas fa-lock"></i> ID photo is read-only.
                         </div>
                     </div>
                 </div>
@@ -1355,13 +1387,10 @@ function splitPhoneForForm($fullPhone) {
             <div class="form-section">
                 <div class="section-title">
                     <i class="fas fa-lock"></i>
-                    <h3>Account Settings</h3>
+                    <h3>Security Settings</h3>
                 </div>
 
-                <div class="info-box">
-                    <i class="fas fa-info-circle"></i>
-                    <p>Leave password fields blank if you don't want to change your password.</p>
-                </div>
+                <p class="sub-note" style="margin-top:0;">Manage the email you use to sign in and, if you wish, set a new password.</p>
 
                 <div class="form-group">
                     <label><i class="fas fa-envelope"></i> Email Address</label>
@@ -1372,6 +1401,9 @@ function splitPhoneForForm($fullPhone) {
                                placeholder="your@email.com" required>
                     </div>
                 </div>
+
+                <div class="sub-heading"><i class="fas fa-key"></i> Change Password <span style="font-weight:500;color:#5b6b7e;font-size:12.5px;">(optional)</span></div>
+                <p class="sub-note">Leave both password fields blank to keep your current password.</p>
 
                 <div class="form-row">
                     <!-- New Password -->
@@ -1418,7 +1450,7 @@ function splitPhoneForForm($fullPhone) {
             <div class="health-section">
                 <h4>
                     <i class="fas fa-heartbeat section-icon"></i>
-                    Health Information <span style="font-size: 13px; color: #94a3b8; font-weight: 400;">(Optional)</span>
+                    Health &amp; Accessibility <span style="font-size: 13px; color: #64748b; font-weight: 400;">(Optional)</span>
                 </h4>
 
                 <!-- Asthma -->
@@ -1551,7 +1583,7 @@ function splitPhoneForForm($fullPhone) {
             <!-- ============================================ -->
             <div class="action-buttons">
                 <button type="submit" name="update_profile" class="btn-save">
-                    <i class="fas fa-save"></i> Save Changes
+                    <i class="fas fa-save"></i> Save Profile Changes
                 </button>
                 <a href="profile.php" class="btn-cancel">
                     <i class="fas fa-times"></i> Cancel

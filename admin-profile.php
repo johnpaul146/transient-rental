@@ -678,25 +678,18 @@ body.sidebar-open-mobile .menu-toggle {
     }
 }
 
-/* BANNER */
-.page-title-banner { background: linear-gradient(135deg,#0B2447 0%,#0B3D91 50%,#4DA6D9 100%); border-radius: 20px; padding: 30px 35px; margin-bottom: 30px; color: white; box-shadow: 0 10px 30px rgba(11,36,71,0.15); }
-.page-title-banner h1 { font-size: 28px; font-weight: 700; margin-bottom: 5px; }
-.page-title-banner .underline { width: 60px; height: 3px; background: white; border-radius: 2px; margin-top: 8px; opacity: 0.5; }
-.page-title-banner p { opacity: 0.85; font-size: 14px; margin: 8px 0 0 0; }
-
-@media (max-width: 768px) {
-    .page-title-banner { padding: 20px; border-radius: 16px; text-align: center; }
-    .page-title-banner h1 { font-size: 22px; }
-    .page-title-banner .underline { margin: 8px auto 0; }
-}
+/* SECTION HEADER */
+.section-header { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 18px; padding: 14px 18px; background: #fff; border: 1px solid #dce8f3; border-left: 4px solid #4DA6D9; border-radius: 14px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); }
+.section-header .sh-icon { width: 40px; height: 40px; border-radius: 12px; background: #0B2447; color: #7bb8f0; display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0; }
+.section-header h2 { font-size: 18px; font-weight: 700; color: #0B2447; margin: 0; line-height: 1.25; }
+.section-header p { font-size: 13px; color: #4a6a8c; margin: 2px 0 0; line-height: 1.4; }
 @media (max-width: 480px) {
     .main-content { padding: 60px 12px 16px !important; }
-    .page-title-banner h1 { font-size: 18px; }
 }
 
 /* CARDS */
-.card { background: white; border-radius: 20px; padding: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: 1px solid #e8f0fe; margin-bottom: 30px; }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #e8f0fe; flex-wrap: wrap; gap: 15px; }
+.card { background: white; border-radius: 16px; padding: 22px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); border: 1px solid #dce8f3; margin-bottom: 18px; min-width: 0; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #e8f0fe; flex-wrap: wrap; gap: 15px; }
 .card-header h2 { font-size: 17px; font-weight: 600; color: #0B2447; display: flex; align-items: center; gap: 10px; margin: 0; }
 .card-header h2 i { color: #4DA6D9; background: #eef2ff; padding: 8px; border-radius: 8px; font-size: 14px; }
 
@@ -719,8 +712,8 @@ body.sidebar-open-mobile .menu-toggle {
 .form-group { margin-bottom: 18px; }
 .form-group label { display: block; margin-bottom: 6px; font-weight: 600; color: #0B2447; font-size: 13px; }
 .form-group label i { color: #4DA6D9; margin-right: 6px; }
-.form-control { width: 100%; padding: 12px 14px; border: 2px solid #e8f0fe; border-radius: 10px; font-size: 14px; background: #fafafa; font-family: inherit; transition: all 0.2s; }
-.form-control:focus { outline: none; border-color: #4DA6D9; background: white; box-shadow: 0 0 0 3px rgba(77,166,217,0.1); }
+.form-control { width: 100%; padding: 12px 14px; border: 1px solid #c9d9e8; border-radius: 10px; font-size: 14px; background: #fff; color: #0B2447; min-height: 44px; font-family: inherit; transition: all 0.2s; }
+.form-control:focus { outline: 3px solid rgba(77,166,217,0.35); outline-offset: 0; border-color: #4DA6D9; background: white; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 
@@ -730,82 +723,64 @@ body.sidebar-open-mobile .menu-toggle {
 .toggle-password { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; padding: 8px; cursor: pointer; color: #94a3b8; font-size: 16px; }
 .toggle-password:hover { color: #4DA6D9; }
 
-.password-requirements { font-size: 11px; margin-top: 8px; padding: 10px 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; display: none; }
-.password-requirements.visible { display: block; }
-.password-requirements .req { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; margin: 2px 4px 2px 0; }
+.password-requirements { font-size: 12.5px; margin: 4px 0 16px; padding: 12px 14px; background: #f5f9fd; border-radius: 12px; border: 1px solid #dce8f3; }
+.password-requirements .req-title { font-weight: 700; color: #0B2447; font-size: 12px; margin-bottom: 6px; }
+.password-requirements .req-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
+.password-requirements .req { display: block; color: #334e68; }
+.password-requirements .req small { color: #64748b; }
+@media (max-width: 380px) { .password-requirements .req-list { grid-template-columns: minmax(0, 1fr); } }
 .password-requirements .check { color: #10b981; }
 .password-requirements .cross { color: #ef4444; }
 .password-requirements .pending { color: #94a3b8; }
 
 /* BUTTONS */
-.btn-primary { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(244,180,0,0.25); }
-.btn-primary:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244,180,0,0.4); }
-.btn-success { width: 100%; padding: 14px; background: linear-gradient(135deg,#10b981,#059669); color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.btn-primary { width: auto; min-width: 200px; min-height: 46px; padding: 12px 22px; background: #4DA6D9; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(244,180,0,0.25); }
+.btn-primary:hover { background: #4DA6D9; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244,180,0,0.4); }
+.btn-success { width: auto; min-width: 200px; min-height: 46px; padding: 12px 22px; background: linear-gradient(135deg,#10b981,#059669); color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .btn-success:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(16,185,129,0.4); }
 
 /* PROFILE PHOTO SECTION */
-.photo-section {
-    display: flex;
-    align-items: center;
-    gap: 25px;
-    padding-bottom: 25px;
-    border-bottom: 2px solid #e8f0fe;
-    margin-bottom: 25px;
-    flex-wrap: wrap;
-}
+/* PROFILE HEADER CARD */
+.profile-card { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; border-top: 4px solid #4DA6D9; }
 .photo-preview-wrapper { position: relative; flex-shrink: 0; }
-.photo-preview {
-    width: 120px; height: 120px;
-    border-radius: 50%;
-    background: linear-gradient(135deg,#4DA6D9,#7bb8f0);
-    display: flex; align-items: center; justify-content: center;
-    color: white; font-weight: 700; font-size: 48px;
-    border: 4px solid #e8f0fe;
-    overflow: hidden; position: relative;
-}
+.photo-preview { width: 112px; height: 112px; border-radius: 50%; background: linear-gradient(135deg,#4DA6D9,#7bb8f0); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 44px; border: 4px solid #e8f0fe; overflow: hidden; position: relative; }
 .photo-preview img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-.photo-preview-wrapper .photo-badge {
-    position: absolute; bottom: 5px; right: 5px;
-    width: 32px; height: 32px;
-    background: #4DA6D9; border: 3px solid white;
-    border-radius: 50%; display: flex; align-items: center; justify-content: center;
-    color: white; font-size: 12px;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.15);
-}
-.photo-info { flex: 1; min-width: 200px; }
-.photo-info h3 { font-size: 22px; font-weight: 700; color: #0B2447; margin: 0 0 4px 0; word-break: break-word; }
-.photo-info p { color: #64748b; font-size: 13px; margin: 0 0 6px 0; }
-.photo-info .role-tag {
-    display: inline-block; padding: 3px 12px; border-radius: 20px;
-    font-size: 11px; font-weight: 700; text-transform: uppercase;
-    margin-bottom: 12px;
-}
-.photo-info .photo-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.photo-preview-wrapper .photo-badge { position: absolute; bottom: 4px; right: 4px; width: 28px; height: 28px; background: #4DA6D9; border: 3px solid #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; }
+.photo-info { flex: 1; min-width: 220px; }
+.photo-info h3 { font-size: 22px; font-weight: 700; color: #0B2447; margin: 0 0 2px; overflow-wrap: anywhere; }
+.photo-info .handle { color: #4a6a8c; font-size: 14px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.profile-meta { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-bottom: 4px; }
+.profile-meta .since { font-size: 12.5px; color: #4a6a8c; }
+.role-tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.role-admin { background: #fee2e2; color: #b91c1c; }
+.role-staff { background: #fef3c7; color: #92400e; }
+.photo-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.photo-actions form { display: inline-block; }
+.btn-photo { min-height: 40px; padding: 8px 16px; border-radius: 10px; font-weight: 600; font-size: 13px; font-family: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; text-decoration: none; }
+.btn-photo-upload { background: #2f8dc4; color: #fff; }
+.btn-photo-upload:hover { background: #247aab; }
+.btn-photo-remove { background: #fff; color: #b91c1c; border-color: #f3c0c0; }
+.btn-photo-remove:hover { background: #fef2f2; }
+.btn-photo:focus-visible, .btn-primary:focus-visible, .btn-success:focus-visible, .toggle-password:focus-visible { outline: 3px solid rgba(77,166,217,0.5); outline-offset: 2px; }
+.photo-hint { font-size: 12px; color: #5b6b7e; margin-top: 10px; line-height: 1.5; }
 
-.btn-photo {
-    padding: 8px 16px; border-radius: 8px;
-    font-weight: 600; font-size: 12.5px; cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex; align-items: center; gap: 6px;
-    border: none; text-decoration: none;
-    -webkit-tap-highlight-color: rgba(0,0,0,0.1);
-}
-.btn-photo:hover { transform: translateY(-2px); }
-.btn-photo-upload { background: #4DA6D9; color: white; }
-.btn-photo-upload:hover { background: #3a8bbf; box-shadow: 0 4px 12px rgba(77, 166, 217, 0.3); }
-.btn-photo-remove { background: #fee2e2; color: #ef4444; }
-.btn-photo-remove:hover { background: #fecaca; }
-
-.role-admin { background: #fee2e2; color: #ef4444; }
-.role-staff { background: #fef3c7; color: #f59e0b; }
-
+/* ACCOUNT GRID */
+.account-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.account-grid > .card { margin-bottom: 0; }
+.card-sub { font-size: 13px; color: #4a6a8c; margin: -6px 0 16px; line-height: 1.5; }
+.username-display { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #f5f9fd; border: 1px solid #dce8f3; border-radius: 10px; min-height: 44px; }
+.username-display strong { color: #0B2447; font-size: 15px; overflow-wrap: anywhere; }
+.field-note { font-size: 12px; color: #5b6b7e; margin-top: 5px; display: flex; gap: 6px; align-items: center; }
+.field-note i { color: #4DA6D9; }
+@media (max-width: 1100px) { .account-grid { grid-template-columns: minmax(0, 1fr); } .account-grid > .card { margin-bottom: 0; } }
 @media (max-width: 600px) {
-    .photo-section { flex-direction: column; text-align: center; gap: 15px; }
-    .photo-preview { width: 100px; height: 100px; font-size: 40px; }
-    .photo-preview-wrapper .photo-badge { width: 28px; height: 28px; font-size: 11px; }
-    .photo-info { text-align: center; }
-    .photo-info h3 { font-size: 19px; }
-    .photo-info .photo-actions { justify-content: center; }
+    .profile-card { flex-direction: column; text-align: center; gap: 14px; }
+    .photo-info { min-width: 0; width: 100%; }
+    .profile-meta, .photo-actions { justify-content: center; }
+    .photo-actions form, .photo-actions .btn-photo { width: 100%; }
+    .photo-actions .btn-photo { justify-content: center; }
+    .btn-primary, .btn-success { width: 100%; }
+    .photo-preview { width: 96px; height: 96px; font-size: 38px; }
 }
 
 /* OTP MODAL */
@@ -984,11 +959,13 @@ body.sidebar-open-mobile .menu-toggle {
             </div>
         </div>
 
-        <!-- BANNER -->
-        <div class="page-title-banner">
-            <h1><i class="fas fa-user-cog"></i> Account Settings</h1>
-            <div class="underline"></div>
-            <p>Update your photo, name, email, and password. Your name will appear in System Logs.</p>
+        <!-- SECTION HEADER -->
+        <div class="section-header">
+            <div class="sh-icon"><i class="fas fa-user-cog"></i></div>
+            <div>
+                <h2>Account Center</h2>
+                <p>Manage your profile details and keep your account secure. Your name appears in System Activity.</p>
+            </div>
         </div>
 
         <!-- ALERTS -->
@@ -999,166 +976,161 @@ body.sidebar-open-mobile .menu-toggle {
         <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <?php echo $error; ?></div>
         <?php endif; ?>
 
-        <!-- PROFILE PHOTO + INFO CARD -->
-        <div class="card">
-            <div class="photo-section">
-                <div class="photo-preview-wrapper">
-                    <div class="photo-preview">
-                        <?php if($avatar): ?>
-                            <img src="<?php echo htmlspecialchars($avatar); ?>?<?php echo time(); ?>" alt="Profile Photo">
-                        <?php else: ?>
-                            <?php echo $initial; ?>
-                        <?php endif; ?>
-                    </div>
+        <!-- PROFILE HEADER CARD -->
+        <div class="card profile-card">
+            <div class="photo-preview-wrapper">
+                <div class="photo-preview">
                     <?php if($avatar): ?>
-                        <div class="photo-badge"><i class="fas fa-check"></i></div>
+                        <img src="<?php echo htmlspecialchars($avatar); ?>?<?php echo time(); ?>" alt="Profile Photo">
+                    <?php else: ?>
+                        <?php echo $initial; ?>
+                    <?php endif; ?>
+                </div>
+                <?php if($avatar): ?>
+                    <div class="photo-badge"><i class="fas fa-check"></i></div>
+                <?php endif; ?>
+            </div>
+
+            <div class="photo-info">
+                <h3><?php echo htmlspecialchars($user['fullname'] ?: $user['username']); ?></h3>
+                <p class="handle">@<?php echo htmlspecialchars($user['username']); ?></p>
+                <div class="profile-meta">
+                    <span class="role-tag <?php echo $is_admin ? 'role-admin' : 'role-staff'; ?>">
+                        <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
+                        <?php echo $is_admin ? 'Administrator' : 'Staff Member'; ?>
+                    </span>
+                    <?php if(!empty($user['created_at']) && strtotime($user['created_at'])): ?>
+                    <span class="since"><i class="fas fa-calendar-check"></i> Member since <?php echo date('F Y', strtotime($user['created_at'])); ?></span>
                     <?php endif; ?>
                 </div>
 
-                <div class="photo-info">
-                    <h3><?php echo htmlspecialchars($user['fullname'] ?: $user['username']); ?></h3>
-                    <p><i class="fas fa-at"></i> <?php echo htmlspecialchars($user['username']); ?></p>
-                    <span class="role-tag <?php echo $is_admin ? 'role-admin' : 'role-staff'; ?>">
-                        <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
-                        <?php echo $is_admin ? 'Administrator' : 'Staff'; ?>
-                    </span>
+                <div class="photo-actions">
+                    <form method="POST" enctype="multipart/form-data">
+                        <input type="file"
+                               name="profile_photo"
+                               id="profile_photo_input"
+                               accept="image/jpeg,image/png,image/gif,image/webp"
+                               style="display: none;"
+                               onchange="this.form.submit()">
+                        <button type="button"
+                                class="btn-photo btn-photo-upload"
+                                onclick="document.getElementById('profile_photo_input').click()">
+                            <i class="fas fa-camera"></i>
+                            <?php echo $avatar ? 'Change Photo' : 'Upload Photo'; ?>
+                        </button>
+                        <input type="hidden" name="upload_photo" value="1">
+                    </form>
 
-                    <div class="photo-actions">
-                        <form method="POST" enctype="multipart/form-data" style="display: inline-block;">
-                            <input type="file"
-                                   name="profile_photo"
-                                   id="profile_photo_input"
-                                   accept="image/jpeg,image/png,image/gif,image/webp"
-                                   style="display: none;"
-                                   onchange="this.form.submit()">
-                            <button type="button"
-                                    class="btn-photo btn-photo-upload"
-                                    onclick="document.getElementById('profile_photo_input').click()">
-                                <i class="fas fa-camera"></i>
-                                <?php echo $avatar ? 'Change Photo' : 'Upload Photo'; ?>
-                            </button>
-                            <input type="hidden" name="upload_photo" value="1">
-                        </form>
-
-                        <?php if($avatar): ?>
-                        <form method="POST" style="display: inline-block;" onsubmit="return confirm('Remove your profile photo?');">
-                            <button type="submit" name="remove_photo" class="btn-photo btn-photo-remove">
-                                <i class="fas fa-trash"></i> Remove
-                            </button>
-                        </form>
-                        <?php endif; ?>
-                    </div>
-                    <small style="font-size: 11px; color: #94a3b8; display: block; margin-top: 8px;">
-                        <i class="fas fa-info-circle"></i> JPG, PNG, GIF, or WEBP • Max 3 MB
-                        <br>
-                        <i class="fas fa-folder"></i> Saves to: <code>uploads/profile/user_<?php echo $user_id; ?>/</code>
-                    </small>
+                    <?php if($avatar): ?>
+                    <form method="POST" onsubmit="return confirm('Remove your profile photo?');">
+                        <button type="submit" name="remove_photo" class="btn-photo btn-photo-remove">
+                            <i class="fas fa-trash"></i> Remove Photo
+                        </button>
+                    </form>
+                    <?php endif; ?>
+                </div>
+                <div class="photo-hint">
+                    Supported formats: JPG, PNG, WEBP<br>
+                    Maximum size: 3 MB
                 </div>
             </div>
+        </div>
 
-            <!-- UPDATE NAME + EMAIL FORM -->
-            <form method="POST">
-                <h2 style="font-size:16px; font-weight:700; color:#0B2447; margin-bottom:15px;">
-                    <i class="fas fa-user-edit" style="color:#4DA6D9;"></i> Personal Information
-                </h2>
-
-                <div class="form-row">
+        <div class="account-grid">
+            <!-- PERSONAL INFORMATION -->
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-user-edit"></i> Personal Information</h2>
+                </div>
+                <form method="POST">
                     <div class="form-group">
-                        <label><i class="fas fa-user"></i> Full Name</label>
-                        <input type="text" name="fullname" class="form-control" required
+                        <label for="fullname"><i class="fas fa-user"></i> Full Name</label>
+                        <input type="text" id="fullname" name="fullname" class="form-control" required
                                value="<?php echo htmlspecialchars($user['fullname'] ?? ''); ?>"
                                placeholder="e.g., Juan Dela Cruz">
                     </div>
+
                     <div class="form-group">
                         <label><i class="fas fa-at"></i> Username</label>
-                        <input type="text" class="form-control" disabled
-                               value="<?php echo htmlspecialchars($user['username']); ?>"
-                               style="background:#f1f5f9; cursor:not-allowed; opacity:0.7;">
-                        <small style="font-size:11px; color:#94a3b8; display:block; margin-top:4px;">
-                            <i class="fas fa-lock"></i> Username cannot be changed
-                        </small>
+                        <div class="username-display">
+                            <strong>@<?php echo htmlspecialchars($user['username']); ?></strong>
+                        </div>
+                        <div class="field-note"><i class="fas fa-lock"></i> Username cannot be changed</div>
                     </div>
-                </div>
 
-                <div class="form-group">
-                    <label><i class="fas fa-envelope"></i> Email Address</label>
-                    <input type="email" name="email" class="form-control" required
-                           value="<?php echo htmlspecialchars($user['email']); ?>"
-                           placeholder="your@email.com">
-                    <small style="font-size:11px; color:#94a3b8; display:block; margin-top:4px;">
-                        <i class="fas fa-info-circle"></i> Used for OTP when changing password
-                    </small>
-                </div>
+                    <div class="form-group">
+                        <label for="email"><i class="fas fa-envelope"></i> Email Address</label>
+                        <input type="email" id="email" name="email" class="form-control" required
+                               value="<?php echo htmlspecialchars($user['email']); ?>"
+                               placeholder="your@email.com">
+                        <div class="field-note"><i class="fas fa-info-circle"></i> Verification codes for password changes are sent to this address</div>
+                    </div>
 
-                <button type="submit" name="update_profile" class="btn-primary">
-                    <i class="fas fa-save"></i> Save Changes
-                </button>
-            </form>
-        </div>
-
-        <!-- PASSWORD CHANGE CARD -->
-        <div class="card">
-            <div class="card-header">
-                <h2><i class="fas fa-lock"></i> Change Password</h2>
-                <span style="font-size:12px; color:#64748b;">
-                    <i class="fas fa-shield-alt"></i> OTP required
-                </span>
+                    <button type="submit" name="update_profile" class="btn-primary">
+                        <i class="fas fa-save"></i> Save Profile Changes
+                    </button>
+                </form>
             </div>
 
-            <p style="font-size:13px; color:#64748b; margin-bottom:20px;">
-                <i class="fas fa-info-circle" style="color:#4DA6D9;"></i>
-                For security, we'll send a one-time password (OTP) to your email. You need to verify it before your new password takes effect.
-            </p>
-
-            <form method="POST" id="passwordForm">
-                <div class="form-group">
-                    <label><i class="fas fa-key"></i> Current Password</label>
-                    <div class="password-wrapper">
-                        <input type="password" name="current_password" id="current_password" class="form-control" required placeholder="Enter current password">
-                        <button type="button" class="toggle-password" onclick="togglePw('current_password', this)">
-                            <i class="fas fa-eye"></i>
-                        </button>
-                    </div>
+            <!-- SECURITY CENTER -->
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-shield-alt"></i> Security Center</h2>
                 </div>
+                <p class="card-sub">Protect your account by updating your password. A verification code is sent to your email before the change takes effect.</p>
 
-                <div class="form-row">
+                <form method="POST" id="passwordForm">
                     <div class="form-group">
-                        <label><i class="fas fa-lock"></i> New Password</label>
+                        <label for="current_password"><i class="fas fa-key"></i> Current Password</label>
                         <div class="password-wrapper">
-                            <input type="password" name="new_password" id="new_password" class="form-control" required placeholder="Enter new password">
-                            <button type="button" class="toggle-password" onclick="togglePw('new_password', this)">
+                            <input type="password" name="current_password" id="current_password" class="form-control" required placeholder="Enter current password" autocomplete="current-password">
+                            <button type="button" class="toggle-password" aria-label="Show or hide password" onclick="togglePw('current_password', this)">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
                     </div>
+
                     <div class="form-group">
-                        <label><i class="fas fa-lock"></i> Confirm New Password</label>
+                        <label for="new_password"><i class="fas fa-lock"></i> New Password</label>
                         <div class="password-wrapper">
-                            <input type="password" name="confirm_password" id="confirm_password" class="form-control" required placeholder="Re-enter new password">
-                            <button type="button" class="toggle-password" onclick="togglePw('confirm_password', this)">
+                            <input type="password" name="new_password" id="new_password" class="form-control" required placeholder="Enter new password" autocomplete="new-password">
+                            <button type="button" class="toggle-password" aria-label="Show or hide password" onclick="togglePw('new_password', this)">
                                 <i class="fas fa-eye"></i>
                             </button>
                         </div>
                     </div>
-                </div>
 
-                <div class="password-requirements" id="pwReq">
-                    <span class="req" id="reqLength"><span class="pending"><i class="fas fa-circle"></i></span> 8 characters</span>
-                    <span class="req" id="reqUpper"><span class="pending"><i class="fas fa-circle"></i></span> Uppercase</span>
-                    <span class="req" id="reqNum"><span class="pending"><i class="fas fa-circle"></i></span> Number</span>
-                </div>
+                    <div class="form-group">
+                        <label for="confirm_password"><i class="fas fa-lock"></i> Confirm New Password</label>
+                        <div class="password-wrapper">
+                            <input type="password" name="confirm_password" id="confirm_password" class="form-control" required placeholder="Re-enter new password" autocomplete="new-password">
+                            <button type="button" class="toggle-password" aria-label="Show or hide password" onclick="togglePw('confirm_password', this)">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
 
-                <button type="submit" name="send_otp" class="btn-success" style="margin-top:15px;">
-                    <i class="fas fa-paper-plane"></i> Send OTP to Email
-                </button>
-            </form>
+                    <div class="password-requirements" id="pwReq">
+                        <div class="req-title">Password Requirements</div>
+                        <div class="req-list">
+                            <span class="req" id="reqLength"><span class="pending"><i class="fas fa-circle"></i></span> Minimum 8 characters</span>
+                            <span class="req" id="reqUpper"><span class="pending"><i class="fas fa-circle"></i></span> Uppercase letter</span>
+                            <span class="req" id="reqNum"><span class="pending"><i class="fas fa-circle"></i></span> Number</span>
+                        </div>
+                    </div>
+
+                    <button type="submit" name="send_otp" class="btn-success">
+                        <i class="fas fa-paper-plane"></i> Send Verification OTP
+                    </button>
+                </form>
+            </div>
         </div>
 
         <!-- FOOTER -->
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Huddled Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Hundred Islands Reservation System. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i> <?php echo $is_admin ? 'Administrator' : 'Staff'; ?> Access
@@ -1284,19 +1256,14 @@ if (pwInput) {
         const p = this.value;
         const req = document.getElementById('pwReq');
         req.classList.add('visible');
-        const L = document.getElementById('reqLength');
-        const U = document.getElementById('reqUpper');
-        const N = document.getElementById('reqNum');
-
-        L.innerHTML = p.length >= 8
-            ? '<span class="check"><i class="fas fa-check-circle"></i></span> 8 characters'
-            : '<span class="cross"><i class="fas fa-times-circle"></i></span> 8 characters';
-        U.innerHTML = /[A-Z]/.test(p)
-            ? '<span class="check"><i class="fas fa-check-circle"></i></span> Uppercase'
-            : '<span class="cross"><i class="fas fa-times-circle"></i></span> Uppercase';
-        N.innerHTML = /[0-9]/.test(p)
-            ? '<span class="check"><i class="fas fa-check-circle"></i></span> Number'
-            : '<span class="cross"><i class="fas fa-times-circle"></i></span> Number';
+        const set = (id, ok, label) => {
+            document.getElementById(id).innerHTML = (ok
+                ? '<span class="check"><i class="fas fa-check-circle"></i></span> '
+                : '<span class="cross"><i class="fas fa-times-circle"></i></span> ') + label;
+        };
+        set('reqLength', p.length >= 8, 'Minimum 8 characters');
+        set('reqUpper', /[A-Z]/.test(p), 'Uppercase letter');
+        set('reqNum', /[0-9]/.test(p), 'Number');
     });
 }
 

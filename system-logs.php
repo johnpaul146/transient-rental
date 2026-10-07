@@ -175,6 +175,83 @@ function moduleColor($m) {
     return $map[$m] ?? '#94a3b8';
 }
 
+// ---- Display-only helpers (business-friendly wording; no data is changed) ----
+function logStripIp($t) {
+    $t = preg_replace('/\s*[—–-]?\s*\(?\bIP:\s*[0-9a-fA-F:.]+\)?/u', '', (string)$t);
+    return trim(preg_replace('/\s{2,}/', ' ', $t));
+}
+function friendlyAction($a) {
+    $map = [
+        'create' => 'Created', 'update' => 'Updated', 'delete' => 'Deleted', 'login' => 'Login',
+        'login_failed' => 'Failed Login', 'logout' => 'Logout', 'register' => 'New Account',
+        'verify_device' => 'Device Verification', 'confirm_payment' => 'Payment Confirmed',
+        'reject_payment' => 'Payment Rejected', 'confirm_rebook' => 'Rebooking Approved',
+        'rebook' => 'Rebooking Request', 'cancel_rebook' => 'Rebooking Cancelled',
+        'upload_proof' => 'Payment Proof', 'export' => 'Export', 'view' => 'Page View', 'upload' => 'Upload',
+        'unknown' => 'Other',
+    ];
+    return $map[$a] ?? ucwords(str_replace('_', ' ', (string)$a));
+}
+function friendlyArea($m) {
+    $map = [
+        'auth' => 'Login & Security', 'booking' => 'Bookings', 'house' => 'Houses', 'tour' => 'Tours',
+        'activity' => 'Activities', 'food' => 'Food', 'review' => 'Reviews', 'user' => 'Accounts',
+        'content' => 'Website Content', 'profile' => 'Profiles', 'system' => 'System',
+        'blocked_dates' => 'Availability', 'package' => 'Packages',
+    ];
+    return $map[$m] ?? ucwords(str_replace('_', ' ', (string)$m));
+}
+function friendlyDescription($d, $action, $username) {
+    $d = logStripIp($d);
+    if (($username === null || $username === '') && preg_match('/^User \'([^\']+)\'/u', $d, $um)) $username = $um[1];
+    $u = $username !== null && $username !== '' ? ucfirst($username) : 'The system';
+    // Authentication wording
+    if (preg_match('/logged in.*(trusted device)/iu', $d)) return "$u successfully logged in using a trusted device.";
+    if (preg_match('/logged in from (a )?NEW device/iu', $d)) return "$u logged in from a new device. A verification code was sent.";
+    if (preg_match('/verified a NEW device/iu', $d)) return "$u verified a new device and logged in.";
+    if (preg_match('/new device verification.*(failed|incorrect)/iu', $d)) return 'New device verification failed because of an incorrect verification code.';
+    if (preg_match('/^User \'([^\']*)\' logged in\b/iu', $d, $m)) return ucfirst($m[1]) . ' successfully logged in.';
+    if (preg_match('/^User \'([^\']*)\' logged out\b/iu', $d, $m)) return ucfirst($m[1]) . ' logged out.';
+    if (preg_match('/failed login attempt for username \'([^\']*)\'/iu', $d, $m)) return 'A login attempt for the account "' . $m[1] . '" failed because of incorrect login details.';
+    if (preg_match('/^User \'([^\']*)\' (.+)$/u', $d, $m)) $d = ucfirst($m[1]) . ' ' . $m[2];
+    $d = preg_replace('/^Admin \'([^\']*)\' /u', '$1 ', $d);
+    $d = preg_replace('/\bOTP\b/u', 'verification code', $d);
+    $d = preg_replace('/\s*\(payment carried forward, no new fee\)/u', '. The payment already made was carried forward.', $d);
+    $d = preg_replace('/\bFAILED\b/u', 'failed', $d);
+    $d = ucfirst($d);
+    if (!preg_match('/[.!?"”)]$/u', $d)) $d .= '.';
+    return $d;
+}
+function friendlyTarget($type, $id, $desc, $action) {
+    $desc = (string)$desc;
+    if (preg_match('/\b((?:HS|TOUR|FOOD|PKG|RE)-[A-Z0-9-]+)\b/', $desc, $m)) {
+        $ref = $m[1];
+        $label = ['HS' => 'House Booking', 'TOUR' => 'Tour Booking', 'FOOD' => 'Food Order', 'PKG' => 'Package Booking'][explode('-', $ref)[0]] ?? 'Booking';
+        return "$label $ref";
+    }
+    switch ($type) {
+        case 'user':
+            if (in_array($action, ['login', 'login_failed', 'logout', 'verify_device'], true)) return $action === 'logout' ? 'Account Logout' : ($action === 'verify_device' ? 'Device Verification' : 'Account Login');
+            if ($action === 'register') return 'New Account';
+            return 'User Account';
+        case 'house': return $id ? 'Unit ' . (int)$id : 'House';
+        case 'blocked_dates':
+            if (preg_match('/house #(\d+)/i', $desc, $m)) return 'Unit ' . $m[1] . ' availability';
+            return 'Blocked dates';
+        case 'booking': return 'Booking';
+        case 'house_booking': return 'House Booking';
+        case 'tour_booking': return 'Tour Booking';
+        case 'food_booking': return 'Food Order';
+        case 'package_booking': return 'Package Booking';
+        case 'package': return 'Package cart';
+        case 'activity': return preg_match('/activity:\s*([^(]+?)\s*(\(|$)/iu', $desc, $m) ? trim($m[1]) : 'Activity';
+        case 'overall_feedback': return 'Guest review';
+        case 'page': return 'Website page';
+        case 'site_content': return 'Website content';
+    }
+    return $type ? ucwords(str_replace('_', ' ', $type)) : null;
+}
+
 $base_qs = $_GET;
 unset($base_qs['page'], $base_qs['export']);
 ?>
@@ -183,7 +260,7 @@ unset($base_qs['page'], $base_qs['export']);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>System Logs - Admin</title>
+    <title>System Activity - Admin</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -428,225 +505,197 @@ unset($base_qs['page'], $base_qs['export']);
             .top-bar .page-title h1 .mobile-role-badge { font-size: 10px; padding: 3px 10px; }
         }
 
-        .page-title-banner { background: linear-gradient(135deg,#0B2447 0%,#0B3D91 50%,#4DA6D9 100%); border-radius: 20px; padding: 30px 35px; margin-bottom: 30px; color: white; box-shadow: 0 10px 30px rgba(11,36,71,0.15); position: relative; overflow: hidden; }
-        .page-title-banner::before { content: ''; position: absolute; top: -50%; right: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.05) 0%, transparent 70%); animation: rotate 20s linear infinite; }
-        @keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .page-title-banner .banner-content { position: relative; z-index: 1; }
-        .page-title-banner h1 { font-size: 28px; font-weight: 700; margin-bottom: 5px; }
-        .page-title-banner h1 i { margin-right: 10px; opacity: 0.9; }
-        .page-title-banner .underline { width: 60px; height: 3px; background: white; border-radius: 2px; margin-top: 8px; opacity: 0.5; }
-        .page-title-banner p { opacity: 0.85; font-size: 14px; margin: 8px 0 0 0; }
-
-        @media (max-width: 768px) {
-            .page-title-banner { padding: 20px; text-align: center; border-radius: 16px; }
-            .page-title-banner .underline { margin: 8px auto 0; }
-            .page-title-banner h1 { font-size: 22px; }
-        }
+        /* SECTION HEADER */
+        .section-header { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 18px; padding: 14px 18px; background: #fff; border: 1px solid #dce8f3; border-left: 4px solid #4DA6D9; border-radius: 14px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); }
+        .section-header .sh-icon { width: 40px; height: 40px; border-radius: 12px; background: #0B2447; color: #7bb8f0; display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0; }
+        .section-header h2 { font-size: 18px; font-weight: 700; color: #0B2447; margin: 0; line-height: 1.25; }
+        .section-header p { font-size: 13px; color: #4a6a8c; margin: 2px 0 0; line-height: 1.4; }
 
         /* STATS */
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: #4DA6D9; border-radius: 16px; padding: 22px 20px; color: white; box-shadow: 0 10px 30px rgba(77,166,217,0.2); border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s; }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77,166,217,0.3); }
-        .stat-icon { width: 48px; height: 48px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 8px; }
-        .stat-number { font-size: 28px; font-weight: 700; }
-        .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; }
-        .stat-small { font-size: 11px; color: rgba(255,255,255,0.85); margin-top: 6px; display: flex; align-items: center; gap: 4px; }
-
-        @media (max-width: 768px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-            .stat-card { padding: 16px 14px; border-radius: 12px; }
-            .stat-number { font-size: 22px; }
-            .stat-icon { width: 40px; height: 40px; font-size: 16px; margin-bottom: 6px; }
-            .stat-label { font-size: 11px; }
-            .stat-small { font-size: 10px; }
-        }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
+        .stat-card { position: relative; background: #fff; border: 1px solid #dce8f3; border-radius: 14px; padding: 18px 18px 14px; color: #0B2447; box-shadow: 0 2px 8px rgba(11,36,71,0.05); overflow: hidden; display: grid; grid-template-columns: auto minmax(0,1fr); column-gap: 14px; align-items: center; }
+        .stat-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: #4DA6D9; }
+        .stat-icon { grid-row: 1 / span 2; width: 46px; height: 46px; background: #eaf5fc; color: #2f8dc4; border: 1px solid #d5eaf7; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 19px; }
+        .stat-number { color: #0B2447; font-size: 28px; line-height: 1.1; font-weight: 800; letter-spacing: -0.5px; grid-column: 2; }
+        .stat-label { color: #163a63; font-size: 13px; font-weight: 600; grid-column: 2; }
+        .stat-small { grid-column: 1 / -1; font-size: 11.5px; color: #5d7388; margin-top: 12px; padding-top: 10px; border-top: 1px solid #edf3f8; display: flex; align-items: center; gap: 6px; }
+        .stat-small i { color: #4DA6D9; }
+        .stat-card.danger::before { background: #ef4444; }
+        .stat-card.danger .stat-icon { background: #fff1f2; color: #dc2626; border-color: #fecdd3; }
+        .stat-card.danger .stat-small i { color: #ef4444; }
+        @media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 768px) { .stats-grid { gap: 12px; } .stat-card { padding: 14px 14px 12px; column-gap: 12px; } .stat-icon { width: 40px; height: 40px; font-size: 16px; } .stat-number { font-size: 24px; } }
+        @media (max-width: 520px) { .stats-grid { grid-template-columns: 1fr; } }
 
         /* DASHBOARD GRID */
-        .dashboard-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 25px; margin-bottom: 30px; }
-        @media (max-width: 992px) { .dashboard-grid { grid-template-columns: 1fr; } }
+        .dashboard-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-bottom: 18px; align-items: start; }
+        .dashboard-grid > .card { margin-bottom: 0; }
+        @media (max-width: 992px) { .dashboard-grid { grid-template-columns: minmax(0, 1fr); } }
 
         /* CARD */
-        .card { background: white; border-radius: 20px; padding: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: 1px solid #e8f0fe; margin-bottom: 30px; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #e8f0fe; flex-wrap: wrap; gap: 15px; }
-        .card-header h2 { font-size: 17px; font-weight: 600; color: #0B2447; display: flex; align-items: center; gap: 10px; margin: 0; }
-        .card-header h2 i { color: #4DA6D9; background: #eef2ff; padding: 8px; border-radius: 8px; font-size: 14px; }
-        .card-header a { color: #4DA6D9; text-decoration: none; font-weight: 500; font-size: 13px; }
+        .card { background: #fff; border-radius: 14px; padding: 18px 20px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); border: 1px solid #dce8f3; margin-bottom: 18px; min-width: 0; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #e8f0fe; flex-wrap: wrap; gap: 10px; }
+        .card-header h2 { font-size: 16px; font-weight: 700; color: #0B2447; display: flex; align-items: center; gap: 10px; margin: 0; }
+        .card-header h2 i { color: #2f8dc4; background: #eaf5fc; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; font-size: 13px; }
+        .card-header a { color: #1f78ad; text-decoration: none; font-weight: 600; font-size: 13px; }
         .card-header a:hover { text-decoration: underline; }
-
-        @media (max-width: 768px) {
-            .card { padding: 18px 15px; border-radius: 14px; }
-            .card-header { flex-direction: column; align-items: stretch; gap: 10px; }
-            .card-header h2 { font-size: 15px; }
-            .card-header h2 i { padding: 6px; font-size: 12px; }
-        }
+        @media (max-width: 768px) { .card { padding: 14px; } .card-header h2 { font-size: 15px; } }
 
         /* MODULE BREAKDOWN */
-        .module-breakdown { display: flex; flex-direction: column; gap: 12px; }
-        .module-row { display: flex; align-items: center; gap: 12px; }
-        .module-row .module-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-        .module-row .module-name { font-weight: 600; color: #1e293b; font-size: 13px; min-width: 90px; text-transform: capitalize; }
-        .module-row .module-bar-wrap { flex: 1; height: 8px; background: #f1f5f9; border-radius: 10px; overflow: hidden; }
-        .module-row .module-bar { height: 100%; border-radius: 10px; transition: width 0.5s; }
-        .module-row .module-count { font-weight: 700; color: #0B2447; font-size: 13px; min-width: 40px; text-align: right; }
+        .module-breakdown { display: flex; flex-direction: column; gap: 10px; }
+        .module-row { display: grid; grid-template-columns: 10px minmax(70px, 110px) minmax(0, 1fr) 44px; align-items: center; gap: 10px; }
+        .module-row .module-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .module-row .module-name { font-weight: 600; color: #1e293b; font-size: 13px; text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .module-row .module-bar-wrap { height: 8px; background: #eef3f8; border-radius: 10px; overflow: hidden; }
+        .module-row .module-bar { height: 100%; border-radius: 10px; }
+        .module-row .module-count { font-weight: 700; color: #0B2447; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
 
         /* ALERT LIST */
-        .alert-list { display: flex; flex-direction: column; gap: 10px; }
-        .alert-item { display: flex; align-items: center; gap: 12px; padding: 12px 15px; background: #f8fafc; border-radius: 10px; border-left: 3px solid; }
+        .alert-list { display: flex; flex-direction: column; gap: 8px; }
+        .alert-item { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 9px 12px; background: #f8fafc; border-radius: 10px; border-left: 3px solid; }
         .alert-item.warning { border-left-color: #f59e0b; background: #fffbeb; }
         .alert-item.danger { border-left-color: #ef4444; background: #fef2f2; }
-        .alert-item .alert-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; color: white; flex-shrink: 0; }
-        .alert-item .alert-content { flex: 1; min-width: 0; }
-        .alert-item .alert-title { font-weight: 600; color: #1e293b; font-size: 13px; }
-        .alert-item .alert-sub { font-size: 11px; color: #64748b; margin-top: 2px; }
-        .alert-item .alert-time { font-size: 11px; color: #94a3b8; flex-shrink: 0; }
-        .no-alerts { text-align: center; padding: 30px 15px; color: #94a3b8; font-size: 13px; }
-        .no-alerts i { font-size: 32px; color: #10b981; display: block; margin-bottom: 8px; }
+        .alert-item .alert-icon { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #fff; }
+        .alert-item .alert-content { min-width: 0; }
+        .alert-item .alert-title { font-weight: 600; color: #1e293b; font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+        .alert-item .alert-sub { font-size: 11.5px; color: #5b6b7e; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .alert-item .alert-sub i { font-size: 10px; opacity: .7; }
+        .alert-item .alert-time { font-size: 11.5px; color: #5b6b7e; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+        .no-alerts { text-align: center; padding: 22px 15px; color: #64748b; font-size: 13px; }
+        .no-alerts i { font-size: 28px; color: #10b981; display: block; margin-bottom: 8px; }
 
         /* FILTER */
-        .filter-bar {
-            display: grid;
-            grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr 1fr;
-            gap: 10px;
-            align-items: end;
-            margin-bottom: 15px;
-        }
-        .filter-group { display: flex; flex-direction: column; gap: 4px; }
-        .filter-group label { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.3px; }
-        .filter-bar input, .filter-bar select {
-            padding: 9px 12px;
-            border: 2px solid #e8f0fe;
-            border-radius: 8px;
-            font-size: 13px;
-            background: #fafafa;
-            width: 100%;
-            font-family: inherit;
-        }
-        .filter-bar input:focus, .filter-bar select:focus { outline: none; border-color: #4DA6D9; background: white; }
+        .filter-bar { display: grid; grid-template-columns: minmax(0, 2fr) repeat(5, minmax(0, 1fr)); gap: 12px; align-items: end; margin-bottom: 14px; }
+        .filter-group { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+        .filter-group label { font-size: 11px; font-weight: 700; color: #4a6a8c; text-transform: uppercase; letter-spacing: 0.4px; }
+        .filter-bar input, .filter-bar select { padding: 0 12px; height: 42px; border: 1px solid #c9d9e8; border-radius: 10px; font-size: 14px; color: #0B2447; background: #fff; width: 100%; min-width: 0; font-family: inherit; }
+        .filter-bar input::placeholder { color: #7a8ca0; }
+        .filter-bar input:hover, .filter-bar select:hover { border-color: #9fc3dd; }
+        .filter-bar input:focus, .filter-bar select:focus { outline: 3px solid rgba(77,166,217,0.35); outline-offset: 0; border-color: #4DA6D9; }
 
-        .filter-actions {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-bottom: 20px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid #f1f5f9;
-            align-items: center;
-        }
-        .btn-filter {
-            padding: 10px 18px;
-            background: #4DA6D9;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            transition: all 0.2s;
-        }
-        .btn-filter:hover { background: #3a8bbf; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(77,166,217,0.3); }
-        .btn-clear {
-            padding: 10px 14px;
-            background: #64748b;
-            color: white;
-            border-radius: 8px;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .btn-clear:hover { background: #475569; color: white; transform: translateY(-2px); }
-        .btn-export {
-            padding: 10px 18px;
-            background: #10b981;
-            color: white;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            margin-left: auto;
-            transition: all 0.2s;
-        }
-        .btn-export:hover { background: #059669; color: white; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(16,185,129,0.3); }
+        .filter-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #e8f0fe; align-items: center; }
+        .btn-filter, .btn-clear, .btn-export { min-height: 42px; padding: 0 18px; border-radius: 10px; font-weight: 600; font-size: 14px; font-family: inherit; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; border: 1px solid transparent; transition: background .15s, border-color .15s; }
+        .btn-filter { background: #2f8dc4; color: #fff; }
+        .btn-filter:hover { background: #247aab; }
+        .btn-clear { background: #fff; color: #334e68; border-color: #c9d9e8; }
+        .btn-clear:hover { background: #f0f7fb; border-color: #9fc3dd; }
+        .btn-export { background: #0f8a5f; color: #fff; margin-left: auto; }
+        .btn-export:hover { background: #0b7350; color: #fff; }
+        .btn-filter:focus-visible, .btn-clear:focus-visible, .btn-export:focus-visible, .pagination a:focus-visible { outline: 3px solid rgba(77,166,217,0.5); outline-offset: 2px; }
 
-        @media (max-width: 992px) { .filter-bar { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 1360px) { .filter-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); } .filter-group:first-child { grid-column: 1 / -1; } }
+        @media (max-width: 640px) { .filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (max-width: 480px) {
-            .filter-bar { grid-template-columns: 1fr; }
-            .filter-actions { flex-direction: column; align-items: stretch; }
-            .filter-actions .btn-filter,
-            .filter-actions .btn-clear,
-            .filter-actions .btn-export { justify-content: center; width: 100%; margin-left: 0; }
+            .filter-bar { grid-template-columns: minmax(0, 1fr); }
+            .filter-actions { display: grid; grid-template-columns: 1fr 1fr; }
+            .btn-filter, .btn-export { grid-column: 1 / -1; }
+            .btn-export { margin-left: 0; }
         }
 
-        /* TABLE */
-        .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 12px; border: 1px solid #e8f0fe; }
-        table { width: 100%; border-collapse: collapse; min-width: 900px; }
-        thead th { text-align: left; padding: 12px 14px; background: #f8fafc; color: #0B2447; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; border-bottom: 2px solid #e8f0fe; }
-        tbody td { padding: 12px 14px; border-bottom: 1px solid #e8f0fe; color: #475569; font-size: 13px; vertical-align: middle; }
+        /* TABLE (desktop) */
+        .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 12px; border: 1px solid #dce8f3; }
+        table { width: 100%; border-collapse: collapse; }
+        thead th { text-align: left; padding: 12px 10px; background: #0B2447; color: #e6f2fb; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+        tbody td { padding: 12px 10px; border-bottom: 1px solid #e8f0fe; color: #475569; font-size: 13px; vertical-align: middle; }
+        tbody tr:nth-child(even) td { background: #fafcfe; }
         tbody tr:last-child td { border-bottom: none; }
-        tbody tr:hover { background: #f8fafc; }
+        tbody tr:hover td { background: #eef6fc; }
+        tbody td strong { color: #0B2447; font-weight: 600; }
+        .log-icon { display: inline-flex; width: 34px; height: 34px; border-radius: 10px; align-items: center; justify-content: center; color: #fff; font-size: 14px; flex-shrink: 0; }
+        .log-desc { min-width: 180px; max-width: 340px; overflow-wrap: anywhere; line-height: 1.45; color: #0B2447; font-weight: 500; }
+        .log-meta { font-size: 11.5px; color: #64748b; margin-top: 3px; text-transform: capitalize; }
+        .log-date { font-weight: 600; color: #0B2447; font-size: 13px; white-space: nowrap; }
+        .log-time { font-size: 12px; color: #5b6b7e; margin-top: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .log-ip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: #64748b; background: #f3f6f9; padding: 2px 6px; border-radius: 6px; white-space: nowrap; }
+        .no-target { color: #94a3b8; }
 
-        .log-icon { display: inline-flex; width: 34px; height: 34px; border-radius: 8px; align-items: center; justify-content: center; color: white; font-size: 14px; flex-shrink: 0; }
-        .log-desc { max-width: 380px; word-wrap: break-word; line-height: 1.4; }
-        .log-meta { font-size: 11px; color: #94a3b8; margin-top: 3px; }
-
-        /* MOBILE LOG CARDS */
-        .logs-cards-mobile { display: none; flex-direction: column; gap: 12px; }
+        /* MOBILE LOG CARDS (phones only; table is used on tablet and desktop) */
+        .logs-cards-mobile { display: none; }
         @media (min-width: 769px) { .logs-cards-mobile { display: none !important; } }
         @media (max-width: 768px) {
             .table-responsive.desktop-table { display: none !important; }
-            .logs-cards-mobile { display: flex; }
+            .logs-cards-mobile { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 12px; }
         }
-
-        .log-card-mobile { background: white; border-radius: 14px; padding: 14px; border: 1px solid #e8f0fe; box-shadow: 0 4px 12px rgba(0,0,0,0.04); display: flex; flex-direction: column; gap: 10px; }
-        .log-card-mobile .card-top-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-        .log-card-mobile .card-icon-wrap { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-        .log-card-mobile .card-icon-wrap .log-icon { width: 38px; height: 38px; font-size: 15px; }
-        .log-card-mobile .card-action-label { font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.3px; }
-        .log-card-mobile .card-desc { font-weight: 600; color: #0B2447; font-size: 12.5px; line-height: 1.4; word-break: break-word; }
-        .log-card-mobile .card-badges { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; flex-shrink: 0; }
+        /* Compact table for tablet / small laptop */
+        @media (max-width: 1280px) {
+            thead th { padding: 10px 8px; font-size: 10.5px; letter-spacing: .3px; }
+            tbody td { padding: 10px 8px; font-size: 12.5px; }
+            .act-cell { flex-direction: column; align-items: flex-start; gap: 4px; }
+            .act-name { font-size: 11.5px; }
+            .log-desc { min-width: 150px; max-width: 260px; }
+            .badge { font-size: 9.5px; padding: 3px 8px; white-space: normal; }
+            .log-icon { width: 30px; height: 30px; font-size: 12px; }
+            .btn-details { width: 34px; height: 34px; }
+        }
+        @media (max-width: 1100px) { .table-responsive.desktop-table table { min-width: 700px; } }
+        .log-card-mobile { background: #fff; border-radius: 12px; padding: 12px 14px; border: 1px solid #dce8f3; box-shadow: 0 1px 4px rgba(11,36,71,0.05); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+        .log-card-mobile .card-top-row { display: flex; gap: 10px; }
+        .log-card-mobile .card-icon-wrap { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-width: 0; }
+        .log-card-mobile .card-icon-wrap .log-icon { width: 34px; height: 34px; font-size: 14px; }
+        .log-card-mobile .card-action-label { font-size: 11px; font-weight: 700; color: #4a6a8c; text-transform: uppercase; letter-spacing: 0.4px; }
+        .log-card-mobile .card-desc { font-weight: 600; color: #0B2447; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+        .log-card-mobile .card-badges { display: flex; gap: 6px; flex-wrap: wrap; }
         .log-card-mobile .card-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #475569; }
-        .log-card-mobile .card-row i { width: 16px; color: #4DA6D9; flex-shrink: 0; text-align: center; font-size: 11px; }
-        .log-card-mobile .card-row .card-label { color: #94a3b8; font-size: 10px; font-weight: 700; min-width: 52px; text-transform: uppercase; letter-spacing: 0.3px; }
-        .log-card-mobile .card-row .card-value { font-weight: 600; color: #0B2447; word-break: break-word; flex: 1; min-width: 0; }
+        .log-card-mobile .card-row i { width: 14px; color: #4DA6D9; flex-shrink: 0; text-align: center; font-size: 11px; }
+        .log-card-mobile .card-row .card-label { color: #5b6b7e; font-size: 10.5px; font-weight: 700; min-width: 44px; text-transform: uppercase; letter-spacing: 0.3px; }
+        .log-card-mobile .card-row .card-value { font-weight: 600; color: #0B2447; overflow-wrap: anywhere; flex: 1; min-width: 0; }
+        .log-card-mobile .card-row .card-value.secondary { font-weight: 500; color: #5b6b7e; }
 
         /* BADGES */
-        .badge { padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
-        .badge-success { background: #e6f7e6; color: #10b981; }
-        .badge-danger  { background: #fee2e2; color: #ef4444; }
-        .badge-warning { background: #fef3c7; color: #f59e0b; }
-        .badge-info    { background: #dbeafe; color: #3b82f6; }
-        .badge-module  { background: #eef2ff; color: #4DA6D9; }
-        .badge-role-admin { background: #fee2e2; color: #ef4444; }
-        .badge-role-staff { background: #fef3c7; color: #f59e0b; }
-        .badge-role-guest { background: #e6f7e6; color: #10b981; }
+        .badge { padding: 3px 10px; border-radius: 20px; font-size: 10.5px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+        .badge-success { background: #dcfce7; color: #047857; }
+        .badge-danger  { background: #fee2e2; color: #b91c1c; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .badge-info    { background: #e0efff; color: #1d4ed8; text-transform: none; letter-spacing: 0; }
+        .badge-module  { background: #e6f3fb; color: #1f6f9f; }
+        .badge-role-admin { background: #fee2e2; color: #b91c1c; }
+        .badge-role-staff { background: #fef3c7; color: #92400e; }
+        .badge-role-guest { background: #dcfce7; color: #047857; }
 
         /* EMPTY */
-        .empty-state { text-align: center; padding: 60px 20px; color: #94a3b8; }
-        .empty-state i { font-size: 48px; margin-bottom: 15px; color: #cbd5e1; display: block; }
+        .empty-state { text-align: center; padding: 50px 20px; color: #64748b; }
+        .empty-state i { font-size: 40px; margin-bottom: 12px; color: #cbd5e1; display: block; }
 
         /* PAGINATION */
-        .pagination-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; flex-wrap: wrap; gap: 10px; }
-        .pagination-info { font-size: 13px; color: #64748b; }
-        .pagination { display: flex; gap: 5px; flex-wrap: wrap; }
-        .pagination a, .pagination span { padding: 6px 12px; border-radius: 8px; text-decoration: none; font-size: 13px; font-weight: 600; border: 1px solid #e8f0fe; color: #475569; }
-        .pagination a:hover { background: #4DA6D9; color: white; border-color: #4DA6D9; }
-        .pagination .active { background: #4DA6D9; color: white; border-color: #4DA6D9; }
-        .pagination .disabled { opacity: 0.4; cursor: not-allowed; }
-
-        @media (max-width: 480px) {
-            .pagination-info { width: 100%; text-align: center; }
-            .pagination { justify-content: center; width: 100%; }
-            .pagination a, .pagination span { padding: 5px 9px; font-size: 11px; }
+        .pagination-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 14px; border-top: 1px solid #e8f0fe; flex-wrap: wrap; gap: 10px 16px; }
+        .pagination-info { font-size: 13px; color: #4a6a8c; }
+        .pagination-info strong { color: #0B2447; }
+        .pagination { display: flex; gap: 6px; flex-wrap: wrap; }
+        .pagination a, .pagination span { min-width: 38px; min-height: 38px; padding: 0 12px; border-radius: 10px; text-decoration: none; font-size: 13px; font-weight: 600; border: 1px solid #c9d9e8; color: #334e68; background: #fff; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+        .pagination a:hover { background: #eaf5fc; border-color: #4DA6D9; color: #0B2447; }
+        .pagination .active { background: #2f8dc4; color: #fff; border-color: #2f8dc4; }
+        .pagination .disabled { opacity: 0.45; cursor: not-allowed; background: #f6f9fc; }
+        @media (max-width: 640px) {
+            .pagination-wrap { flex-direction: column; align-items: stretch; text-align: center; }
+            .pagination { justify-content: center; }
+            .pagination a, .pagination span { min-width: 36px; padding: 0 10px; }
         }
+        @media (max-width: 360px) { .pagination a, .pagination span { min-width: 34px; padding: 0 8px; font-size: 12px; } .pagination { gap: 4px; } }
+
+
+        /* DETAILS (friendly view) */
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+        .act-cell { display: flex; align-items: center; gap: 8px; }
+        .act-name { line-height: 1.25; text-align: left; }
+        .act-cell { text-align: left; }
+        .act-name { font-weight: 600; color: #0B2447; font-size: 13px; }
+        .item-text { color: #0B2447; font-weight: 500; overflow-wrap: anywhere; }
+        .btn-details { width: 38px; height: 38px; flex-shrink: 0; border: 1px solid #c9d9e8; background: #fff; color: #2f8dc4; border-radius: 10px; cursor: pointer; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; }
+        .btn-details:hover { background: #eaf5fc; border-color: #4DA6D9; }
+        .btn-details:focus-visible, .detail-close:focus-visible { outline: 3px solid rgba(77,166,217,0.5); outline-offset: 2px; }
+        .detail-overlay { position: fixed; inset: 0; background: rgba(11,36,71,0.55); z-index: 99998; display: flex; align-items: center; justify-content: center; padding: 16px; }
+        .detail-overlay[hidden] { display: none; }
+        .detail-modal { background: #fff; border-radius: 16px; width: 100%; max-width: 520px; max-height: calc(100vh - 32px); overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); border-top: 4px solid #4DA6D9; padding: 18px 20px; }
+        .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #e8f0fe; }
+        .detail-head h3 { font-size: 16px; font-weight: 700; color: #0B2447; margin: 0; display: flex; align-items: center; gap: 8px; }
+        .detail-head h3 i { color: #2f8dc4; }
+        .detail-close { width: 38px; height: 38px; border: none; background: #f0f7fb; color: #334e68; border-radius: 10px; font-size: 22px; line-height: 1; cursor: pointer; }
+        .detail-close:hover { background: #e0eef8; }
+        .detail-list { display: grid; grid-template-columns: minmax(90px, 130px) minmax(0, 1fr); gap: 8px 14px; margin: 0; }
+        .detail-list dt { font-size: 11px; font-weight: 700; color: #4a6a8c; text-transform: uppercase; letter-spacing: .4px; padding-top: 2px; }
+        .detail-list dd { margin: 0; font-size: 13.5px; color: #0B2447; overflow-wrap: anywhere; }
+        .detail-note { margin: 14px 0 0; font-size: 11.5px; color: #5b6b7e; }
+        @media (max-width: 480px) { .detail-list { grid-template-columns: minmax(0, 1fr); gap: 2px; } .detail-list dd { margin-bottom: 8px; } }
 
         /* FOOTER */
         .footer { background: #0B2447; color: #b3d9ff; padding: 15px 0; text-align: center; margin-top: 30px; border-radius: 12px; font-size: 13px; border: 1px solid rgba(77,166,217,0.15); }
@@ -773,7 +822,7 @@ unset($base_qs['page'], $base_qs['export']);
         <div class="top-bar">
             <div class="page-title">
                 <h1>
-                    <i class="fas fa-history"></i> System Logs
+                    <i class="fas fa-history"></i> System Activity
 
                     <span class="mobile-role-badge admin">
                         <i class="fas fa-crown"></i> Admin
@@ -787,7 +836,7 @@ unset($base_qs['page'], $base_qs['export']);
                         <?php endif; ?>
                     </span>
                 </h1>
-                <p>Complete audit trail of all system activity</p>
+                <p>Monitor important actions, security events, and changes in the reservation system.</p>
             </div>
 
             <div class="user-profile">
@@ -805,11 +854,11 @@ unset($base_qs['page'], $base_qs['export']);
             </div>
         </div>
 
-        <div class="page-title-banner">
-            <div class="banner-content">
-                <h1><i class="fas fa-history"></i> System Logs Dashboard</h1>
-                <div class="underline"></div>
-                <p>Track every action performed across the system — who did what, when, and from where.</p>
+        <div class="section-header">
+            <div class="sh-icon"><i class="fas fa-history"></i></div>
+            <div>
+                <h2>Activity Overview</h2>
+                <p>Recent activity, alerts and the full activity log.</p>
             </div>
         </div>
 
@@ -832,12 +881,12 @@ unset($base_qs['page'], $base_qs['export']);
                 <div class="stat-label">Last 7 Days</div>
                 <div class="stat-small"><i class="fas fa-chart-line"></i> Recent activity</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-icon"><i class="fas fa-exclamation-triangle"></i></div>
-                <div class="stat-number"><?php echo number_format($stats['failed']); ?></div>
-                <div class="stat-label">Failed Actions</div>
-                <div class="stat-small"><i class="fas fa-shield-alt"></i> <?php echo $failed_logins_24h; ?> failed logins (24h)</div>
-            </div>
+            <div class="stat-card danger">
+    <div class="stat-icon"><i class="fas fa-exclamation-triangle"></i></div>
+    <div class="stat-number"><?php echo number_format($stats['failed']); ?></div>
+    <div class="stat-label">Failed Actions</div>
+    <div class="stat-small"><i class="fas fa-shield-alt"></i> <?php echo $failed_logins_24h; ?> failed logins (24h)</div>
+</div>
         </div>
 
         <div class="dashboard-grid">
@@ -893,10 +942,10 @@ unset($base_qs['page'], $base_qs['export']);
                             <i class="fas <?php echo $ic; ?>"></i>
                         </div>
                         <div class="alert-content">
-                            <div class="alert-title"><?php echo htmlspecialchars(mb_substr($a['description'], 0, 60)) . (mb_strlen($a['description']) > 60 ? '...' : ''); ?></div>
+                            <div class="alert-title"><?php echo htmlspecialchars(mb_substr(friendlyDescription($a['description'], $a['action'], $a['username'] ?? null), 0, 70)) . (mb_strlen(friendlyDescription($a['description'], $a['action'], $a['username'] ?? null)) > 70 ? '...' : ''); ?></div>
                             <div class="alert-sub">
                                 <i class="fas fa-user"></i> <?php echo htmlspecialchars($a['username'] ?? 'System'); ?>
-                                · <i class="fas fa-tag"></i> <?php echo htmlspecialchars($a['module']); ?>
+                                · <i class="fas fa-tag"></i> <?php echo htmlspecialchars(friendlyArea($a['module'])); ?>
                             </div>
                         </div>
                         <div class="alert-time">
@@ -929,32 +978,32 @@ unset($base_qs['page'], $base_qs['export']);
                 <div class="filter-bar">
                     <div class="filter-group">
                         <label for="filter_search">Search</label>
-                        <input type="text" id="filter_search" name="search" placeholder="Description, user, IP..." value="<?php echo htmlspecialchars($search); ?>">
+                        <input type="text" id="filter_search" name="search" placeholder="Search activity or person..." value="<?php echo htmlspecialchars($search); ?>">
                     </div>
                     <div class="filter-group">
-                        <label for="filter_module">Module</label>
+                        <label for="filter_module">Area</label>
                         <select id="filter_module" name="module">
-                            <option value="all">All Modules</option>
+                            <option value="all">All Areas</option>
                             <?php foreach($modules as $m): ?>
                                 <option value="<?php echo htmlspecialchars($m); ?>" <?php echo $module === $m ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars(ucfirst($m)); ?>
+                                    <?php echo htmlspecialchars(friendlyArea($m)); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                     <div class="filter-group">
-                        <label for="filter_action">Action</label>
+                        <label for="filter_action">Activity</label>
                         <select id="filter_action" name="action">
-                            <option value="all">All Actions</option>
+                            <option value="all">All Activities</option>
                             <?php foreach($actions as $a): ?>
                                 <option value="<?php echo htmlspecialchars($a); ?>" <?php echo $action === $a ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars(str_replace('_', ' ', ucfirst($a))); ?>
+                                    <?php echo htmlspecialchars(friendlyAction($a)); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                     <div class="filter-group">
-                        <label for="filter_status">Status</label>
+                        <label for="filter_status">Result</label>
                         <select id="filter_status" name="status">
                             <option value="all" <?php echo $status === 'all' ? 'selected' : ''; ?>>All</option>
                             <option value="success" <?php echo $status === 'success' ? 'selected' : ''; ?>>Success</option>
@@ -995,53 +1044,61 @@ unset($base_qs['page'], $base_qs['export']);
                 <table>
                     <thead>
                         <tr>
-                            <th style="width: 60px;">Type</th>
-                            <th>Description</th>
-                            <th>User</th>
-                            <th>Module</th>
-                            <th>Target</th>
-                            <th>IP</th>
-                            <th>Status</th>
-                            <th>Date/Time</th>
+                            <th style="width: 130px;">Activity</th>
+                            <th>What Happened</th>
+                            <th>Performed By</th>
+                            <th>Area</th>
+                            <th>Affected Item</th>
+                            <th>Result</th>
+                            <th>When</th>
+                            <th style="width: 44px;"><span class="sr-only">Details</span></th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach($logs as $log):
                             [$icon, $color] = actionIcon($log['action']);
+                            $f_desc = friendlyDescription($log['description'], $log['action'], $log['username'] ?? null);
+                            $f_target = friendlyTarget($log['target_type'], $log['target_id'], $log['description'], $log['action']);
+                            $f_detail = htmlspecialchars(json_encode([
+                                'Activity' => friendlyAction($log['action']),
+                                'Action code' => $log['action'],
+                                'Area' => friendlyArea($log['module']) . ' (' . $log['module'] . ')',
+                                'What happened' => $f_desc,
+                                'Performed by' => ($log['username'] ?? 'System') . ($log['role'] ? ' (' . ucfirst($log['role']) . ')' : ''),
+                                'Affected item' => $f_target ?? '—',
+                                'Target ID' => ($log['target_type'] ? $log['target_type'] : '—') . ($log['target_id'] ? ' #' . (int)$log['target_id'] : ''),
+                                'Result' => ucfirst($log['status']),
+                                'Full timestamp' => date('l, F j, Y \a\t h:i:s A', strtotime($log['created_at'])),
+                            ], JSON_UNESCAPED_UNICODE | JSON_HEX_APOS), ENT_QUOTES);
                         ?>
                         <tr>
                             <td>
-                                <div class="log-icon" style="background: <?php echo $color; ?>;">
-                                    <i class="fas <?php echo $icon; ?>"></i>
+                                <div class="act-cell">
+                                    <div class="log-icon" style="background: <?php echo $color; ?>;">
+                                        <i class="fas <?php echo $icon; ?>"></i>
+                                    </div>
+                                    <span class="act-name"><?php echo htmlspecialchars(friendlyAction($log['action'])); ?></span>
                                 </div>
                             </td>
-                            <td>
-                                <div class="log-desc"><?php echo htmlspecialchars($log['description']); ?></div>
-                                <div class="log-meta"><i class="fas fa-tag"></i> <?php echo htmlspecialchars(str_replace('_', ' ', $log['action'])); ?></div>
-                            </td>
+                            <td><div class="log-desc"><?php echo htmlspecialchars($f_desc); ?></div></td>
                             <td>
                                 <strong><?php echo htmlspecialchars($log['username'] ?? 'System'); ?></strong>
                                 <div class="log-meta"><?php echo roleBadge($log['role']); ?></div>
                             </td>
-                            <td><span class="badge badge-module"><?php echo htmlspecialchars($log['module']); ?></span></td>
+                            <td><span class="badge badge-module"><?php echo htmlspecialchars(friendlyArea($log['module'])); ?></span></td>
                             <td>
-                                <?php if($log['target_type']): ?>
-                                    <span class="badge badge-info">
-                                        <?php echo htmlspecialchars($log['target_type']); ?>
-                                        <?php if($log['target_id']): ?> #<?php echo (int)$log['target_id']; ?><?php endif; ?>
-                                    </span>
+                                <?php if($f_target): ?>
+                                    <span class="item-text"><?php echo htmlspecialchars($f_target); ?></span>
                                 <?php else: ?>
-                                    <span style="color:#cbd5e1;">—</span>
+                                    <span class="no-target">—</span>
                                 <?php endif; ?>
                             </td>
-                            <td><code style="font-size: 11px;"><?php echo htmlspecialchars($log['ip_address'] ?? '—'); ?></code></td>
                             <td><?php echo statusBadge($log['status']); ?></td>
                             <td>
-                                <div style="font-weight: 600; color: #0B2447; font-size: 12px;">
-                                    <?php echo date('M d, Y', strtotime($log['created_at'])); ?>
-                                </div>
-                                <div class="log-meta"><?php echo date('h:i:s A', strtotime($log['created_at'])); ?></div>
+                                <div class="log-date"><?php echo date('M d, Y', strtotime($log['created_at'])); ?></div>
+                                <div class="log-time"><?php echo date('h:i A', strtotime($log['created_at'])); ?></div>
                             </td>
+                            <td><button type="button" class="btn-details" data-detail="<?php echo $f_detail; ?>" aria-label="View details" title="View details"><i class="fas fa-eye"></i></button></td>
                         </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -1059,6 +1116,21 @@ unset($base_qs['page'], $base_qs['export']);
                     <?php foreach($logs as $log):
                         [$icon, $color] = actionIcon($log['action']);
                     ?>
+                    <?php
+                        $f_desc = friendlyDescription($log['description'], $log['action'], $log['username'] ?? null);
+                        $f_target = friendlyTarget($log['target_type'], $log['target_id'], $log['description'], $log['action']);
+                        $f_detail = htmlspecialchars(json_encode([
+                            'Activity' => friendlyAction($log['action']),
+                            'Action code' => $log['action'],
+                            'Area' => friendlyArea($log['module']) . ' (' . $log['module'] . ')',
+                            'What happened' => $f_desc,
+                            'Performed by' => ($log['username'] ?? 'System') . ($log['role'] ? ' (' . ucfirst($log['role']) . ')' : ''),
+                            'Affected item' => $f_target ?? '—',
+                            'Target ID' => ($log['target_type'] ? $log['target_type'] : '—') . ($log['target_id'] ? ' #' . (int)$log['target_id'] : ''),
+                            'Result' => ucfirst($log['status']),
+                            'Full timestamp' => date('l, F j, Y \a\t h:i:s A', strtotime($log['created_at'])),
+                        ], JSON_UNESCAPED_UNICODE | JSON_HEX_APOS), ENT_QUOTES);
+                    ?>
                     <div class="log-card-mobile">
                         <div class="card-top-row">
                             <div class="card-icon-wrap">
@@ -1066,42 +1138,32 @@ unset($base_qs['page'], $base_qs['export']);
                                     <i class="fas <?php echo $icon; ?>"></i>
                                 </div>
                                 <div style="flex: 1; min-width: 0;">
-                                    <div class="card-action-label"><?php echo htmlspecialchars(str_replace('_', ' ', $log['action'])); ?></div>
-                                    <div class="card-desc"><?php echo htmlspecialchars($log['description']); ?></div>
+                                    <div class="card-action-label"><?php echo htmlspecialchars(friendlyAction($log['action'])); ?></div>
+                                    <div class="card-desc"><?php echo htmlspecialchars($f_desc); ?></div>
                                 </div>
                             </div>
+                            <button type="button" class="btn-details" data-detail="<?php echo $f_detail; ?>" aria-label="View details" title="View details"><i class="fas fa-eye"></i></button>
                         </div>
 
-                        <div class="card-badges" style="justify-content: flex-start;">
+                        <div class="card-badges">
                             <?php echo statusBadge($log['status']); ?>
-                            <span class="badge badge-module"><?php echo htmlspecialchars($log['module']); ?></span>
+                            <span class="badge badge-module"><?php echo htmlspecialchars(friendlyArea($log['module'])); ?></span>
                         </div>
 
                         <div class="card-row">
                             <i class="fas fa-user"></i>
-                            <span class="card-label">User</span>
+                            <span class="card-label">By</span>
                             <span class="card-value">
                                 <?php echo htmlspecialchars($log['username'] ?? 'System'); ?>
                                 <?php echo roleBadge($log['role']); ?>
                             </span>
                         </div>
 
-                        <?php if($log['target_type']): ?>
+                        <?php if($f_target): ?>
                         <div class="card-row">
                             <i class="fas fa-crosshairs"></i>
-                            <span class="card-label">Target</span>
-                            <span class="card-value">
-                                <?php echo htmlspecialchars($log['target_type']); ?>
-                                <?php if($log['target_id']): ?> #<?php echo (int)$log['target_id']; ?><?php endif; ?>
-                            </span>
-                        </div>
-                        <?php endif; ?>
-
-                        <?php if(!empty($log['ip_address'])): ?>
-                        <div class="card-row">
-                            <i class="fas fa-network-wired"></i>
-                            <span class="card-label">IP</span>
-                            <span class="card-value"><code style="font-size: 11px;"><?php echo htmlspecialchars($log['ip_address']); ?></code></span>
+                            <span class="card-label">Item</span>
+                            <span class="card-value"><?php echo htmlspecialchars($f_target); ?></span>
                         </div>
                         <?php endif; ?>
 
@@ -1110,7 +1172,7 @@ unset($base_qs['page'], $base_qs['export']);
                             <span class="card-label">When</span>
                             <span class="card-value">
                                 <?php echo date('M d, Y', strtotime($log['created_at'])); ?>
-                                · <?php echo date('h:i:s A', strtotime($log['created_at'])); ?>
+                                · <?php echo date('h:i A', strtotime($log['created_at'])); ?>
                             </span>
                         </div>
                     </div>
@@ -1172,13 +1234,24 @@ unset($base_qs['page'], $base_qs['export']);
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Huddled Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Hundred Islands Reservation System. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i> Administrator Access
                 </span>
             </p>
         </div>
+    </div>
+</div>
+
+<div class="detail-overlay" id="detailModal" role="dialog" aria-modal="true" aria-labelledby="detailTitle" hidden>
+    <div class="detail-modal">
+        <div class="detail-head">
+            <h3 id="detailTitle"><i class="fas fa-circle-info"></i> Activity Details</h3>
+            <button type="button" class="detail-close" id="detailClose" aria-label="Close">&times;</button>
+        </div>
+        <dl class="detail-list" id="detailList"></dl>
+        <p class="detail-note">Technical details are shown for administrators only.</p>
     </div>
 </div>
 
@@ -1236,6 +1309,26 @@ document.addEventListener('DOMContentLoaded', function() {
     const modal = document.getElementById('logoutModal');
     if (modal) modal.addEventListener('click', function(e) { if (e.target === this) closeLogoutModal(); });
 });
+
+    (function () {
+        var modal = document.getElementById('detailModal'), list = document.getElementById('detailList'), lastBtn = null;
+        if (!modal) return;
+        function closeDetail() { modal.hidden = true; if (lastBtn) lastBtn.focus(); }
+        document.addEventListener('click', function (e) {
+            var b = e.target.closest('.btn-details');
+            if (b) {
+                var d = {}; try { d = JSON.parse(b.getAttribute('data-detail')) || {}; } catch (x) {}
+                list.innerHTML = '';
+                Object.keys(d).forEach(function (k) {
+                    var dt = document.createElement('dt'), dd = document.createElement('dd');
+                    dt.textContent = k; dd.textContent = d[k]; list.appendChild(dt); list.appendChild(dd);
+                });
+                lastBtn = b; modal.hidden = false; document.getElementById('detailClose').focus(); return;
+            }
+            if (e.target === modal || e.target.closest('#detailClose')) closeDetail();
+        });
+        document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !modal.hidden) closeDetail(); });
+    })();
 </script>
 
 </body>

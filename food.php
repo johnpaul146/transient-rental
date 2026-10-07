@@ -8,6 +8,7 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 // ✨ TERMS: Load the terms gate
+require_once 'includes/PaymentService.php';
 require_once 'includes/TermsGate.php';
 $termsGate = new TermsGate($pdo);
 
@@ -226,8 +227,8 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
             (guest_id, guest_name, food_id, reference_number,
              quantity, size_variant, preferred_date, preferred_time,
              special_requests, contact_number, fulfillment_method, delivery_address,
-             total_amount, payment_status, booking_status, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+             total_amount, reservation_fee_amount, booking_date, payment_status, booking_status, created_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', NOW())");
         $stmt->execute([
             $guest_id,
             $guest_name,
@@ -241,7 +242,8 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
             $contact_number,
             $fulfillment_method,
             $fulfillment_method === 'delivery' ? $delivery_address : null,
-            $total
+            $total,
+            PaymentService::feeFor($total)
         ]);
 
         $booking_id = $pdo->lastInsertId();
@@ -1636,7 +1638,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 <div class="alert-overlay">
     <div class="alert-box success">
         <i class="fas fa-check-circle"></i>
-        <?php echo isset($_GET['order_success']) ? "Food package reserved successfully! Please upload your payment proof in your profile to finalize." : $success; ?>
+        <?php echo isset($_GET['order_success']) ? "Food package reserved! Pay the ₱1,000 reservation fee (or the full price if lower) and upload the proof in your profile to secure it. The balance is paid when you receive your order." : $success; ?>
     </div>
 </div>
 <?php endif; ?>
@@ -1993,6 +1995,8 @@ $is_logged_in = isset($_SESSION['user_id']);
                         <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> <strong>Total Amount:</strong></span>
                         <span><strong style="color: #10b981; font-size: 22px;">₱<span id="food_display_total">0.00</span></strong></span>
                     </div>
+                    <div class="summary-row"><span>Reservation fee (pay now)</span><span id="food_display_fee">₱0.00</span></div>
+                    <div class="summary-row"><span>Balance on pickup / delivery</span><span id="food_display_balance">₱0.00</span></div>
                     <input type="hidden" name="total_amount" id="food_total_amount">
                 </div>
 
@@ -2003,7 +2007,7 @@ $is_logged_in = isset($_SESSION['user_id']);
                 <?php endif; ?>
 
                 <div style="background: #fef3c7; padding: 12px; border-radius: 10px; margin-bottom: 15px; font-size: 12px; color: #92400e;">
-                    <i class="fas fa-info-circle"></i> <strong>Note:</strong> Your reservation will be reviewed by admin. Please upload your payment proof in your profile to finalize.
+                    <i class="fas fa-info-circle"></i> <strong>Note:</strong> Pay only the reservation fee now and upload the proof in your profile. The reservation fee is part of the total and is non-refundable; the balance is paid when you receive your order.
                 </div>
 
                 <button type="submit" name="order_food" class="btn-primary" <?php echo !isset($_SESSION['user_id']) ? 'disabled' : ''; ?>>
@@ -2927,6 +2931,12 @@ function updateFoodTotal() {
 
     document.getElementById('food_display_total').textContent = total.toFixed(2);
     document.getElementById('food_total_amount').value = total;
+    const fee = Math.min(<?php echo json_encode(PaymentService::RESERVATION_FEE); ?>, total);
+    const fmt = function (n) { return '₱' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
+    const feeEl = document.getElementById('food_display_fee');
+    const balEl = document.getElementById('food_display_balance');
+    if (feeEl) feeEl.textContent = fmt(fee);
+    if (balEl) balEl.textContent = fmt(Math.max(0, total - fee));
 }
 
 function updateFoodPrice() {

@@ -1,13 +1,27 @@
 <?php
-require_once 'database.php';
+// Guest names and stay dates for one house — staff/admin only.
+// (No page currently calls this endpoint; it is kept for compatibility but
+//  never answers without an authenticated admin or staff session.)
+ini_set('display_errors', '0');
+session_start();
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
 
-// Check if house_id is provided
-if(!isset($_GET['house_id'])) {
-    echo json_encode(['error' => 'House ID required']);
+if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', ['admin', 'staff'], true)) {
+    http_response_code(403);
+    echo json_encode(['error' => 'Unauthorized']);
     exit();
 }
 
-$house_id = $_GET['house_id'];
+require_once 'database.php';
+
+// Check if house_id is provided
+$house_id = (int)($_GET['house_id'] ?? 0);
+if ($house_id <= 0) {
+    http_response_code(400);
+    echo json_encode(['error' => 'House ID required']);
+    exit();
+}
 
 try {
     // Get all bookings for this house with guest names
@@ -108,6 +122,8 @@ try {
     
     echo json_encode(['guests' => $guests]);
 } catch(Exception $e) {
-    echo json_encode(['error' => 'Failed to load guests: ' . $e->getMessage()]);
+    error_log('get_house_guests failed: ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['error' => 'Failed to load guests.']);
 }
 ?>

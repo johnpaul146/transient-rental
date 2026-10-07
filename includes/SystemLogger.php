@@ -15,7 +15,8 @@ class SystemLogger
         'create', 'update', 'delete', 'view',
         'login', 'login_failed', 'logout', 'register', 'verify_device',
         'confirm_payment', 'reject_payment',
-        'confirm_rebook', 'rebook', 'cancel_rebook',
+        'confirm_rebook', 'rebook', 'cancel_rebook', 'reject_rebook', 'rebook_failed',
+        'cancel_booking', 'balance_paid', 'rebook_blocked',
         'upload_proof', 'upload', 'export', 'import',
         'settings_change', 'password_change', 'error'
     ];

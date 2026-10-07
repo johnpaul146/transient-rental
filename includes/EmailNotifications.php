@@ -367,6 +367,13 @@ class EmailNotifications {
     }
 
     private static function totalBlock($total, $note = '') {
+        // ₱1,000 reservation fee now (or the total if lower); the balance is paid on arrival
+        $totalNum = (float)str_replace(',', '', (string)$total);
+        $feeNum   = min(1000.0, max(0.0, $totalNum));
+        $feeLine  = '<p style="margin: 10px 0 0 0; color:#fcd34d; font-size: 13px; line-height: 1.6;">'
+                  . 'Reservation fee to pay now: <strong>₱' . number_format($feeNum, 2) . '</strong><br>'
+                  . 'Balance payable upon arrival: <strong>₱' . number_format(max(0, $totalNum - $feeNum), 2) . '</strong><br>'
+                  . '<span style="font-size:11px;">The reservation fee is part of the total and is non-refundable; paid reservations may be rebooked.</span></p>';
         return '
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #292112; border: 1px solid #b45309; border-radius: 12px; margin-top: 12px;">
           <tr>
@@ -374,14 +381,14 @@ class EmailNotifications {
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td style="color:#fbbf24; font-size: 14px; font-weight: 700; vertical-align: middle;">
-                    Total Amount Payable:
+                    Total Booking Price:
                   </td>
                   <td align="right" style="color:#fbbf24; font-size: 22px; font-weight: 800;">
                     ₱' . $total . '
                   </td>
                 </tr>
               </table>
-              ' . (!empty($note) ? '<p style="margin: 10px 0 0 0; color:#fcd34d; font-size: 12px; line-height: 1.5;">' . $note . '</p>' : '') . '
+              ' . $feeLine . (!empty($note) ? '<p style="margin: 10px 0 0 0; color:#fcd34d; font-size: 12px; line-height: 1.5;">' . $note . '</p>' : '') . '
             </td>
           </tr>
         </table>';
@@ -935,7 +942,7 @@ class EmailNotifications {
                 'Special Notes:'          => $notes,
             ]) . '
 
-            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Please upload your payment receipt screenshot or enter your GCash reference code to finalize confirmation.') . '
+            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.') . '
 
             ' . self::noteBlock('<strong>⚠️ Important Check-In Reminders:</strong><br>
                 • Please arrive on time for your check-in.<br>
@@ -1028,14 +1035,20 @@ class EmailNotifications {
         $item       = htmlspecialchars($booking['item_name'] ?? 'N/A');
         $ref        = $booking['reference_number'] ?? 'N/A';
         $guest      = $booking['guest_name'] ?? $booking['username'] ?? 'Guest';
-        $total      = number_format((float)($booking['total_amount'] ?? 0), 2);
         $gcash      = $booking['gcash_reference'] ?? '';
+        // Reservation fee received; the balance is paid on arrival (see PaymentService)
+        $totalNum   = (float)($booking['total_amount'] ?? 0);
+        $paidNum    = isset($booking['amount_paid']) ? (float)$booking['amount_paid'] : min(1000.0, $totalNum);
+        $balanceNum = max(0, $totalNum - $paidNum);
+        $fully      = $balanceNum <= 0;
 
         $rows = [
-            'Item:'             => $item,
-            'Reference:'        => $ref,
-            'Amount Paid:'      => '₱' . $total,
-            'Payment Status:'   => '<span style="color: #38bdf8;">✅ PAID</span>',
+            'Item:'               => $item,
+            'Reference:'          => $ref,
+            'Total Price:'        => '₱' . number_format($totalNum, 2),
+            'Amount Received:'    => '₱' . number_format($paidNum, 2),
+            'Remaining Balance:'  => $fully ? '₱0.00' : '₱' . number_format($balanceNum, 2) . ' — pay upon arrival',
+            'Payment Status:'     => $fully ? '<span style="color: #38bdf8;">✅ FULLY PAID</span>' : '<span style="color: #38bdf8;">✅ RESERVATION SECURED</span>',
         ];
 
         $content = '';
@@ -1045,14 +1058,16 @@ class EmailNotifications {
 
         $content .= self::infoCardBlock('📋 PAYMENT DETAILS', $rows);
 
-        $content .= self::noteBlock('Your booking is now confirmed. We look forward to hosting you! 🌴', 'blue');
+        $content .= self::noteBlock($fully
+            ? 'Your booking is fully paid. We look forward to hosting you! 🌴'
+            : 'Your reservation is secured. The remaining balance is payable upon arrival. The reservation fee is non-refundable; paid reservations may be rebooked. 🌴', 'blue');
 
         return self::wrapTemplate([
-            'badge_text'    => '✅ PAYMENT CONFIRMED',
-            'title'         => 'Payment Confirmed!',
+            'badge_text'    => $fully ? '✅ PAYMENT CONFIRMED' : '✅ RESERVATION SECURED',
+            'title'         => $fully ? 'Payment Confirmed!' : 'Reservation Secured!',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
-            'intro_text'    => 'Great news! Your payment has been successfully confirmed.',
+            'intro_text'    => $fully ? 'Great news! Your payment has been confirmed.' : 'Great news! We received your reservation fee and your booking is secured.',
             'content'       => $content,
             'gradient_from' => '#0284c7',
             'gradient_to'   => '#38bdf8',
@@ -1376,7 +1391,7 @@ class EmailNotifications {
 
             ' . self::packageItemsBlock($pkg) . '
 
-            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Please upload your payment receipt screenshot or enter your GCash reference code to finalize confirmation.') . '
+            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.') . '
 
             ' . self::noteBlock('<strong>⚠️ Important Reminders:</strong><br>
                 • Please arrive on time for each scheduled item.<br>
@@ -1471,8 +1486,10 @@ class EmailNotifications {
     private static function buildPackagePaymentConfirmationEmail($pkg) {
         $ref   = $pkg['reference_number'] ?? 'N/A';
         $guest = $pkg['guest_name'] ?? $pkg['username'] ?? 'Guest';
-        $total = number_format((float)($pkg['grand_total'] ?? 0), 2);
         $gcash = $pkg['gcash_reference'] ?? '';
+        $totalNum   = (float)($pkg['grand_total'] ?? 0);
+        $paidNum    = isset($pkg['amount_paid']) ? (float)$pkg['amount_paid'] : min(1000.0, $totalNum);
+        $balanceNum = max(0, $totalNum - $paidNum);
 
         $content = '';
         if (!empty($gcash)) {
@@ -1480,23 +1497,25 @@ class EmailNotifications {
         }
 
         $content .= self::infoCardBlock('📋 PACKAGE PAYMENT DETAILS', [
-            'Reference:'        => $ref,
-            'Amount Paid:'      => '₱' . $total,
-            'Payment Status:'   => '<span style="color: #38bdf8;">✅ PAID</span>',
-            'Booking Status:'   => '<span style="color: #38bdf8;">✅ CONFIRMED</span>',
+            'Reference:'          => $ref,
+            'Total Price:'        => '₱' . number_format($totalNum, 2),
+            'Amount Received:'    => '₱' . number_format($paidNum, 2),
+            'Remaining Balance:'  => $balanceNum <= 0 ? '₱0.00' : '₱' . number_format($balanceNum, 2) . ' — pay upon arrival',
+            'Payment Status:'     => $balanceNum <= 0 ? '<span style="color: #38bdf8;">✅ FULLY PAID</span>' : '<span style="color: #38bdf8;">✅ RESERVATION SECURED</span>',
+            'Booking Status:'     => '<span style="color: #38bdf8;">✅ CONFIRMED</span>',
         ]);
 
         $content .= '<p style="margin: 20px 0 0 0; color:#ffffff; font-size: 13px; font-weight: 700;">📦 Your Package Contents</p>';
         $content .= self::packageItemsBlock($pkg);
 
-        $content .= self::noteBlock('Your package is now fully confirmed. We look forward to hosting you! 🌴', 'blue');
+        $content .= self::noteBlock('Your package is confirmed. One reservation fee covers the whole package; the remaining balance is payable upon arrival. 🌴', 'blue');
 
         return self::wrapTemplate([
             'badge_text'    => '✅ PACKAGE CONFIRMED',
             'title'         => 'Package Payment Confirmed!',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
-            'intro_text'    => 'Great news! Your package payment has been confirmed and your booking is now locked in.',
+            'intro_text'    => 'Great news! We received your package reservation fee and your booking is now secured.',
             'content'       => $content,
             'gradient_from' => '#0284c7',
             'gradient_to'   => '#38bdf8',

@@ -3,6 +3,7 @@ session_start();
 require_once 'database.php';
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
+require_once 'includes/PaymentService.php';
 
 // ✅ NEW: Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {
@@ -74,11 +75,11 @@ if($booking_id == 0) {
     exit();
 }
 
-$stmt = $pdo->prepare("SELECT b.*, h.house_name, h.image 
+$stmt = $pdo->prepare("SELECT b.*, h.house_name, h.image, h.capacity 
                        FROM house_bookings b 
                        JOIN houses h ON b.house_id = h.id 
-                       WHERE b.id = ? AND b.guest_id = ?");
-$stmt->execute([$booking_id, $guest['id']]);
+                       WHERE b.id = ? AND b.guest_id = ? AND (b.package_id IS NULL OR b.package_id = 0)");
+$stmt->execute([(int)$booking_id, $guest['id'] ?? 0]);
 $booking = $stmt->fetch();
 
 if(!$booking) {
@@ -96,21 +97,27 @@ function canRebook($pdo, $booking_id, $user_id, &$message = '') {
         return false;
     }
     
-    $stmt = $pdo->prepare("SELECT booking_status, payment_status, rebook_count, created_at FROM house_bookings WHERE id = ?");
+    $stmt = $pdo->prepare("SELECT * FROM house_bookings WHERE id = ?");
     $stmt->execute([$booking_id]);
     $booking = $stmt->fetch();
-    if(!$booking) {
+    if(!$booking || (int)$booking['guest_id'] !== (int)$guest['id']) {
         $message = "Booking not found.";
         return false;
     }
-    
-    if($booking['booking_status'] != 'completed' && $booking['booking_status'] != 'confirmed') {
-        $message = "Only confirmed or completed bookings can be rebooked.";
+    if(!empty($booking['original_booking_id'])) {
+        $message = "This is an old rebooking record.";
         return false;
     }
     
-    if($booking['payment_status'] != 'paid') {
-        $message = "Only paid bookings can be rebooked.";
+    // A paid reservation may be rebooked (no refunds). A cancelled paid reservation
+    // keeps its payment as a rebooking credit and may be rebooked too.
+    if(!in_array($booking['booking_status'], ['confirmed', 'cancelled'], true)) {
+        $message = "Only confirmed bookings or paid cancelled reservations can be rebooked (completed stays cannot).";
+        return false;
+    }
+    
+    if(PaymentService::amounts($booking)['paid'] <= 0) {
+        $message = "Only bookings with a paid reservation fee can be rebooked.";
         return false;
     }
     
@@ -127,7 +134,7 @@ function canRebook($pdo, $booking_id, $user_id, &$message = '') {
     $days_diff = $today->diff($booking_date)->days;
     
     if ($days_diff > 7) {
-        $message = "Rebook option expired. You can only rebook within 7 days from your booking date.";
+        $message = "Rebook option expired. You can only rebook within 7 days from booking date. The amount already paid is carried forward when you rebook.";
         return false;
     }
     
@@ -165,19 +172,15 @@ if(!$can_rebook) {
 // GET BOOKED DATES FOR CALENDAR
 // ============================================================
 function getBookedDates($pdo, $house_id, $exclude_booking_id = null) {
-    $query = "SELECT check_in_date, check_out_date FROM house_bookings 
-              WHERE house_id = ? AND booking_status != 'cancelled'";
-    if($exclude_booking_id) {
-        $query .= " AND id != ?";
+    // Same rule as new bookings (AvailabilityService): confirmed/completed stays
+    // occupy nights [check-in, check-out); blocked dates are one-night ranges.
+    $own_ref = null;
+    if ($exclude_booking_id) {
+        $r = $pdo->prepare("SELECT reference_number FROM house_bookings WHERE id = ?");
+        $r->execute([$exclude_booking_id]);
+        $own_ref = $r->fetchColumn() ?: null;
     }
-    $stmt = $pdo->prepare($query);
-    if($exclude_booking_id) {
-        $stmt->execute([$house_id, $exclude_booking_id]);
-    } else {
-        $stmt->execute([$house_id]);
-    }
-    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    return $results;
+    return AvailabilityService::houseOccupiedRanges($pdo, $house_id, $exclude_booking_id, $own_ref);
 }
 
 $booked_dates = getBookedDates($pdo, $booking['house_id'], $booking_id);
@@ -193,33 +196,24 @@ $price_per_night = $ORIGINAL_NIGHTS > 0 ? $booking['total_amount'] / $ORIGINAL_N
 // ============================================================
 // Get remaining rebooks (based on rebook_count, same record)
 // ============================================================
-function getRemainingRebooks($pdo, $user_id) {
-    $stmt = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
-    $stmt->execute([$user_id]);
-    $guest = $stmt->fetch();
-    if(!$guest) return 0;
-    $guest_id = $guest['id'];
-    
-    $stmt = $pdo->prepare("SELECT COALESCE(SUM(rebook_count), 0) FROM house_bookings 
-                           WHERE guest_id = ? AND rebook_count > 0");
-    $stmt->execute([$guest_id]);
-    $used = (int)$stmt->fetchColumn();
-    return max(0, 2 - $used);
-}
-
-$remaining_rebooks = getRemainingRebooks($pdo, $_SESSION['user_id']);
+// Limit is per booking: maximum 2 rebooks for THIS booking (same rule as the backend).
+$remaining_rebooks = max(0, 2 - (int)($booking['rebook_count'] ?? 0));
 
 // ============================================================
 // HANDLE REBOOK SUBMISSION — UPDATE ONLY
 // ✅ NIGHTS MUST BE EXACTLY SAME AS ORIGINAL
-// ✅ NO NEW PAYMENT (payment stays PAID)
+// ✅ NO NEW PAYMENT (amount already paid is carried forward)
 // ✅ STATUS → pending (wait for admin confirm)
 // ============================================================
 if(isset($_POST['confirm_rebook'])) {
     try {
-        $check_in = $_POST['check_in'];
-        $check_out = $_POST['check_out'];
-        $guests = $_POST['guests'];
+        $check_in = (string)($_POST['check_in'] ?? '');
+        $check_out = (string)($_POST['check_out'] ?? '');
+        $guests = (int)($_POST['guests'] ?? 0);
+        if ($guests < 1) throw new Exception("Please enter the number of guests.");
+        if (!empty($booking['capacity']) && $guests > (int)$booking['capacity']) {
+            throw new Exception("This house accommodates up to " . (int)$booking['capacity'] . " guests.");
+        }
         
         if(empty($check_in) || empty($check_out)) {
             throw new Exception("Please select both check-in and check-out dates.");
@@ -259,11 +253,11 @@ if(isset($_POST['confirm_rebook'])) {
             }
         }
         
-        // ✅ Total = same nights × price per night × guests
-        $total = $price_per_night * $ORIGINAL_NIGHTS * $guests;
+        // House price is per NIGHT. Guests never multiply the price (capacity is checked above).
+        $total = round($price_per_night * $ORIGINAL_NIGHTS, 2);
         
         // UPDATE EXISTING BOOKING (HINDI INSERT)
-        // payment_status = 'paid' → STAYS
+        // payment status/amount unchanged (amount already paid is carried forward)
         // booking_status = 'pending' → wait for admin confirm
         // previous_* columns back up the CURRENT (pre-rebook) values
         // so Cancel Rebook can actually restore them later.
@@ -272,6 +266,7 @@ if(isset($_POST['confirm_rebook'])) {
             previous_check_out_date = ?,
             previous_number_of_guests = ?,
             previous_total_amount = ?,
+            previous_booking_status = ?,
             check_in_date = ?,
             check_out_date = ?,
             number_of_guests = ?,
@@ -280,17 +275,19 @@ if(isset($_POST['confirm_rebook'])) {
             rebook_count = COALESCE(rebook_count, 0) + 1,
             rebooked_at = NOW(),
             rebook_confirmed_at = NULL
-            WHERE id = ?");
+            WHERE id = ? AND guest_id = ?");
         $stmt->execute([
             $booking['check_in_date'],
             $booking['check_out_date'],
             $booking['number_of_guests'],
             $booking['total_amount'],
+            $booking['booking_status'],
             $check_in,
             $check_out,
             $guests,
             $total,
-            $booking_id
+            $booking_id,
+            $booking['guest_id']
         ]);
 
         // ✅ NEW: Log successful rebook
@@ -1098,8 +1095,8 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         <div class="policy-list">
             <li><i class="fas fa-check-circle check"></i> <span><strong>Maximum of 2 rebooks</strong> per booking</span></li>
             <li><i class="fas fa-clock info"></i> <span><strong>Within 7 days</strong> from your booking date</span></li>
-            <li><i class="fas fa-check-circle check"></i> <span>Only <strong>confirmed &amp; paid</strong> bookings can be rebooked</span></li>
-            <li><i class="fas fa-info-circle info"></i> <span>Payment stays <strong>PAID</strong> — no new payment needed</span></li>
+            <li><i class="fas fa-check-circle check"></i> <span>Bookings that are <strong>confirmed or cancelled with money received</strong> can be rebooked — completed bookings cannot</span></li>
+            <li><i class="fas fa-info-circle info"></i> <span>The <strong>amount already paid is carried forward</strong> — no second ₱1,000 reservation fee, no refund</span></li>
             <li><i class="fas fa-lock info" style="color:#f59e0b;"></i> <span>Stay length must be exactly <strong><?php echo $ORIGINAL_NIGHTS; ?> night(s)</strong></span></li>
             <li><i class="fas fa-clock info"></i> <span>Status will be <strong>pending</strong> until admin confirms</span></li>
             <li><i class="fas fa-info-circle info"></i> <span>You have <strong><?php echo $remaining_rebooks; ?></strong> rebook(s) remaining</span></li>
@@ -1170,7 +1167,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             <div class="form-group">
                 <label><i class="fas fa-users"></i> Number of Pax *</label>
                 <select name="guests" id="guests" class="form-select" required>
-                    <?php for($i=1; $i<=10; $i++): ?>
+                    <?php $max_pax = max(1, (int)($booking['capacity'] ?? 10)); for($i=1; $i<=$max_pax; $i++): ?>
                         <option value="<?php echo $i; ?>" <?php echo $i == ($booking['number_of_guests'] ?? 1) ? 'selected' : ''; ?>><?php echo $i; ?> Pax</option>
                     <?php endfor; ?>
                 </select>
@@ -1183,11 +1180,24 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 </div>
                 <div class="summary-row">
                     <span class="label"><i class="fas fa-money-bill-wave"></i> Total amount</span>
-                    <span class="value" id="summaryTotal">₱<?php echo number_format($price_per_night * $ORIGINAL_NIGHTS * ($booking['number_of_guests'] ?? 1), 2); ?></span>
+                    <span class="value" id="summaryTotal">₱<?php echo number_format($price_per_night * $ORIGINAL_NIGHTS, 2); ?></span>
                 </div>
+                <?php $rb_paid = PaymentService::amounts($booking)['paid']; ?>
+                <div class="summary-row">
+                    <span class="label"><i class="fas fa-receipt"></i> Already paid (carried forward)</span>
+                    <span class="value">₱<?php echo number_format($rb_paid, 2); ?></span>
+                </div>
+                <div class="summary-row">
+                    <span class="label"><i class="fas fa-wallet"></i> Balance on arrival</span>
+                    <span class="value" id="summaryBalance">₱<?php echo number_format(max(0, $price_per_night * $ORIGINAL_NIGHTS - $rb_paid), 2); ?></span>
+                </div>
+                <p style="font-size:12px;color:#64748b;margin:8px 0 0;line-height:1.5;">
+                    No new reservation fee is charged — the amount you already paid stays with this booking.
+                    The price is per night; the number of guests does not change it (maximum <?php echo (int)($booking['capacity'] ?? 0) ?: '—'; ?> guests).
+                </p>
             </div>
             
-            <input type="hidden" name="total_amount" id="total_amount" value="<?php echo $price_per_night * $ORIGINAL_NIGHTS * ($booking['number_of_guests'] ?? 1); ?>">
+            <input type="hidden" name="total_amount" id="total_amount" value="<?php echo $price_per_night * $ORIGINAL_NIGHTS; ?>">
             
             <button type="submit" name="confirm_rebook" class="btn-primary" id="confirmBtn">
                 <i class="fas fa-check-circle"></i> Confirm Rebook
@@ -1235,7 +1245,8 @@ function isDateBooked(dateObj) {
     for (var j = 0; j < bookedDates.length; j++) {
         var bookedIn = parseDateYMD(bookedDates[j].check_in_date);
         var bookedOut = parseDateYMD(bookedDates[j].check_out_date);
-        if (bookedIn && bookedOut && dateObj >= bookedIn && dateObj <= bookedOut) {
+        // nights rule: a stay occupies [check-in, check-out); check-out day is free
+        if (bookedIn && bookedOut && dateObj >= bookedIn && dateObj < bookedOut) {
             return true;
         }
     }
@@ -1392,17 +1403,20 @@ function clearSelection() {
     document.getElementById('check_in').value = '';
     document.getElementById('check_out').value = '';
     document.getElementById('summaryNights').textContent = ORIGINAL_NIGHTS;
-    var total = pricePerNight * ORIGINAL_NIGHTS * (parseInt(document.getElementById('guests').value) || 1);
+    var total = pricePerNight * ORIGINAL_NIGHTS;
     document.getElementById('summaryTotal').textContent = '₱' + total.toFixed(2);
     document.getElementById('total_amount').value = total;
+    updateSummary();
 }
 
 function updateSummary() {
-    var guests = parseInt(document.getElementById('guests').value) || 1;
-    var total = pricePerNight * ORIGINAL_NIGHTS * guests;
+    // House price is per night: the number of guests does not change the total
+    var total = pricePerNight * ORIGINAL_NIGHTS;
     document.getElementById('summaryNights').textContent = ORIGINAL_NIGHTS;
     document.getElementById('summaryTotal').textContent = '₱' + total.toFixed(2);
     document.getElementById('total_amount').value = total;
+    var balEl = document.getElementById('summaryBalance');
+    if (balEl) balEl.textContent = '₱' + Math.max(0, total - <?php echo json_encode((float)PaymentService::amounts($booking)['paid']); ?>).toFixed(2);
 }
 
 document.getElementById('guests').addEventListener('change', updateSummary);

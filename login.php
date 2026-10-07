@@ -231,30 +231,23 @@ if (isset($_POST['login'])) {
                     }
                 }
             } else {
-                if (hash_equals((string)$stored, (string)$password) && isPasswordCompliant($password)) {
-                    $authOk = true;
-                    $newHash = password_hash($password, PASSWORD_DEFAULT);
-                    $upd = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-                    $upd->execute([$newHash, $user['id']]);
-                } elseif (hash_equals((string)$stored, (string)$password)) {
-                    $error = "Your password is out of date. It must be at least 8 characters "
-                           . "with 1 uppercase letter and 1 number. Please use Forgot Password.";
-                    $login_error_type = 'wrong';
-
-                    // ✅ Log outdated password
-                    if (class_exists('SystemLogger')) {
-                        SystemLogger::log(
-                            $pdo,
-                            'login_failed',
-                            'auth',
-                            "Login failed (outdated password) for username '{$username}'",
-                            (int)$user['id'],
-                            'user',
-                            null,
-                            ['username' => $username, 'ip' => $ip, 'reason' => 'outdated_password'],
-                            'failed'
-                        );
-                    }
+                // Passwords are only ever accepted through password_verify(). A stored
+                // value that is not a password_hash() hash (legacy/disabled account) can
+                // never log in; the user must reset it with Forgot Password.
+                $error = "This account's password must be reset for security. Please use Forgot Password.";
+                $login_error_type = 'wrong';
+                if (class_exists('SystemLogger')) {
+                    SystemLogger::log(
+                        $pdo,
+                        'login_failed',
+                        'auth',
+                        "Login refused for username '{$username}' — password reset required",
+                        (int)$user['id'],
+                        'user',
+                        null,
+                        ['username' => $username, 'ip' => $ip, 'reason' => 'password_reset_required'],
+                        'failed'
+                    );
                 }
             }
         }

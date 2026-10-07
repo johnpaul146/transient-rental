@@ -1,4 +1,15 @@
 <?php
+// Food category: required, stored as a simple slug (column is VARCHAR(50) after migration 2026_10)
+if (!function_exists('normalizeFoodCategory')) {
+    function normalizeFoodCategory($value) {
+        $c = strtolower(trim((string)$value));
+        $c = preg_replace('/[^a-z0-9]+/', '_', $c);
+        $c = trim((string)$c, '_');
+        if ($c === '') throw new Exception('Please choose a category.');
+        return substr($c, 0, 50);
+    }
+}
+
 session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
@@ -137,7 +148,7 @@ if(isset($_POST['add_food']) && ($is_admin || $is_staff)) {
             }
         }
 
-        $category = !empty($_POST['category_custom']) ? $_POST['category_custom'] : $_POST['category'];
+        $category = normalizeFoodCategory(!empty($_POST['category_custom']) ? $_POST['category_custom'] : ($_POST['category'] ?? ''));
 
         $sizes = [];
         if (isset($_POST['sizes']) && is_array($_POST['sizes'])) {
@@ -187,7 +198,7 @@ if(isset($_POST['add_food']) && ($is_admin || $is_staff)) {
 // ============================================================
 if(isset($_POST['edit_food']) && ($is_admin || $is_staff)) {
     try {
-        $category = !empty($_POST['category_custom']) ? $_POST['category_custom'] : $_POST['category'];
+        $category = normalizeFoodCategory(!empty($_POST['category_custom']) ? $_POST['category_custom'] : ($_POST['category'] ?? ''));
 
         $sizes = [];
         if (isset($_POST['sizes']) && is_array($_POST['sizes'])) {
@@ -347,7 +358,7 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
 // Categories
 $categories = $pdo->query("SELECT DISTINCT category FROM food_items ORDER BY category")->fetchAll(PDO::FETCH_COLUMN);
 $default_categories = ['boodle_regular', 'boodle_special', 'bilao', 'breakfast', 'lunch', 'dinner', 'snack', 'beverage'];
-$all_categories = array_unique(array_merge($default_categories, $categories));
+$all_categories = array_values(array_filter(array_unique(array_merge($default_categories, $categories)), function ($c) { return trim((string)$c) !== ''; }));
 ?>
 <!DOCTYPE html>
 <html lang="en">

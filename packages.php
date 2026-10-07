@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/PaymentService.php';
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -182,22 +183,16 @@ if (isset($_POST['add_house_to_package'])) {
         }
         $guest_names_clean = implode("\n", $names_array);
 
-        $stmt = $pdo->prepare("SELECT id, house_name, price_per_night, status FROM houses WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT id, house_name, price_per_night, status, capacity FROM houses WHERE id = ?");
         $stmt->execute([$house_id]);
         $house = $stmt->fetch();
         if (!$house) throw new Exception("House not found.");
         if ($house['status'] !== 'available') throw new Exception("This house is not available.");
+        if ((int)($house['capacity'] ?? 0) > 0 && $guests > (int)$house['capacity']) throw new Exception("This house fits up to " . (int)$house['capacity'] . " guests. Please reduce the number of guests.");
 
-        // ✅ FIX: Only block if booking is confirmed/approved/completed (NOT pending)
-        global $blocking_placeholders;
-        $conflict = $pdo->prepare("
-            SELECT id FROM house_bookings 
-            WHERE house_id = ? 
-              AND booking_status IN ({$blocking_placeholders})
-              AND NOT (check_out_date <= ? OR check_in_date > ?)
-        ");
-        $conflict->execute([$house_id, $check_in, $check_out]);
-        if ($conflict->fetch()) throw new Exception("Selected dates are not available. Please choose different dates.");
+        // Same availability rule as standalone bookings (AvailabilityService: nights [in, out), blocked dates)
+        $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out);
+        if ($house_conflict !== null) throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
 
         $total_price = $house['price_per_night'] * $nights;
 
@@ -259,6 +254,8 @@ if (isset($_POST['add_food_to_package'])) {
         $food = $stmt->fetch();
         if (!$food) throw new Exception("Food item not found.");
         if (!$food['is_available']) throw new Exception("This food item is currently unavailable.");
+        $food_conflict = AvailabilityService::foodConflict($pdo, $food_id, $preferred_date);
+        if ($food_conflict !== null) throw new Exception("Not available on that date — " . $food_conflict . " Please choose a different date.");
 
         $price = $food['price'];
         $size_variant_text = '';
@@ -331,10 +328,8 @@ if (isset($_POST['add_tour_to_package'])) {
         if ($number_of_guests < 1) $number_of_guests = 1;
         if ($number_of_guests > $tour['max_guests']) throw new Exception("Maximum guests allowed for this tour is " . $tour['max_guests'] . ".");
 
-        // ✅ FIXED: Only block if booking is confirmed/approved/completed (NOT pending)
-        $conflict = $pdo->prepare("SELECT id FROM tour_bookings WHERE tour_id = ? AND booking_date = ? AND booking_status IN ({$blocking_placeholders})");
-        $conflict->execute([$tour_id, $booking_date]);
-        if ($conflict->fetch()) throw new Exception("This boat is already booked on " . date('M d, Y', strtotime($booking_date)) . ". Please select a different date.");
+        $tour_conflict = AvailabilityService::tourConflict($pdo, $tour_id, $booking_date);
+        if ($tour_conflict !== null) throw new Exception($tour_conflict . " Please select a different date.");
 
         $_SESSION['package_cart']['tour'] = [
             'id'                => $tour['id'],
@@ -386,15 +381,10 @@ if (isset($_POST['confirm_package_booking'])) {
         if ($has_house) {
             $h = $cart['house'];
 
-            // ✅ Only block for confirmed/approved/completed
-            $conflict = $pdo->prepare("
-                SELECT id FROM house_bookings 
-                WHERE house_id = ? 
-                  AND booking_status IN ({$blocking_placeholders})
-                  AND NOT (check_out_date <= ? OR check_in_date > ?)
-            ");
-            $conflict->execute([$h['id'], $h['check_in'], $h['check_out']]);
-            if ($conflict->fetch()) throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
+            if ($h['check_in'] < date('Y-m-d')) throw new Exception("Your stay dates have already passed. Please choose new dates.");
+            if (AvailabilityService::houseConflict($pdo, $h['id'], $h['check_in'], $h['check_out']) !== null) {
+                throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
+            }
 
             $ref = $package_ref . '-H';
 
@@ -421,6 +411,8 @@ if (isset($_POST['confirm_package_booking'])) {
         if ($has_food) {
             $f = $cart['food'];
             $ref = $package_ref . '-F';
+            if ($f['preferred_date'] < date('Y-m-d')) throw new Exception("Your food date has already passed. Please choose a new date.");
+            if (AvailabilityService::foodConflict($pdo, $f['id'], $f['preferred_date']) !== null) throw new Exception("'{$f['name']}' is no longer available on " . date('M d, Y', strtotime($f['preferred_date'])) . ".");
 
             if (!empty($f['contact_number'])) $package_contact = $f['contact_number'];
             if (!empty($f['special_requests'])) $package_requests[] = "Food: " . $f['special_requests'];
@@ -429,8 +421,8 @@ if (isset($_POST['confirm_package_booking'])) {
                 (guest_id, guest_name, food_id, reference_number, quantity, size_variant,
                  preferred_date, preferred_time, special_requests,
                  contact_number, fulfillment_method, delivery_address,
-                 total_amount, payment_status, booking_status, created_at)
-                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+                 total_amount, booking_date, payment_status, booking_status, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', NOW())");
             $stmt->execute([
                 $guest_id, $guest['full_name'], $f['id'], $ref,
                 $f['size_variant'] ?? null, $f['preferred_date'], $f['preferred_time'],
@@ -445,10 +437,10 @@ if (isset($_POST['confirm_package_booking'])) {
 
         if ($has_tour) {
             $t = $cart['tour'];
-            // ✅ FIXED: Only block if booking is confirmed/approved/completed
-            $conflict = $pdo->prepare("SELECT id FROM tour_bookings WHERE tour_id = ? AND booking_date = ? AND booking_status IN ({$blocking_placeholders})");
-            $conflict->execute([$t['id'], $t['booking_date']]);
-            if ($conflict->fetch()) throw new Exception("Tour '{$t['name']}' is no longer available on " . date('M d, Y', strtotime($t['booking_date'])) . ".");
+            if ($t['booking_date'] < date('Y-m-d')) throw new Exception("Your tour date has already passed. Please choose a new date.");
+            if (AvailabilityService::tourConflict($pdo, $t['id'], $t['booking_date']) !== null) {
+                throw new Exception("Tour '{$t['name']}' is no longer available on " . date('M d, Y', strtotime($t['booking_date'])) . ".");
+            }
 
             $ref = $package_ref . '-T';
             if (!empty($t['contact_number'])) $package_contact = $t['contact_number'];
@@ -474,14 +466,15 @@ if (isset($_POST['confirm_package_booking'])) {
 
         $stmt = $pdo->prepare("INSERT INTO package_bookings 
             (reference_number, guest_id, house_booking_id, tour_booking_id, food_booking_id,
-             house_amount, tour_amount, food_amount, grand_total,
+             house_amount, tour_amount, food_amount, grand_total, reservation_fee_amount,
              contact_number, special_requests,
              payment_status, booking_status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+        // One reservation fee for the whole package (components carry no money)
         $stmt->execute([
             $package_ref, $guest_id,
             $house_booking_id, $tour_booking_id, $food_booking_id,
-            $house_amount, $tour_amount, $food_amount, $grand_total,
+            $house_amount, $tour_amount, $food_amount, $grand_total, PaymentService::feeFor($grand_total),
             $package_contact, $package_requests_text
         ]);
         $package_id = (int)$pdo->lastInsertId();
@@ -516,8 +509,8 @@ if (isset($_POST['confirm_package_booking'])) {
             error_log("GCash popup settings fetch failed: " . $e->getMessage());
         }
 
-        $gcash_name_popup   = $gcash_popup_settings['account_name'] ?? 'Juan Dela Cruz';
-        $gcash_number_popup = $gcash_popup_settings['number'] ?? '09123456789';
+        $gcash_name_popup   = $gcash_popup_settings['account_name'] ?? '';
+        $gcash_number_popup = $gcash_popup_settings['number'] ?? '';
         $gcash_qr_popup     = $gcash_popup_settings['qr_code'] ?? '';
 
         $qr_path_popup   = '';
@@ -789,13 +782,13 @@ foreach ($houses as $h) {
         $dates = [];
         if (is_array($rows)) {
             foreach ($rows as $row) {
-                $start = new DateTime($row['check_in_date']);
-                $end = new DateTime($row['check_out_date']);
-                $end->modify('+1 day');
-                $period = new DatePeriod($start, new DateInterval('P1D'), $end);
-                foreach ($period as $date) $dates[] = $date->format('Y-m-d');
+                // nights only — the check-out day stays free for the next check-in
+                foreach (AvailabilityService::houseNights($row['check_in_date'], $row['check_out_date']) as $nd) $dates[] = $nd;
             }
         }
+        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND block_date >= CURDATE()");
+        $bst->execute([$h['id']]);
+        foreach ($bst->fetchAll(PDO::FETCH_COLUMN) as $bd) $dates[] = $bd;
         $house_booked_dates[$h['id']] = array_values(array_unique($dates));
     } catch (PDOException $e) {
         $house_booked_dates[$h['id']] = [];
@@ -810,7 +803,9 @@ foreach ($tours as $t) {
         $stmt = $pdo->prepare("SELECT booking_date FROM tour_bookings WHERE tour_id = ? AND booking_status IN ({$blocking_placeholders})");
         $stmt->execute([$t['id']]);
         $result = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        $tour_booked_dates[$t['id']] = is_array($result) ? $result : [];
+        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'tour' AND item_id = ? AND block_date >= CURDATE()");
+        $bst->execute([$t['id']]);
+        $tour_booked_dates[$t['id']] = array_values(array_unique(array_merge(is_array($result) ? $result : [], $bst->fetchAll(PDO::FETCH_COLUMN))));
     } catch (PDOException $e) {
         $tour_booked_dates[$t['id']] = [];
     }
@@ -826,7 +821,9 @@ foreach ($food_items as $fi) {
         $stmt = $pdo->prepare("SELECT preferred_date FROM food_bookings WHERE food_id = ? AND booking_status IN ({$blocking_placeholders})");
         $stmt->execute([$fi['id']]);
         $result = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        $food_booked_dates[$fi['id']] = is_array($result) ? $result : [];
+        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'food' AND item_id = ? AND block_date >= CURDATE()");
+        $bst->execute([$fi['id']]);
+        $food_booked_dates[$fi['id']] = array_values(array_unique(array_merge(is_array($result) ? $result : [], $bst->fetchAll(PDO::FETCH_COLUMN))));
     } catch (PDOException $e) {
         $food_booked_dates[$fi['id']] = [];
     }
@@ -1597,6 +1594,114 @@ $cart_data_js = [
             .gcash-btn-upload, .gcash-btn-close { flex: unset; width: 100%; }
         }
         .alert-overlay { display: none !important; }
+        /* ===== Package Builder: guided steps ===== */
+        .hero.pb-hero { min-height: 0; display: block; padding: 112px 20px 28px; }
+        .hero.pb-hero h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: normal; line-height: 1.2; }
+        .hero.pb-hero p { font-size: 15px; margin: 0; }
+        .hero.pb-hero h1 i { display: inline; margin: 0 6px 0 0; }
+        .main-container { max-width: 1180px; }
+        .pb-stepper { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(11,36,71,.05); scroll-margin-top: 90px; }
+        .pb-step { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 12px; background: transparent; cursor: pointer; font-family: inherit; text-align: left; min-height: 48px; min-width: 0; }
+        .pb-step:disabled { opacity: .5; cursor: not-allowed; }
+        .pb-step:not(:disabled):hover { background: #f1f5f9; }
+        .pb-dot { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; background: #e2e8f0; color: #475569; font-weight: 700; font-size: 14px; }
+        .pb-dot i { display: none; font-size: 13px; }
+        .pb-step.done .pb-dot { background: #10b981; color: #fff; }
+        .pb-step.done .pb-dot .n { display: none; }
+        .pb-step.done .pb-dot i { display: inline; }
+        .pb-step.active { background: #eef6ff; box-shadow: inset 0 0 0 2px #4DA6D9; }
+        .pb-step.active .pb-dot { background: #0B2447; color: #fff; }
+        .pb-step.active.done .pb-dot { background: #10b981; }
+        .pb-step-label { display: flex; flex-direction: column; font-weight: 700; font-size: 14px; color: #0B2447; line-height: 1.2; min-width: 0; }
+        .pb-step-label small { font-weight: 500; font-size: 11.5px; color: #64748b; }
+        .pb-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+        .pb-main { min-width: 0; }
+        .pb-js .pb-panel { display: none; }
+        .pb-js .pb-panel.active { display: block; animation: pbIn .25s ease; }
+        @keyframes pbIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+        .pb-panel-head { margin-bottom: 16px; }
+        .pb-kicker { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: #4DA6D9; margin-bottom: 4px; }
+        .pb-panel-head h2 { font-size: 24px; font-weight: 800; color: #0B2447; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .pb-panel-head h2 i { color: #4DA6D9; font-size: 20px; }
+        .pb-panel-head p { margin: 0; color: #64748b; font-size: 14px; }
+        .pb-empty { display: flex; align-items: center; gap: 16px; background: #fff; border: 2px dashed #cbd5e1; border-radius: 16px; padding: 20px; margin-bottom: 18px; flex-wrap: wrap; }
+        .pb-empty-icon { width: 56px; height: 56px; border-radius: 14px; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+        .pb-empty-body { flex: 1; min-width: 180px; }
+        .pb-empty-body h4 { margin: 0 0 4px; font-size: 16px; color: #0B2447; }
+        .pb-empty-body p { margin: 0; font-size: 13px; color: #64748b; line-height: 1.5; }
+        .pb-panel .cart-item { border-color: #86efac; background: linear-gradient(#f0fdf4,#fff 60%); }
+        .pb-panel .cart-item:hover { border-color: #10b981; }
+        .pb-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 11px 20px; border-radius: 12px; border: 0; font-family: inherit; font-weight: 700; font-size: 14.5px; cursor: pointer; transition: transform .15s, box-shadow .15s, background .15s; }
+        .pb-btn:disabled { opacity: .5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+        .pb-btn-primary { background: #0B2447; color: #fff; }
+        .pb-btn-primary:not(:disabled):hover { background: #0B3D91; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(11,36,71,.25); }
+        .pb-btn-ghost { background: #fff; color: #0B2447; box-shadow: inset 0 0 0 2px #cbd5e1; }
+        .pb-btn-ghost:hover { background: #f1f5f9; }
+        .pb-btn-confirm { background: linear-gradient(135deg,#10b981,#059669); color: #fff; box-shadow: 0 4px 14px rgba(16,185,129,.3); }
+        .pb-btn-confirm:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(16,185,129,.4); }
+        .pb-nav { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; }
+        .pb-hint { margin: 12px 0 0; font-size: 13px; color: #64748b; }
+        .pb-link { background: none; border: 0; color: #0369a1; font-weight: 700; font-size: 13px; cursor: pointer; font-family: inherit; padding: 6px 4px; min-height: 36px; }
+        .pb-link:hover { text-decoration: underline; }
+        .pb-review { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 6px 18px; margin-bottom: 16px; }
+        .pb-review-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 12px; align-items: center; padding: 14px 0; border-bottom: 1px solid #eef2f7; }
+        .pb-review-row strong { display: block; color: #0B2447; font-size: 15px; overflow-wrap: anywhere; }
+        .pb-review-row small { display: block; color: #64748b; font-size: 12.5px; margin-top: 2px; }
+        .pb-review-type { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #4DA6D9; margin-bottom: 2px; }
+        .pb-review-price { font-weight: 700; color: #0B2447; white-space: nowrap; }
+        .pb-review-total { display: flex; justify-content: space-between; align-items: center; padding: 16px 0 12px; font-weight: 700; color: #0B2447; }
+        .pb-review-total strong { font-size: 24px; color: #059669; }
+        .pb-paybox { background: #fffbeb; border: 1px solid #fde68a; border-radius: 14px; padding: 14px 16px; font-size: 13.5px; color: #78350f; display: grid; gap: 8px; }
+        .pb-paybox i { color: #f59e0b; width: 18px; }
+        .pb-terms { margin-top: 12px; }
+        .pb-summary { position: sticky; top: 90px; background: #fff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px; box-shadow: 0 10px 30px rgba(11,36,71,.08); }
+        .pb-sum-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+        .pb-sum-head h3 { margin: 0; font-size: 17px; color: #0B2447; display: flex; align-items: center; gap: 8px; }
+        .pb-sum-head h3 i { color: #4DA6D9; }
+        .pb-clear { color: #dc2626; margin-left: auto; }
+        .pb-sum-close { display: none; background: #f1f5f9; border: 0; width: 36px; height: 36px; border-radius: 50%; font-size: 20px; cursor: pointer; color: #475569; }
+        .pb-sum-line { padding: 12px 0; border-bottom: 1px solid #eef2f7; display: grid; gap: 2px; }
+        .pb-sum-label { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #64748b; }
+        .pb-sum-label i { color: #4DA6D9; width: 16px; }
+        .pb-sum-line strong { color: #0B2447; font-size: 14.5px; overflow-wrap: anywhere; }
+        .pb-sum-line small { color: #64748b; font-size: 12px; }
+        .pb-sum-line em { color: #94a3b8; font-size: 13px; }
+        .pb-sum-price { font-weight: 700; color: #059669; font-size: 14px; }
+        .pb-sum-total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 0 8px; font-weight: 700; color: #0B2447; }
+        .pb-sum-total strong { font-size: 24px; color: #059669; }
+        .pb-sum-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13.5px; color: #475569; }
+        .pb-sum-row strong { color: #0B2447; text-align: right; }
+        .pb-sum-note { margin-top: 8px; font-size: 12px; color: #64748b; text-align: right; }
+        .pb-bar { display: none; }
+        @media (max-width: 1024px) { .pb-layout { grid-template-columns: minmax(0,1fr) 300px; gap: 18px; } .pb-step { padding: 8px; gap: 8px; } .pb-step-label small { display: none; } }
+        @media (max-width: 900px) {
+            .pb-layout { grid-template-columns: 1fr; }
+            body.pb-js { padding-bottom: 84px; }
+            .pb-summary { position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 1200; border-radius: 20px 20px 0 0; max-height: 78vh; overflow-y: auto; transform: translateY(105%); transition: transform .28s ease; padding: 18px 18px 24px; visibility: hidden; }
+            .pb-summary.open { transform: none; visibility: visible; box-shadow: 0 -12px 40px rgba(11,36,71,.3); }
+            .pb-sum-close { display: inline-flex; align-items: center; justify-content: center; }
+            .pb-clear { margin-left: 0; }
+            .pb-bar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 1100; background: #fff; border-top: 1px solid #e2e8f0; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); align-items: center; justify-content: space-between; gap: 12px; box-shadow: 0 -6px 20px rgba(11,36,71,.1); }
+            .pb-bar-total small { display: block; font-size: 11px; color: #64748b; font-weight: 600; }
+            .pb-bar-total strong { font-size: 19px; color: #059669; }
+        }
+        @media (max-width: 640px) {
+            .hero.pb-hero { padding: 96px 14px 22px; }
+            .hero.pb-hero h1 { font-size: 24px; }
+            .hero.pb-hero h1 i { display: inline; margin: 0 6px 0 0; }
+            .hero.pb-hero p { font-size: 13px; }
+            .pb-stepper { gap: 4px; padding: 8px; }
+            .pb-step { flex-direction: column; justify-content: center; gap: 4px; padding: 6px 2px; text-align: center; }
+            .pb-step-label { align-items: center; font-size: 12px; }
+            .pb-panel-head h2 { font-size: 20px; }
+            .pb-nav { flex-direction: column-reverse; align-items: stretch; }
+            .pb-nav .pb-btn { width: 100%; }
+            .pb-nav > span { display: none; }
+            .pb-empty .pb-btn { width: 100%; }
+            .pb-review-row { grid-template-columns: minmax(0,1fr) auto; }
+            .pb-review-row .pb-link { grid-column: 1 / -1; justify-self: start; padding-left: 0; }
+        }
+        @media (max-width: 380px) { .pb-step-label { font-size: 11px; } .pb-dot { width: 28px; height: 28px; } .pb-btn { padding: 11px 14px; } }
     </style>
 </head>
 <body>
@@ -1604,10 +1709,10 @@ $cart_data_js = [
 <?php include 'components/navbar.php'; ?>
 
 <!-- PAGE HERO -->
-<div class="hero">
+<div class="hero pb-hero">
     <div class="hero-content">
         <h1><i class="fas fa-box-open"></i> Build Your Package</h1>
-        <p>Combine your stay, boat tour, and food in one booking flow</p>
+        <p>Stay, tours and food in one booking, with one reservation fee.</p>
     </div>
 </div>
 
@@ -1620,79 +1725,50 @@ $cart_data_js = [
     </div>
 <?php endif; ?>
 
-<?php if (!$has_any): ?>
-<div class="step-1">
+<?php
+$h = $cart['house'] ?? []; $f = $cart['food'] ?? []; $t = $cart['tour'] ?? [];
+$pb_fee = PaymentService::feeFor($grand_total > 0 ? $grand_total : PaymentService::RESERVATION_FEE);
+$pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
+?>
+<nav class="pb-stepper" id="pbStepper" aria-label="Package steps">
+    <button type="button" class="pb-step<?php echo $has_house ? ' done' : ''; ?>" data-step="1" onclick="pbGo(1)">
+        <span class="pb-dot"><span class="n">1</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Stay<small><?php echo $has_house ? 'Added' : 'Choose'; ?></small></span>
+    </button>
+    <button type="button" class="pb-step<?php echo $has_tour ? ' done' : ''; ?>" data-step="2" onclick="pbGo(2)">
+        <span class="pb-dot"><span class="n">2</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Tours<small><?php echo $has_tour ? 'Added' : 'Optional'; ?></small></span>
+    </button>
+    <button type="button" class="pb-step<?php echo $has_food ? ' done' : ''; ?>" data-step="3" onclick="pbGo(3)">
+        <span class="pb-dot"><span class="n">3</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Food<small><?php echo $has_food ? 'Added' : 'Optional'; ?></small></span>
+    </button>
+    <button type="button" class="pb-step" data-step="4" onclick="pbGo(4)"<?php echo $has_any ? '' : ' disabled'; ?>>
+        <span class="pb-dot"><span class="n">4</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Review<small>Confirm</small></span>
+    </button>
+</nav>
 
-    <div style="text-align:center; margin-bottom:30px;">
+<div class="pb-layout">
+<div class="pb-main">
 
-        <h2 style="font-size:24px; font-weight:800; color:#06263D; margin-bottom:8px;">
-            Build Your Island Vacation
-        </h2>
-
-        <p style="color:#64748b; font-size:15px;">
-            Start with your stay, then add tours and food to create your complete package.
-        </p>
-
-    </div>
-
-    <div class="choice-grid">
-        <button type="button" class="choice-card" onclick="openModal('house')">
-            <div class="choice-icon"><i class="fas fa-home"></i></div>
-       <h3>Stay</h3>
-
-<p>
-Choose your transient house accommodation first.
-</p>
-
-<span class="btn-select">
-    <i class="fas fa-home"></i>
-    Add Stay
-</span>
-        </button>
-
-        <button type="button" class="choice-card" onclick="openModal('food')">
-            <div class="choice-icon" style="background: linear-gradient(135deg, #f59e0b, #d97706);"><i class="fas fa-utensils"></i></div>
-           
-<h3>Food</h3>
-
-<p>
-Add meals and food packages to complete your trip.
-</p>
-
-<span class="btn-select">
-    <i class="fas fa-utensils"></i>
-    Add Food
-</span>
-        <button type="button" class="choice-card" onclick="openModal('tour')">
-            <div class="choice-icon" style="background: linear-gradient(135deg, #10b981, #059669);"><i class="fas fa-umbrella-beach"></i></div>
-          <h3>Island Adventure</h3>
-
-<p>
-Add island tours and activities to your package.
-</p>
-
-<span class="btn-select">
-    <i class="fas fa-ship"></i>
-    Add Tour
-</span>
-        </button>
-    </div>
-</div>
-<?php endif; ?>
-
-<?php if ($has_any): ?>
-<div class="step-2">
-    <div class="package-header">
-        <h2><i class="fas fa-clipboard-list" style="color: #4DA6D9;"></i> Review Your Package</h2>
-        <button type="button" class="btn-clear-all" onclick="openClearAllModal()">
-            <i class="fas fa-trash-alt"></i> Clear All
-        </button>
-    </div>
-
-    <p style="color: #64748b; font-size: 14px; margin-bottom: 25px; line-height: 1.5;">
-        <i class="fas fa-info-circle" style="color: #4DA6D9;"></i>
-Your package is almost ready. Add or adjust your stay, tours, and food before confirming your booking.    </p>
-
+    <!-- STEP 1: STAY -->
+    <section class="pb-panel" data-panel="1" aria-labelledby="pbT1">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 1 of 4</span>
+            <h2 id="pbT1"><i class="fas fa-home"></i> Choose Your Stay</h2>
+            <p>Pick a house and your check-in and check-out dates.</p>
+        </div>
+        <?php if (!$has_house): ?>
+        <div class="pb-empty">
+            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#4DA6D9,#3a8bbf);"><i class="fas fa-home"></i></div>
+            <div class="pb-empty-body">
+                <h4>No stay selected yet</h4>
+                <p>Browse our transient houses and choose your dates. You can also skip this and build a tour or food package.</p>
+            </div>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('house')"><i class="fas fa-home"></i> Choose a Stay</button>
+        </div>
+        <?php endif; ?>
     <?php if ($has_house): $h = $cart['house']; ?>
     <div class="cart-item">
         <div class="item-thumb house">
@@ -1758,7 +1834,100 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
         </div>
     </div>
     <?php endif; ?>
+        <div class="pb-nav">
+            <span></span>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(2)">Continue to Tours <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
 
+    <!-- STEP 2: TOURS -->
+    <section class="pb-panel" data-panel="2" aria-labelledby="pbT2">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 2 of 4</span>
+            <h2 id="pbT2"><i class="fas fa-umbrella-beach"></i> Add Tours &amp; Activities</h2>
+            <p>Add an island adventure to your trip. This step is optional.</p>
+        </div>
+        <?php if (!$has_tour): ?>
+        <div class="pb-empty">
+            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#10b981,#059669);"><i class="fas fa-umbrella-beach"></i></div>
+            <div class="pb-empty-body">
+                <h4>No tour selected yet</h4>
+                <p>Choose an island tour or activity and the date you want to go.</p>
+            </div>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('tour')"><i class="fas fa-umbrella-beach"></i> Choose a Tour</button>
+        </div>
+        <?php endif; ?>
+    <?php if ($has_tour): $t = $cart['tour']; ?>
+    <div class="cart-item">
+        <div class="item-thumb tour">
+            <?php if ($cart_tour_img): ?>
+                <img src="<?php echo htmlspecialchars($cart_tour_img); ?>?v=<?php echo time(); ?>" alt="<?php echo htmlspecialchars($t['name'] ?? ''); ?>" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <span class="thumb-fallback" style="display:none;"><i class="fas fa-umbrella-beach"></i></span>
+            <?php else: ?>
+                <span class="thumb-fallback"><i class="fas fa-umbrella-beach"></i></span>
+            <?php endif; ?>
+        </div>
+        <div class="item-body">
+            <div class="item-header">
+                <div>
+                    <span class="item-type-label" style="background: #d1fae5; color: #059669;">Tour Booking</span>
+                    <h4 class="item-title"><?php echo htmlspecialchars($t['name'] ?? ''); ?></h4>
+                </div>
+                <div class="item-actions">
+                    <button type="button" class="btn-view-item" onclick="openItemDetail('tour_<?php echo (int)($t['id'] ?? 0); ?>')">
+                        <i class="fas fa-eye"></i> View
+                    </button>
+                    <button type="button" class="btn-edit-item" onclick="editTour()">
+                        <i class="fas fa-pen"></i> Edit
+                    </button>
+                    <button type="button" class="btn-remove-item" onclick="openRemoveModal('tour', '<?php echo htmlspecialchars($t['name'] ?? '', ENT_QUOTES); ?>')">
+                        <i class="fas fa-times"></i> Remove
+                    </button>
+                </div>
+            </div>
+
+            <div class="item-detail"><i class="fas fa-calendar-alt"></i>
+                <span><strong>Date:</strong> <?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-clock"></i>
+                <span><strong>Time:</strong> <?php echo date('h:i A', strtotime($t['preferred_time'] ?? 'now')); ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-users"></i>
+                <span><strong>Pax:</strong> <?php echo (int)($t['number_of_guests'] ?? 0); ?></span>
+            </div>
+            <?php if (!empty($t['guest_name'])): ?>
+            <div class="item-detail"><i class="fas fa-user"></i>
+                <span><strong>Lead Guest:</strong> <?php echo htmlspecialchars($t['guest_name']); ?></span>
+            </div>
+            <?php endif; ?>
+
+            <span class="item-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
+        </div>
+    </div>
+    <?php endif; ?>
+        <div class="pb-nav">
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(1)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(3)">Continue to Food <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- STEP 3: FOOD -->
+    <section class="pb-panel" data-panel="3" aria-labelledby="pbT3">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 3 of 4</span>
+            <h2 id="pbT3"><i class="fas fa-utensils"></i> Add Food</h2>
+            <p>Add a meal or food package for your stay. This step is optional.</p>
+        </div>
+        <?php if (!$has_food): ?>
+        <div class="pb-empty">
+            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706);"><i class="fas fa-utensils"></i></div>
+            <div class="pb-empty-body">
+                <h4>No food selected yet</h4>
+                <p>Choose a meal or food package and when you want it.</p>
+            </div>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('food')"><i class="fas fa-utensils"></i> Choose Food</button>
+        </div>
+        <?php endif; ?>
     <?php if ($has_food): $f = $cart['food']; ?>
     <div class="cart-item">
         <div class="item-thumb food">
@@ -1817,122 +1986,110 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
         </div>
     </div>
     <?php endif; ?>
-
-    <?php if ($has_tour): $t = $cart['tour']; ?>
-    <div class="cart-item">
-        <div class="item-thumb tour">
-            <?php if ($cart_tour_img): ?>
-                <img src="<?php echo htmlspecialchars($cart_tour_img); ?>?v=<?php echo time(); ?>" alt="<?php echo htmlspecialchars($t['name'] ?? ''); ?>" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                <span class="thumb-fallback" style="display:none;"><i class="fas fa-umbrella-beach"></i></span>
-            <?php else: ?>
-                <span class="thumb-fallback"><i class="fas fa-umbrella-beach"></i></span>
-            <?php endif; ?>
+        <div class="pb-nav">
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(2)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(4)"<?php echo $has_any ? '' : ' disabled'; ?>>Review Package <i class="fas fa-arrow-right"></i></button>
         </div>
-        <div class="item-body">
-            <div class="item-header">
-                <div>
-                    <span class="item-type-label" style="background: #d1fae5; color: #059669;">Tour Booking</span>
-                    <h4 class="item-title"><?php echo htmlspecialchars($t['name'] ?? ''); ?></h4>
-                </div>
-                <div class="item-actions">
-                    <button type="button" class="btn-view-item" onclick="openItemDetail('tour_<?php echo (int)($t['id'] ?? 0); ?>')">
-                        <i class="fas fa-eye"></i> View
-                    </button>
-                    <button type="button" class="btn-edit-item" onclick="editTour()">
-                        <i class="fas fa-pen"></i> Edit
-                    </button>
-                    <button type="button" class="btn-remove-item" onclick="openRemoveModal('tour', '<?php echo htmlspecialchars($t['name'] ?? '', ENT_QUOTES); ?>')">
-                        <i class="fas fa-times"></i> Remove
-                    </button>
-                </div>
-            </div>
+        <?php if (!$has_any): ?><p class="pb-hint"><i class="fas fa-info-circle"></i> Add a stay, tour or food item to review your package.</p><?php endif; ?>
+    </section>
 
-            <div class="item-detail"><i class="fas fa-calendar-alt"></i>
-                <span><strong>Date:</strong> <?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?></span>
-            </div>
-            <div class="item-detail"><i class="fas fa-clock"></i>
-                <span><strong>Time:</strong> <?php echo date('h:i A', strtotime($t['preferred_time'] ?? 'now')); ?></span>
-            </div>
-            <div class="item-detail"><i class="fas fa-users"></i>
-                <span><strong>Pax:</strong> <?php echo (int)($t['number_of_guests'] ?? 0); ?></span>
-            </div>
-            <?php if (!empty($t['guest_name'])): ?>
-            <div class="item-detail"><i class="fas fa-user"></i>
-                <span><strong>Lead Guest:</strong> <?php echo htmlspecialchars($t['guest_name']); ?></span>
+    <!-- STEP 4: REVIEW -->
+    <section class="pb-panel" data-panel="4" aria-labelledby="pbT4">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 4 of 4</span>
+            <h2 id="pbT4"><i class="fas fa-clipboard-check"></i> Review Your Package</h2>
+            <p>Check everything below, then confirm your package.</p>
+        </div>
+        <?php if ($has_any): ?>
+        <div class="pb-review">
+            <?php if ($has_house): ?>
+            <div class="pb-review-row">
+                <div><span class="pb-review-type"><i class="fas fa-home"></i> Stay</span>
+                <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
+                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax</small></div>
+                <span class="pb-review-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
+                <button type="button" class="pb-link" onclick="pbGo(1)">Change</button>
             </div>
             <?php endif; ?>
-
-            <span class="item-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
+            <?php if ($has_tour): ?>
+            <div class="pb-review-row">
+                <div><span class="pb-review-type"><i class="fas fa-umbrella-beach"></i> Tour</span>
+                <strong><?php echo htmlspecialchars($t['name'] ?? ''); ?></strong>
+                <small><?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($t['preferred_time'] ?? 'now')); ?> · <?php echo (int)($t['number_of_guests'] ?? 0); ?> pax</small></div>
+                <span class="pb-review-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
+                <button type="button" class="pb-link" onclick="pbGo(2)">Change</button>
+            </div>
+            <?php endif; ?>
+            <?php if ($has_food): ?>
+            <div class="pb-review-row">
+                <div><span class="pb-review-type"><i class="fas fa-utensils"></i> Food</span>
+                <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
+                <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?> · <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?></small></div>
+                <span class="pb-review-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
+                <button type="button" class="pb-link" onclick="pbGo(3)">Change</button>
+            </div>
+            <?php endif; ?>
+            <div class="pb-review-total"><span>Package Total</span><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
         </div>
+
+        <div class="pb-paybox">
+            <div><i class="fas fa-receipt"></i> <strong>Reservation fee: ₱<?php echo number_format($pb_fee, 2); ?></strong> — one fee for the whole package, paid after you confirm.</div>
+            <div><i class="fas fa-wallet"></i> <strong>Remaining balance:</strong> pay upon arrival.</div>
+            <div><i class="fas fa-info-circle"></i> The reservation fee is non-refundable. If your plans change, you can rebook your package to a new date.</div>
+        </div>
+        <?php else: ?>
+        <div class="pb-empty"><div class="pb-empty-body"><h4>Your package is empty</h4><p>Go back and add a stay, tour or food item first.</p></div></div>
+        <?php endif; ?>
+
+        <div class="pb-nav">
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(3)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-confirm" onclick="openBookingTermsModal()"<?php echo $has_any ? '' : ' disabled'; ?>><i class="fas fa-check-circle"></i> Confirm Package</button>
+        </div>
+        <p class="terms-note pb-terms"><i class="fas fa-info-circle"></i> By confirming, you agree to our Terms &amp; Conditions. You will upload your payment proof right after.</p>
+    </section>
+</div><!-- /pb-main -->
+
+<aside class="pb-summary" id="pbSummary" aria-label="Your package">
+    <div class="pb-sum-head">
+        <h3><i class="fas fa-suitcase-rolling"></i> Your Package</h3>
+        <?php if ($has_any): ?><button type="button" class="pb-link pb-clear" onclick="openClearAllModal()"><i class="fas fa-trash-alt"></i> Clear all</button><?php endif; ?>
+        <button type="button" class="pb-sum-close" onclick="pbToggleSummary(false)" aria-label="Close summary">&times;</button>
     </div>
-    <?php endif; ?>
-
-    <?php if (!$has_house || !$has_food || !$has_tour): ?>
-    <div class="add-more-section">
-        <h3><i class="fas fa-plus-circle"></i> Complete Your Vacation Package</h3>
-        <div class="add-buttons">
-            <?php if (!$has_house): ?>
-                <button type="button" class="btn-add-more" onclick="openModal('house')">
-                    <i class="fas fa-home"></i> Add House
-                </button>
-            <?php endif; ?>
-            <?php if (!$has_food): ?>
-                <button type="button" class="btn-add-more" onclick="openModal('food')">
-                    <i class="fas fa-utensils"></i> Add Food
-                </button>
-            <?php endif; ?>
-            <?php if (!$has_tour): ?>
-                <button type="button" class="btn-add-more" onclick="openModal('tour')">
-                    <i class="fas fa-umbrella-beach"></i> Add Tour
-                </button>
-            <?php endif; ?>
-        </div>
-    </div>
-    <?php endif; ?>
-
-    <div class="summary-box">
-        <h3 style="font-size: 18px; margin-bottom: 15px;">
-            <i class="fas fa-receipt"></i> Package Summary
-        </h3>
-
+    <div class="pb-sum-line">
+        <span class="pb-sum-label"><i class="fas fa-home"></i> Accommodation</span>
         <?php if ($has_house): ?>
-        <div class="summary-row">
-            <span><i class="fas fa-home"></i> House — <?php echo htmlspecialchars($h['name'] ?? ''); ?></span>
-            <span>₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
-        </div>
-        <?php endif; ?>
-
-        <?php if ($has_food): ?>
-        <div class="summary-row">
-            <span><i class="fas fa-utensils"></i> Food — <?php echo htmlspecialchars($f['name'] ?? ''); ?></span>
-            <span>₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
-        </div>
-        <?php endif; ?>
-
-        <?php if ($has_tour): ?>
-        <div class="summary-row">
-            <span><i class="fas fa-umbrella-beach"></i> Tour — <?php echo htmlspecialchars($t['name'] ?? ''); ?></span>
-            <span>₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
-        </div>
-        <?php endif; ?>
-
-        <div class="summary-total">
-            <span>TOTAL</span>
-            <span class="total-value">₱<?php echo number_format($grand_total, 2); ?></span>
-        </div>
-
-        <button type="button" class="btn-confirm" onclick="openBookingTermsModal()">
-            <i class="fas fa-check-circle"></i> Confirm &amp; Book Now
-        </button>
-
-        <p class="terms-note">
-            <i class="fas fa-info-circle"></i>
-            By confirming, you agree to our Terms &amp; Conditions.
-            Payment proof will be uploaded after confirmation.
-        </p>
+            <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
+            <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d', strtotime($h['check_out'] ?? 'now')); ?></small>
+            <span class="pb-sum-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
+        <?php else: ?><em>Not added yet</em><?php endif; ?>
     </div>
+    <div class="pb-sum-line">
+        <span class="pb-sum-label"><i class="fas fa-umbrella-beach"></i> Tours</span>
+        <?php if ($has_tour): ?>
+            <strong><?php echo htmlspecialchars($t['name'] ?? ''); ?></strong>
+            <small><?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?></small>
+            <span class="pb-sum-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
+        <?php else: ?><em>Not added yet</em><?php endif; ?>
+    </div>
+    <div class="pb-sum-line">
+        <span class="pb-sum-label"><i class="fas fa-utensils"></i> Food</span>
+        <?php if ($has_food): ?>
+            <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
+            <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?></small>
+            <span class="pb-sum-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
+        <?php else: ?><em>Not added yet</em><?php endif; ?>
+    </div>
+    <div class="pb-sum-total"><span>Package Total</span><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
+    <div class="pb-sum-row"><span>Reservation Fee</span><strong>₱<?php echo number_format($pb_fee, 2); ?></strong></div>
+    <div class="pb-sum-row"><span>Remaining Balance</span><strong>Pay upon arrival</strong></div>
+    <?php if ($grand_total > 0 && $pb_balance > 0): ?><div class="pb-sum-note">₱<?php echo number_format($pb_balance, 2); ?> due on arrival</div><?php endif; ?>
+</aside>
+</div><!-- /pb-layout -->
+
+<div class="pb-bar" id="pbBar">
+    <div class="pb-bar-total"><small>Package Total</small><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
+    <button type="button" class="pb-btn pb-btn-ghost" onclick="pbToggleSummary()"><i class="fas fa-suitcase-rolling"></i> Your Package</button>
 </div>
-<?php endif; ?>
 
 </div><!-- /main-container -->
 
@@ -2355,7 +2512,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
 
             <div class="warning-banner">
                 <i class="fas fa-info-circle"></i>
-                <span><strong>Note:</strong> Your reservation will be reviewed by admin. Please upload your payment proof in your profile to finalize.</span>
+                <span><strong>Note:</strong> One ₱1,000 reservation fee secures the whole package; upload its proof in your profile. The balance is paid upon arrival.</span>
             </div>
 
             <button type="submit" class="btn-primary-submit">
@@ -2729,8 +2886,9 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
 </div>
 
 <?php if ($booking_success): 
-    $gcash_name   = $booking_success['gcash_name']   ?? 'Juan Dela Cruz';
-    $gcash_number = $booking_success['gcash_number'] ?? '09123456789';
+    $gcash_name   = $booking_success['gcash_name']   ?? '';
+    $gcash_number = $booking_success['gcash_number'] ?? '';
+    $gcash_configured = PaymentService::gcashConfig($pdo)['configured'];
     $qr_path      = $booking_success['qr_image']     ?? '';
     $qr_exists    = !empty($booking_success['qr_exists']) 
                   ? $booking_success['qr_exists'] 
@@ -2748,7 +2906,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
         </div>
 
         <h3 class="gcash-title">Booking Submitted! 🎉</h3>
-        <p class="gcash-subtitle">Please complete your payment via GCash</p>
+        <p class="gcash-subtitle">Pay the reservation fee via GCash to secure your package</p>
 
         <div class="gcash-divider"></div>
 
@@ -2762,8 +2920,19 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                 <strong><?php echo htmlspecialchars($guest_name); ?></strong>
             </div>
             <div class="gcash-detail-row">
-                <span>Total Amount</span>
-                <strong class="gcash-amount">₱<?php echo number_format((float)$booking_total, 2); ?></strong>
+                <span>Total Price</span>
+                <strong>₱<?php echo number_format((float)$booking_total, 2); ?></strong>
+            </div>
+            <div class="gcash-detail-row">
+                <span>Reservation Fee (pay now)</span>
+                <strong class="gcash-amount">₱<?php echo number_format(PaymentService::feeFor($booking_total), 2); ?></strong>
+            </div>
+            <div class="gcash-detail-row">
+                <span>Balance on Arrival</span>
+                <strong>₱<?php echo number_format(max(0, (float)$booking_total - PaymentService::feeFor($booking_total)), 2); ?></strong>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-top:6px;line-height:1.5;">
+                One reservation fee covers the whole package. It is part of the total and non-refundable; paid reservations may be rebooked.
             </div>
         </div>
 
@@ -2781,6 +2950,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
             <?php endif; ?>
         </div>
 
+        <?php if ($gcash_configured): ?>
         <div class="gcash-account-box">
             <div class="gcash-account-row">
                 <span>Account Name:</span>
@@ -2791,6 +2961,12 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                 <strong><?php echo htmlspecialchars($gcash_number); ?></strong>
             </div>
         </div>
+        <?php else: ?>
+        <div style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;padding:12px;border-radius:12px;margin:10px 0;font-size:13px;">
+            <strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong>
+            The GCash payment details have not been set up yet. Please contact us before sending any payment.
+        </div>
+        <?php endif; ?>
 
         <div class="gcash-howto-box">
             <div class="gcash-howto-title">
@@ -2800,7 +2976,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                 <li>Open GCash app</li>
                 <li>Click 'Pay QR' or 'Scan QR'</li>
                 <li>Scan the QR code above</li>
-                <li>Enter the exact amount shown</li>
+                <li>Enter the reservation fee amount shown</li>
                 <li>Complete the payment</li>
                 <li>Take a screenshot of the transaction</li>
                 <li>Upload screenshot as proof of payment</li>
@@ -2895,30 +3071,37 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
             <div class="terms-section">
                 <div class="terms-section-title">
                     <i class="fas fa-exclamation-triangle"></i>
-                    <span>Important: No Refund Policy</span>
+                    <span>Important: Reservation Fee &amp; Rebooking</span>
                 </div>
                 <div class="terms-section-body">
-                    <h3>❌ No Cancellation / No Refund</h3>
+                    <h3>💳 Reservation Fee</h3>
                     <ul>
-                        <li>All bookings are <strong>final and non-cancellable</strong>.</li>
-                        <li>Once a booking is confirmed, it <strong>cannot be cancelled</strong> and payments are <strong>non-refundable</strong>.</li>
-                        <li>No-shows will result in <strong>full forfeiture</strong> of payment.</li>
+                        <li>A <strong>₱1,000 reservation fee</strong> secures the whole package (one fee per package).</li>
+                        <li>The reservation fee <strong>forms part of the total booking amount</strong>.</li>
+                        <li>The <strong>remaining balance is payable upon arrival</strong> or before the booked service begins.</li>
+                    </ul>
+
+                    <h3>❌ Cancellation</h3>
+                    <ul>
+                        <li><strong>Reservation fees are non-refundable.</strong></li>
+                        <li>Unpaid reservations may be cancelled at no charge.</li>
+                        <li>Paid reservations may be <strong>rebooked</strong> subject to availability and the rebooking rules; the amount already paid is carried forward.</li>
+                        <li>No-shows forfeit the reservation fee.</li>
                     </ul>
 
                     <h3>🔄 Rebooking Policy</h3>
                     <ul>
-                        <li>Guests may <strong>rebook</strong> instead of cancelling.</li>
-                        <li>Rebooking is allowed a maximum of <strong>2 times per booking</strong>.</li>
-                        <li>Rebooking must be requested within <strong>7 days from the original booking date</strong>.</li>
-                        <li>The <strong>stay duration (number of nights) must remain the same</strong> when rebooking.</li>
-                        <li>Rebooking is subject to <strong>admin approval</strong> and availability.</li>
+                        <li>Packages that are <strong>confirmed or cancelled with money received</strong> may be <strong>rebooked</strong> instead of cancelled. <strong>Completed packages cannot be rebooked.</strong></li>
+                        <li>Rebooking is allowed a maximum of <strong>2 times per booking</strong>, within <strong>7 days from booking date</strong>.</li>
+                        <li>The <strong>amount already paid is carried forward</strong> — no second ₱1,000 reservation fee and no refund.</li>
+                        <li>All items in the package move together by the same number of days; the <strong>number of nights stays the same</strong>.</li>
+                        <li>Rebooking is subject to availability, checked when you choose the new date.</li>
                     </ul>
 
-                    <h3>💳 Payment Terms</h3>
+                    <h3>📤 Payment Proof</h3>
                     <ul>
-                        <li>Payment must be completed to confirm your booking.</li>
-                        <li>Proof of payment (GCash reference + screenshot) must be uploaded through your profile.</li>
-                        <li>Bookings with pending payments may be subject to cancellation by admin.</li>
+                        <li>Upload the GCash reference and screenshot of the reservation fee through your profile.</li>
+                        <li>Bookings without a confirmed reservation fee may be cancelled by the owner.</li>
                     </ul>
 
                     <h3>👥 Guest Policy</h3>
@@ -2936,7 +3119,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                     </ul>
 
                     <h3>✅ Acknowledgment</h3>
-                    <p>By checking the box below and clicking <strong>"I Understand &amp; Confirm Booking"</strong>, you acknowledge that you have read, understood, and agreed to these terms — including the <strong>no cancellation policy</strong> and <strong>no refund policy</strong>.</p>
+                    <p>By checking the box below and clicking <strong>"I Understand &amp; Confirm Booking"</strong>, you acknowledge that you have read, understood, and agreed to these terms — including the <strong>non-refundable reservation fee</strong> and the <strong>rebooking policy</strong>.</p>
                 </div>
             </div>
         </div>
@@ -2950,7 +3133,7 @@ Your package is almost ready. Add or adjust your stay, tours, and food before co
                 <input type="checkbox" id="booking_terms_agree" value="1" disabled>
                 <span class="terms-checkbox-text">
                     <i class="fas fa-check-circle" style="color: #10b981;"></i>
-                    I understand there is <strong>NO CANCELLATION</strong> and <strong>NO REFUND</strong>. I accept these terms.
+                    I understand the <strong>₱1,000 reservation fee is NON-REFUNDABLE</strong> and paid reservations can only be <strong>rebooked</strong>. I accept these terms.
                 </span>
             </label>
             <button type="submit" name="confirm_package_booking" class="terms-accept-btn" id="bookingTermsAcceptBtn" disabled>
@@ -3585,9 +3768,13 @@ function changeHouseMonth(delta) {
 }
 
 function selectHouseDate(el) {
-    if (el.classList.contains('booked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
     var date = el.dataset.date;
     if (!date) return;
+    // A booked night can still be chosen as the CHECK-OUT day (12 NN check-out / 2 PM check-in);
+    // the nights in between are checked below.
+    var asCheckOut = !!(houseSelectedStart && !houseSelectedEnd && date > houseSelectedStart);
+    if (el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('booked') && !asCheckOut) return;
     var pickedDate = new Date(date + 'T00:00:00');
 
     if (houseSelectedStart === date && !houseSelectedEnd) {
@@ -4242,5 +4429,47 @@ function dismissAlert() {
 }
 </script>
 
+<script>
+(function () {
+    var KEY = 'pb_step', ADV = 'pb_adv';
+    var has = { house: <?php echo $has_house ? 'true' : 'false'; ?>, tour: <?php echo $has_tour ? 'true' : 'false'; ?>, food: <?php echo $has_food ? 'true' : 'false'; ?> };
+    var hasAny = has.house || has.tour || has.food;
+    var errType = <?php echo (isset($modal_error) && !empty($open_modal)) ? json_encode($open_modal) : 'null'; ?>;
+    var typeStep = { house: 1, tour: 2, food: 3 };
+    function ss(k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) {} }
+    function gs(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+    document.body.classList.add('pb-js');
+    var panels = document.querySelectorAll('.pb-panel'), steps = document.querySelectorAll('.pb-step');
+    function show(n, user) {
+        n = parseInt(n, 10) || 1;
+        if (n < 1) n = 1; if (n > 4) n = 4;
+        if (n === 4 && !hasAny) n = 3;
+        for (var i = 0; i < panels.length; i++) panels[i].classList.toggle('active', +panels[i].getAttribute('data-panel') === n);
+        for (var j = 0; j < steps.length; j++) {
+            var on = +steps[j].getAttribute('data-step') === n;
+            steps[j].classList.toggle('active', on);
+            if (on) steps[j].setAttribute('aria-current', 'step'); else steps[j].removeAttribute('aria-current');
+        }
+        ss(KEY, String(n));
+        pbToggleSummary(false);
+        if (user) { var st = document.getElementById('pbStepper'); if (st && st.scrollIntoView) st.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    }
+    window.pbGo = function (n) { show(n, true); };
+    window.pbOpen = function (type) { ss(ADV, type); openModal(type); };
+    window.pbToggleSummary = function (force) {
+        var el = document.getElementById('pbSummary'); if (!el) return;
+        var open = (typeof force === 'boolean') ? force : !el.classList.contains('open');
+        el.classList.toggle('open', open);
+    };
+    var start;
+    var adv = gs(ADV); ss(ADV, null);
+    if (errType) start = typeStep[errType] || 1;
+    else if (adv && has[adv]) start = typeStep[adv] + 1;
+    else start = parseInt(gs(KEY), 10) || 1;
+    if (!hasAny) start = Math.min(start, 3);
+    if (!hasAny && !errType && !adv) start = 1;
+    show(start, false);
+})();
+</script>
 </body>
 </html>

@@ -1,0 +1,25 @@
+# ----------------------------------------------------------------------------
+# Block non-public development files (added in the October 2026 update).
+# Nothing else is changed: all PHP pages, images and uploads work as before.
+# If the server already has a .htaccess here, ADD these lines to it instead
+# of replacing it.
+# ----------------------------------------------------------------------------
+
+# Hidden files and folders (.git, .vscode, .env ...), except .well-known (SSL)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
+    # Database dumps and migration scripts are never served
+    RewriteRule (^|/)(database|migrations)(/|$) - [F,L]
+</IfModule>
+
+# Development / data file types anywhere on the site
+<FilesMatch "\.(sql|sql\.gz|sql\.zip|md|log|bak|old|orig|swp|sh|py|ini|env|lock|dist)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

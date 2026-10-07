@@ -20,6 +20,12 @@
  *   - Compatible with PHP 7.4+ / 8.x
  */
 
+// This tool must never run through the web server (it rewrites passwords).
+if (php_sapi_name() !== 'cli') {
+    http_response_code(404);
+    exit;
+}
+
 // ── Basic safety: block execution from a public-facing environment ──
 // Uncomment the lines below if you're paranoid about this file being
 // accidentally left on a production server. For local dev, leave as-is.

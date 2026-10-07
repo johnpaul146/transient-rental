@@ -220,8 +220,9 @@ function getBookingStatusLabel($payment_status) {
         return ['label' => 'Unpaid', 'class' => 'badge-danger'];
     }
     $status = strtolower($status);
-    if ($status === 'paid') return ['label' => 'Paid', 'class' => 'badge-success'];
-    if ($status === 'pending') return ['label' => 'Pending', 'class' => 'badge-warning'];
+    if ($status === 'paid') return ['label' => 'Fully Paid', 'class' => 'badge-success'];
+    if ($status === 'reservation_paid') return ['label' => 'Reservation Fee Paid', 'class' => 'badge-info'];
+    if ($status === 'pending') return ['label' => 'Pending Payment', 'class' => 'badge-warning'];
     if ($status === 'rejected' || $status === 'cancelled') return ['label' => ucfirst($status), 'class' => 'badge-danger'];
     return ['label' => ucfirst($status), 'class' => 'badge-warning'];
 }
@@ -691,6 +692,7 @@ function getBookingStatusLabel($payment_status) {
         .badge-success { background: #e6f7e6; color: #10b981; }
         .badge-warning { background: #fef3c7; color: #f59e0b; }
         .badge-danger { background: #fee2e2; color: #ef4444; }
+        .badge-info { background: #e0f2fe; color: #0369a1; }
 
         .review-stars { white-space: nowrap; }
         .review-text { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

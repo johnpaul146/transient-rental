@@ -3,6 +3,7 @@ session_start();
 date_default_timezone_set('Asia/Manila'); // same timezone as the other admin pages
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
+require_once 'includes/AvailabilityService.php';
 
 // ✅ Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {
@@ -144,7 +145,8 @@ function bd_parse_dates($raw): array {
 }
 
 // Active bookings that overlap the given dates → [ 'Y-m-d' => ['REF', ...] ]
-// "Active" uses the same definition as the calendar: not cancelled / completed.
+// Only reservations that hold dates conflict: confirmed / completed (same rule as
+// AvailabilityService). Pending/unpaid reservations never block availability.
 function bd_booking_conflicts(PDO $pdo, string $type, int $id, array $dates): array {
     if (empty($dates)) return [];
     $cfg   = bd_resources()[$type];
@@ -155,8 +157,8 @@ function bd_booking_conflicts(PDO $pdo, string $type, int $id, array $dates): ar
 
     $sql = "SELECT * FROM `{$cfg['b_table']}`
             WHERE `{$cfg['b_fk']}` = ?
-              AND booking_status NOT IN ('cancelled', 'completed')
-              AND `{$start}` <= ? AND `{$end}` >= ?";
+              AND booking_status IN ('confirmed', 'completed')
+              AND `{$start}` <= ? AND `{$end}` " . ($cfg['b_end'] ? '>' : '>=') . " ?";   // house: check-out day is not occupied
     try {
         $st = $pdo->prepare($sql);
         $st->execute([$id, $max, $min]);
@@ -172,7 +174,8 @@ function bd_booking_conflicts(PDO $pdo, string $type, int $id, array $dates): ar
         $e   = $r[$end];
         $ref = $r['reference_number'] ?? ('#' . $r['id']);
         foreach ($dates as $d) {
-            if ($d >= $s && $d <= $e) $conf[$d][] = $ref;
+            // House stays occupy nights [check-in, check-out); the check-out day stays free.
+            if ($d >= $s && ($cfg['b_end'] ? $d < $e : $d <= $e)) $conf[$d][] = $ref;
         }
     }
     return $conf;
@@ -326,7 +329,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
             $raced    = 0;
             $pdo->beginTransaction();
             try {
-                // re-check inside the transaction to narrow the race window
+                // Same lock as payment confirmation / rebooking: the item row is locked,
+                // so a fee confirmation for this item cannot slip in between check and insert.
+                AvailabilityService::lockItem($pdo, $v['type'], $v['id']);
                 $again = bd_booking_conflicts($pdo, $v['type'], $v['id'], $a['blockable']);
                 if (!empty($again)) throw new Exception("A booking was just made on one of these dates. Please review and try again.");
 

@@ -5,6 +5,8 @@ require_once 'includes/sidebar-counts.php';
 
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
+require_once 'includes/PaymentService.php';
+require_once 'includes/RebookService.php';
 
 // ✅ Load SystemLogger (for logout logging)
 if (file_exists('includes/SystemLogger.php')) {
@@ -56,7 +58,7 @@ foreach (['delete_booking', 'permanent_delete_booking', 'override_booking', 'ove
 }
 
 // Server-side guard: every booking operation requires booking-management permission.
-foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment'] as $bookingAction) {
+foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment', 'mark_balance_paid'] as $bookingAction) {
     if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
         denyBookingPermission();
     }
@@ -161,30 +163,11 @@ try {
 // ============================================================
 if (!function_exists('autoBlockBookingDates')) {
     function autoBlockBookingDates($pdo, $booking_type, $item_id, $start_date, $end_date, $booking_id, $reference_number) {
+        // One rule for the whole system (AvailabilityService): a house stay blocks
+        // its nights only — the check-out day stays free for the next check-in.
         try {
-            if (empty($item_id) || empty($start_date)) return 0;
-            
-            $start = new DateTime($start_date);
-            if ($booking_type === 'tour' || empty($end_date)) {
-                $end = clone $start;
-            } else {
-                $end = new DateTime($end_date);
-            }
-            $end->modify('+1 day');
-            
-            $interval = new DateInterval('P1D');
-            $period = new DatePeriod($start, $interval, $end);
-            
-            $stmt = $pdo->prepare("INSERT IGNORE INTO blocked_dates (item_type, item_id, block_date, reason, block_type, blocked_by) VALUES (?, ?, ?, ?, 'walk_in', ?)");
-            $count = 0;
-            $reason = "Auto-blocked from booking #{$reference_number}";
-            
-            foreach($period as $date) {
-                $stmt->execute([$booking_type, $item_id, $date->format('Y-m-d'), $reason, $_SESSION['user_id'] ?? null]);
-                if ($stmt->rowCount() > 0) $count++;
-            }
-            
-            return $count;
+            return AvailabilityService::blockForBooking($pdo, $booking_type, $item_id, $start_date,
+                $booking_type === 'house' ? $end_date : null, $reference_number, $_SESSION['user_id'] ?? null);
         } catch (Exception $e) {
             error_log("Auto-block failed: " . $e->getMessage());
             return 0;
@@ -306,34 +289,10 @@ try {
 // ✅ AUTO-COMPLETE PAST BOOKINGS
 // ============================================================
 try {
-    $pdo->exec("UPDATE house_bookings 
-                SET booking_status = 'completed' 
-                WHERE check_out_date < CURDATE() 
-                  AND booking_status NOT IN ('completed', 'cancelled')");
-
-    $pdo->exec("UPDATE tour_bookings 
-                SET booking_status = 'completed' 
-                WHERE booking_date < CURDATE() 
-                  AND booking_status NOT IN ('completed', 'cancelled')");
-
-    $pdo->exec("UPDATE food_bookings 
-                SET booking_status = 'completed' 
-                WHERE preferred_date IS NOT NULL 
-                  AND preferred_date < CURDATE() 
-                  AND booking_status NOT IN ('completed', 'cancelled')");
-
-    $pdo->exec("UPDATE package_bookings p
-                LEFT JOIN house_bookings hb ON p.house_booking_id = hb.id
-                LEFT JOIN tour_bookings tb ON p.tour_booking_id = tb.id
-                LEFT JOIN food_bookings fb ON p.food_booking_id = fb.id
-                SET p.booking_status = 'completed'
-                WHERE p.booking_status NOT IN ('completed', 'cancelled')
-                  AND (
-                    (hb.id IS NULL OR hb.check_out_date < CURDATE() OR hb.booking_status = 'completed')
-                    AND (tb.id IS NULL OR tb.booking_date < CURDATE() OR tb.booking_status = 'completed')
-                    AND (fb.id IS NULL OR fb.preferred_date IS NULL OR fb.preferred_date < CURDATE() OR fb.booking_status = 'completed')
-                  )
-                  AND (hb.id IS NOT NULL OR tb.id IS NOT NULL OR fb.id IS NOT NULL)");
+    // Service status only: payment status is never changed here, so a completed
+    // stay with a balance due stays visible under Outstanding Balances.
+    // Secured past bookings -> completed; never-paid past bookings (no proof) -> expired; packages and parts included.
+    foreach (PaymentService::autoCompleteSql() as $autoSql) { $pdo->exec($autoSql); }
 } catch (PDOException $e) {
     error_log("AUTO-COMPLETE ERROR: " . $e->getMessage());
 }
@@ -349,22 +308,19 @@ if(isset($_POST['confirm_rebook']) && $can_manage_booking) {
             exit();
         }
         
-        $stmt = $pdo->prepare("SELECT house_id, check_in_date, check_out_date, reference_number FROM house_bookings WHERE id = ?");
-        $stmt->execute([$booking_id]);
-        $booking = $stmt->fetch();
-        
-        $stmt = $pdo->prepare("UPDATE house_bookings SET booking_status = 'confirmed', rebook_confirmed_at = NOW() WHERE id = ?");
-        $stmt->execute([$booking_id]);
-        
-        if ($booking) {
-            autoBlockBookingDates($pdo, 'house', $booking['house_id'], $booking['check_in_date'], $booking['check_out_date'], $booking_id, $booking['reference_number']);
-        }
-        
+        // Re-check the NEW dates while the house is locked; confirm only if still free.
+        // On conflict nothing changes: the request stays pending and the original
+        // dates stay blocked, so the guest keeps the reservation they had.
+        RebookService::confirmHouseRebook($pdo, $booking_id, (int)$_SESSION['user_id']);
+
         try { EmailNotifications::sendRebookConfirmation($booking_id, $pdo); } catch (Throwable $mailEx) {}
         if (class_exists('SystemLogger')) {
             SystemLogger::log($pdo, 'confirm_rebook', 'booking', "Confirmed rebook for house booking ID {$booking_id}", $booking_id, 'booking');
         }
         $success = "✅ Rebook confirmed! New stay dates are now locked in and an email confirmation was sent to the guest.";
+    } catch(AvailabilityConflictException $e) {
+        $error = "Cannot confirm this rebook — the new dates are no longer available. " . $e->getMessage()
+               . " Nothing was changed: the guest keeps the original dates. You can reject the rebook request so the guest can pick other dates.";
     } catch(Exception $e) {
         $error = "Failed to confirm rebook: " . $e->getMessage();
     }
@@ -394,24 +350,26 @@ if(isset($_POST['reject_rebook']) && $can_manage_booking) {
         $final_reason = ($reject_reason === 'Other') ? $reject_reason_other : $reject_reason;
         if (!empty($reject_notes)) $final_reason .= ' — Notes: ' . $reject_notes;
 
-        $stmt = $pdo->prepare("SELECT reference_number, house_id, guest_id, previous_check_in_date, previous_check_out_date, previous_number_of_guests, previous_total_amount, check_in_date, check_out_date, number_of_guests, total_amount, rebook_count FROM house_bookings WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT reference_number, house_id, guest_id, previous_check_in_date, previous_check_out_date, previous_number_of_guests, previous_total_amount, previous_booking_status, check_in_date, check_out_date, number_of_guests, total_amount, rebook_count FROM house_bookings WHERE id = ?");
         $stmt->execute([$booking_id]);
         $booking = $stmt->fetch();
         if (!$booking) throw new Exception("Booking not found.");
 
         $has_backup = !empty($booking['previous_check_in_date']) && !empty($booking['previous_check_out_date']);
 
-        try {
-            $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND reason LIKE ?")
-                ->execute([$booking['house_id'], 'Auto-blocked from booking #' . $booking['reference_number'] . '%']);
-        } catch (PDOException $e) {}
+        PaymentService::releaseBlockedDates($pdo, 'house', $booking['house_id'], $booking['reference_number']);
 
+        // Status before the rebook request (a rebooking credit returns to 'cancelled')
+        $restore_status = in_array($booking['previous_booking_status'] ?? '', ['confirmed', 'cancelled', 'completed', 'pending'], true)
+            ? $booking['previous_booking_status'] : 'confirmed';
         if ($has_backup) {
-            $pdo->prepare("UPDATE house_bookings SET check_in_date = previous_check_in_date, check_out_date = previous_check_out_date, number_of_guests = previous_number_of_guests, total_amount = previous_total_amount, previous_check_in_date = NULL, previous_check_out_date = NULL, previous_number_of_guests = NULL, previous_total_amount = NULL, booking_status = 'confirmed', rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$booking_id]);
+            $pdo->prepare("UPDATE house_bookings SET check_in_date = previous_check_in_date, check_out_date = previous_check_out_date, number_of_guests = previous_number_of_guests, total_amount = previous_total_amount, previous_check_in_date = NULL, previous_check_out_date = NULL, previous_number_of_guests = NULL, previous_total_amount = NULL, booking_status = ?, previous_booking_status = NULL, rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$restore_status, $booking_id]);
             
-            autoBlockBookingDates($pdo, 'house', $booking['house_id'], $booking['previous_check_in_date'], $booking['previous_check_out_date'], $booking_id, $booking['reference_number']);
+            if ($restore_status !== 'cancelled') {
+                autoBlockBookingDates($pdo, 'house', $booking['house_id'], $booking['previous_check_in_date'], $booking['previous_check_out_date'], $booking_id, $booking['reference_number']);
+            }
         } else {
-            $pdo->prepare("UPDATE house_bookings SET booking_status = 'confirmed', rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$booking_id]);
+            $pdo->prepare("UPDATE house_bookings SET booking_status = ?, previous_booking_status = NULL, rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$restore_status, $booking_id]);
         }
 
         $rejected_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Administrator';
@@ -456,35 +414,31 @@ if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
         if (!empty($cancel_notes)) $final_reason .= ' — Notes: ' . $cancel_notes;
 
         $table = $allowed_tables[$booking_type];
-        $stmt = $pdo->prepare("SELECT reference_number, payment_status, total_amount, booking_status FROM `$table` WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT * FROM `$table` WHERE id = ?");
         $stmt->execute([$booking_id]);
         $booking = $stmt->fetch();
         if (!$booking) throw new Exception("Booking not found.");
         if ($booking['booking_status'] === 'cancelled') throw new Exception("This booking is already cancelled.");
 
-        if ($booking_type === 'house') {
-            try {
-                $hbStmt = $pdo->prepare("SELECT house_id, check_in_date, check_out_date FROM house_bookings WHERE id = ?");
-                $hbStmt->execute([$booking_id]);
-                $hb = $hbStmt->fetch();
-                if ($hb && $hb['house_id']) {
-                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND reason LIKE ?")
-                        ->execute([$hb['house_id'], 'Auto-blocked from booking #' . $booking['reference_number'] . '%']);
-                }
-            } catch (PDOException $e) {}
-        } elseif ($booking_type === 'tour') {
-            try {
-                $tbStmt = $pdo->prepare("SELECT tour_id, booking_date FROM tour_bookings WHERE id = ?");
-                $tbStmt->execute([$booking_id]);
-                $tb = $tbStmt->fetch();
-                if ($tb && $tb['tour_id']) {
-                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'tour' AND item_id = ? AND reason LIKE ?")
-                        ->execute([$tb['tour_id'], 'Auto-blocked from booking #' . $booking['reference_number'] . '%']);
-                }
-            } catch (PDOException $e) {}
-        }
+        // Unpaid -> normal cancellation. Paid -> no refund: payment kept as rebooking credit.
+        $cancelResult = PaymentService::cancelBooking($pdo, $booking_type, $booking_id, $final_reason);
 
-        $pdo->prepare("UPDATE `$table` SET booking_status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ? WHERE id = ?")->execute([$final_reason, $booking_id]);
+        // Release the dates (house/tour, or the components of a package)
+        if ($booking_type === 'house') {
+            PaymentService::releaseBlockedDates($pdo, 'house', $booking['house_id'], $booking['reference_number']);
+        } elseif ($booking_type === 'tour') {
+            PaymentService::releaseBlockedDates($pdo, 'tour', $booking['tour_id'], $booking['reference_number']);
+        } elseif ($booking_type === 'package') {
+            if (!empty($booking['house_booking_id'])) {
+                $c = $pdo->prepare("SELECT house_id, reference_number FROM house_bookings WHERE id = ?"); $c->execute([$booking['house_booking_id']]);
+                if ($cr = $c->fetch()) PaymentService::releaseBlockedDates($pdo, 'house', $cr['house_id'], $cr['reference_number']);
+            }
+            if (!empty($booking['tour_booking_id'])) {
+                $c = $pdo->prepare("SELECT tour_id, reference_number FROM tour_bookings WHERE id = ?"); $c->execute([$booking['tour_booking_id']]);
+                if ($cr = $c->fetch()) PaymentService::releaseBlockedDates($pdo, 'tour', $cr['tour_id'], $cr['reference_number']);
+            }
+        }
+        $booking['total_amount'] = $booking['total_amount'] ?? ($booking['grand_total'] ?? 0);
 
         $cancelled_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Administrator';
         try {
@@ -496,88 +450,73 @@ if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
         if (class_exists('SystemLogger')) {
             SystemLogger::log($pdo, 'cancel_booking', 'booking', "Admin cancelled {$booking_type} booking {$booking['reference_number']} — Reason: {$final_reason}", $booking_id, "{$booking_type}_booking", ['reference' => $booking['reference_number'], 'amount' => $booking['total_amount'], 'payment_status' => $booking['payment_status']], ['reason' => $final_reason, 'cancelled_by' => $cancelled_by_name], 'warning');
         }
-        $success = "✅ Booking {$booking['reference_number']} has been cancelled. Guest has been notified via email.";
-    } catch(Exception $e) {
+        $success = $cancelResult['credit'] > 0
+            ? "✅ Booking {$booking['reference_number']} cancelled. The " . PaymentService::peso($cancelResult['credit']) . " already paid is non-refundable and is kept as a rebooking credit (status: Rebooking Required)."
+            : "✅ Booking {$booking['reference_number']} has been cancelled. Guest has been notified via email.";
+    } catch(Throwable $e) {
         $error = "Failed to cancel booking: " . $e->getMessage();
     }
 }
 
 // ============================================================
-// Handle Confirm Payment — WITH AUTO-BLOCK
+// Handle Confirm Reservation Fee — idempotent (see includes/PaymentService.php)
+// Confirming the guest's proof records the ₱1,000 reservation fee (or the total
+// if lower). It does NOT mark the whole booking as paid.
 // ============================================================
 if(isset($_POST['confirm_payment']) && $can_manage_booking) {
     try {
-        $booking_type = $_POST['booking_type'];
-        $booking_id = (int)$_POST['booking_id'];
+        $booking_type = (string)($_POST['booking_type'] ?? '');
+        $booking_id = (int)($_POST['booking_id'] ?? 0);
+        if (!isset(PaymentService::TABLES[$booking_type]) || $booking_id <= 0) throw new Exception("Invalid booking.");
 
-        if (isDuplicateBookingRequest('confirm_payment', $booking_id, $booking_type)) {
-            header("Location: booking-management.php");
-            exit();
-        }
+        $result = PaymentService::confirmReservation($pdo, $booking_type, $booking_id, (int)$_SESSION['user_id']);
 
-        if($booking_type == 'house') {
-            $stmt = $pdo->prepare("SELECT house_id, check_in_date, check_out_date, reference_number FROM house_bookings WHERE id = ?");
-            $stmt->execute([$booking_id]);
-            $bk = $stmt->fetch();
-            
-            $pdo->prepare("UPDATE house_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$booking_id]);
-            
-            if ($bk) {
-                autoBlockBookingDates($pdo, 'house', $bk['house_id'], $bk['check_in_date'], $bk['check_out_date'], $booking_id, $bk['reference_number']);
+        if ($result['status'] === 'already') {
+            $success = "This reservation fee was already confirmed — nothing was recorded twice.";
+        } else {
+            // Dates were checked and blocked inside the confirmation transaction (PaymentService).
+            try { EmailNotifications::sendPaymentConfirmation($booking_id, $booking_type, $pdo); } catch (Throwable $mailEx) { error_log("Payment confirmation email failed: " . $mailEx->getMessage()); }
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'confirm_payment', 'booking',
+                    "Confirmed {$booking_type} reservation fee of " . PaymentService::peso($result['amount']) . " for booking ID {$booking_id}",
+                    $booking_id, 'booking', null, ['amount' => $result['amount'], 'payment_status' => $result['payment_status']]);
             }
-            
-            $success = "House booking payment confirmed!";
-        } elseif($booking_type == 'tour') {
-            $stmt = $pdo->prepare("SELECT tour_id, booking_date, reference_number FROM tour_bookings WHERE id = ?");
-            $stmt->execute([$booking_id]);
-            $bk = $stmt->fetch();
-            
-            $pdo->prepare("UPDATE tour_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$booking_id]);
-            
-            if ($bk) {
-                autoBlockBookingDates($pdo, 'tour', $bk['tour_id'], $bk['booking_date'], $bk['booking_date'], $booking_id, $bk['reference_number']);
-            }
-            
-            $success = "Tour booking payment confirmed!";
-        } elseif($booking_type == 'food') {
-            $pdo->prepare("UPDATE food_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$booking_id]);
-            $success = "Food booking payment confirmed!";
-        } elseif($booking_type == 'package') {
-            $pdo->prepare("UPDATE package_bookings SET payment_status = 'paid', booking_status = 'confirmed' WHERE id = ?")->execute([$booking_id]);
-            $pkg = $pdo->prepare("SELECT house_booking_id, tour_booking_id, food_booking_id FROM package_bookings WHERE id = ?");
-            $pkg->execute([$booking_id]);
-            $pkgRow = $pkg->fetch();
-            if ($pkgRow) {
-                if ($pkgRow['house_booking_id']) {
-                    $hbStmt = $pdo->prepare("SELECT house_id, check_in_date, check_out_date, reference_number FROM house_bookings WHERE id = ?");
-                    $hbStmt->execute([$pkgRow['house_booking_id']]);
-                    $hb = $hbStmt->fetch();
-                    $pdo->prepare("UPDATE house_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$pkgRow['house_booking_id']]);
-                    if ($hb) {
-                        autoBlockBookingDates($pdo, 'house', $hb['house_id'], $hb['check_in_date'], $hb['check_out_date'], $pkgRow['house_booking_id'], $hb['reference_number']);
-                    }
-                }
-                if ($pkgRow['tour_booking_id']) {
-                    $tbStmt = $pdo->prepare("SELECT tour_id, booking_date, reference_number FROM tour_bookings WHERE id = ?");
-                    $tbStmt->execute([$pkgRow['tour_booking_id']]);
-                    $tb = $tbStmt->fetch();
-                    $pdo->prepare("UPDATE tour_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$pkgRow['tour_booking_id']]);
-                    if ($tb) {
-                        autoBlockBookingDates($pdo, 'tour', $tb['tour_id'], $tb['booking_date'], $tb['booking_date'], $pkgRow['tour_booking_id'], $tb['reference_number']);
-                    }
-                }
-                if ($pkgRow['food_booking_id']) {
-                    $pdo->prepare("UPDATE food_bookings SET payment_status = 'paid', paid_at = NOW() WHERE id = ?")->execute([$pkgRow['food_booking_id']]);
-                }
-            }
-            $success = "Package booking payment confirmed!";
+            $success = $result['payment_status'] === 'paid'
+                ? "Payment of " . PaymentService::peso($result['amount']) . " confirmed — booking is fully paid."
+                : "Reservation fee of " . PaymentService::peso($result['amount']) . " confirmed. The remaining balance is collected on arrival.";
         }
-        try { EmailNotifications::sendPaymentConfirmation($booking_id, $booking_type, $pdo); } catch (Exception $mailEx) {}
-        if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'confirm_payment', 'booking', "Confirmed {$booking_type} payment for booking ID {$booking_id}", $booking_id, 'booking');
-        }
-    } catch(Exception $e) {
+    } catch(AvailabilityConflictException $e) {
+        $error = "Cannot confirm this reservation fee — the date is already taken. " . $e->getMessage()
+               . " Nothing was recorded (no payment, no status change). Contact the guest to choose another date, or reject the payment.";
+    } catch(Throwable $e) {
+        error_log("Confirm reservation fee failed: " . $e->getMessage());
         $error = "Failed to confirm payment: " . $e->getMessage();
+    }
+}
+
+// ============================================================
+// Handle Mark Balance as Paid (owner/staff, on arrival) — idempotent
+// ============================================================
+if(isset($_POST['mark_balance_paid']) && $can_manage_booking) {
+    try {
+        $booking_type = (string)($_POST['booking_type'] ?? '');
+        $booking_id   = (int)($_POST['booking_id'] ?? 0);
+        if (!isset(PaymentService::TABLES[$booking_type]) || $booking_id <= 0) throw new Exception("Invalid booking.");
+        $result = PaymentService::recordBalance($pdo, $booking_type, $booking_id, (int)$_SESSION['user_id'],
+            (string)($_POST['payment_method'] ?? ''), trim((string)($_POST['received_at'] ?? '')), $_POST['payment_notes'] ?? null);
+        if ($result['status'] === 'already') {
+            $success = "The balance for this booking was already recorded — nothing was recorded twice.";
+        } else {
+            if (class_exists('SystemLogger')) {
+                SystemLogger::log($pdo, 'balance_paid', 'booking',
+                    "Recorded balance payment of " . PaymentService::peso($result['amount']) . " for {$booking_type} booking ID {$booking_id} (" . ($_POST['payment_method'] ?? '') . ")",
+                    $booking_id, 'booking', null, ['amount' => $result['amount'], 'received_at' => $result['received_at'], 'method' => $_POST['payment_method'] ?? '']);
+            }
+            $success = "Balance of " . PaymentService::peso($result['amount']) . " recorded. The booking is now Fully Paid.";
+        }
+    } catch(Throwable $e) {
+        error_log("Mark balance paid failed: " . $e->getMessage());
+        $error = "Failed to record the balance: " . $e->getMessage();
     }
 }
 
@@ -614,6 +553,14 @@ if(isset($_POST['reject_payment']) && $can_manage_booking) {
         $row = $stmt->fetch();
         if (!$row) throw new Exception("Booking not found.");
         if ($row['booking_status'] === 'cancelled') throw new Exception("This booking is already cancelled/rejected.");
+        if (in_array($row['payment_status'], ['reservation_paid', 'paid'], true)) {
+            throw new Exception("This payment was already confirmed. Payments are non-refundable — use Cancel to keep it as a rebooking credit instead.");
+        }
+        if ($booking_type !== 'package') {
+            $pkgChk = $pdo->prepare("SELECT package_id FROM `$table` WHERE id = ?");
+            $pkgChk->execute([$booking_id]);
+            if ((int)$pkgChk->fetchColumn() > 0) throw new Exception("This item is part of a package. Reject the payment on the package.");
+        }
 
         $rejected_by_id   = (int)$_SESSION['user_id'];
         $rejected_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Staff';
@@ -625,8 +572,7 @@ if(isset($_POST['reject_payment']) && $can_manage_booking) {
                 $hb->execute([$booking_id]);
                 $hrow = $hb->fetch();
                 if ($hrow && $hrow['house_id']) {
-                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND reason LIKE ?")
-                        ->execute([$hrow['house_id'], 'Auto-blocked from booking #' . $row['reference_number'] . '%']);
+                    PaymentService::releaseBlockedDates($pdo, 'house', $hrow['house_id'], $row['reference_number']);
                 }
             } catch (PDOException $e) {}
         } elseif ($booking_type === 'tour') {
@@ -635,17 +581,23 @@ if(isset($_POST['reject_payment']) && $can_manage_booking) {
                 $tb->execute([$booking_id]);
                 $trow = $tb->fetch();
                 if ($trow && $trow['tour_id']) {
-                    $pdo->prepare("DELETE FROM blocked_dates WHERE item_type = 'tour' AND item_id = ? AND reason LIKE ?")
-                        ->execute([$trow['tour_id'], 'Auto-blocked from booking #' . $row['reference_number'] . '%']);
+                    PaymentService::releaseBlockedDates($pdo, 'tour', $trow['tour_id'], $row['reference_number']);
                 }
             } catch (PDOException $e) {}
         }
 
         if ($booking_type === 'package') {
-            // package_bookings has no reject_* columns and its payment_status enum has no
-            // 'cancelled' (DB structure must not change), so use the existing cancel columns.
-            $pdo->prepare("UPDATE `$table` SET booking_status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ? WHERE id = ?")
+            // package_bookings has no reject_* columns; record the rejection and cancel the
+            // package together with its components (no money was received).
+            $pdo->prepare("UPDATE `$table` SET payment_status = 'cancelled', booking_status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ? WHERE id = ? AND payment_status = 'pending'")
                 ->execute(['Payment rejected by ' . $rejected_by_name . ': ' . $final_reason, $booking_id]);
+            PaymentService::syncPackageComponents($pdo, $booking_id);
+            $pk = $pdo->prepare("SELECT house_booking_id, tour_booking_id FROM package_bookings WHERE id = ?");
+            $pk->execute([$booking_id]);
+            if ($pkr = $pk->fetch()) {
+                if (!empty($pkr['house_booking_id'])) { $c = $pdo->prepare("SELECT house_id, reference_number FROM house_bookings WHERE id = ?"); $c->execute([$pkr['house_booking_id']]); if ($cr = $c->fetch()) PaymentService::releaseBlockedDates($pdo, 'house', $cr['house_id'], $cr['reference_number']); }
+                if (!empty($pkr['tour_booking_id']))  { $c = $pdo->prepare("SELECT tour_id, reference_number FROM tour_bookings WHERE id = ?");  $c->execute([$pkr['tour_booking_id']]);  if ($cr = $c->fetch()) PaymentService::releaseBlockedDates($pdo, 'tour', $cr['tour_id'], $cr['reference_number']); }
+            }
         } else {
             $pdo->prepare("UPDATE `$table`
                            SET payment_status = 'cancelled',
@@ -656,7 +608,7 @@ if(isset($_POST['reject_payment']) && $can_manage_booking) {
                                reject_notes = ?,
                                rejected_by = ?,
                                rejected_at = NOW()
-                           WHERE id = ?")
+                           WHERE id = ? AND payment_status = 'pending'")
                 ->execute([
                     'Payment rejected: ' . $final_reason,
                     substr($reject_reason === 'Other' ? $reject_reason_other : $reject_reason, 0, 255),
@@ -682,9 +634,12 @@ if(isset($_POST['reject_payment']) && $can_manage_booking) {
 }
 
 // Get filter and search parameters
-$status_filter = isset($_GET['status']) ? $_GET['status'] : 'all';
+$status_filter = isset($_GET['status']) ? (string)$_GET['status'] : 'all';
+if (!in_array($status_filter, ['all', 'pending', 'rebook', 'pending_rebook', 'paid', 'cancelled', 'history'], true)) $status_filter = 'all';
+// 'paid' filter = money received: Reservation Fee Paid or Fully Paid
+$paid_filter_sql = "IN ('reservation_paid','paid')";
 $search = isset($_GET['search']) ? $_GET['search'] : '';
-$view = isset($_GET['view']) ? $_GET['view'] : 'list';
+$view = (isset($_GET['view']) && $_GET['view'] === 'calendar') ? 'calendar' : 'list';
 
 // ============================================================
 // ✅ Get House Bookings
@@ -700,7 +655,7 @@ if($status_filter == 'pending') {
 } elseif($status_filter == 'history') {
     $house_query .= " AND b.booking_status IN ('completed', 'cancelled')";
 } elseif($status_filter != 'all') {
-    $house_query .= " AND b.payment_status = :status";
+    $house_query .= ($status_filter === 'paid') ? " AND b.payment_status $paid_filter_sql" : " AND b.payment_status = :status";
 }
 if($search) {
     $house_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR h.house_name LIKE :search)";
@@ -708,7 +663,7 @@ if($search) {
 $house_query .= " ORDER BY COALESCE(b.rebooked_at, b.created_at) DESC";
 
 $house_stmt = $pdo->prepare($house_query);
-if($status_filter != 'all' && $status_filter != 'pending' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history') {
+if($status_filter != 'all' && $status_filter != 'pending' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') {
     $house_stmt->bindValue(':status', $status_filter);
 }
 if($search) $house_stmt->bindValue(':search', "%$search%");
@@ -726,13 +681,13 @@ if($status_filter == 'rebook' || $status_filter == 'pending_rebook') {
 } elseif($status_filter == 'history') {
     $tour_query .= " AND b.booking_status IN ('completed', 'cancelled')";
 } elseif($status_filter != 'all') {
-    $tour_query .= " AND b.payment_status = :status";
+    $tour_query .= ($status_filter === 'paid') ? " AND b.payment_status $paid_filter_sql" : " AND b.payment_status = :status";
 }
 if($search) $tour_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR t.tour_name LIKE :search)";
 $tour_query .= " ORDER BY b.created_at DESC";
 
 $tour_stmt = $pdo->prepare($tour_query);
-if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history') $tour_stmt->bindValue(':status', $status_filter);
+if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') $tour_stmt->bindValue(':status', $status_filter);
 if($search) $tour_stmt->bindValue(':search', "%$search%");
 $tour_stmt->execute();
 $tour_bookings = $tour_stmt->fetchAll();
@@ -748,13 +703,13 @@ if($status_filter == 'rebook' || $status_filter == 'pending_rebook') {
 } elseif($status_filter == 'history') {
     $food_query .= " AND b.booking_status IN ('completed', 'cancelled')";
 } elseif($status_filter != 'all') {
-    $food_query .= " AND b.payment_status = :status";
+    $food_query .= ($status_filter === 'paid') ? " AND b.payment_status $paid_filter_sql" : " AND b.payment_status = :status";
 }
 if($search) $food_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR f.name LIKE :search)";
 $food_query .= " ORDER BY b.created_at DESC";
 
 $food_stmt = $pdo->prepare($food_query);
-if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history') $food_stmt->bindValue(':status', $status_filter);
+if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') $food_stmt->bindValue(':status', $status_filter);
 if($search) $food_stmt->bindValue(':search', "%$search%");
 $food_stmt->execute();
 $food_bookings = $food_stmt->fetchAll();
@@ -807,7 +762,7 @@ try {
     } elseif ($status_filter == 'history') {
         $pkg_query .= " AND p.booking_status IN ('completed', 'cancelled')";
     } elseif ($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'pending') {
-        $pkg_query .= " AND p.payment_status = :status";
+        $pkg_query .= ($status_filter === 'paid') ? " AND p.payment_status $paid_filter_sql" : " AND p.payment_status = :status";
     } elseif ($status_filter == 'pending') {
         $pkg_query .= " AND p.payment_status = 'pending'";
     } else {
@@ -820,7 +775,7 @@ try {
     $pkg_query .= " ORDER BY p.created_at DESC";
 
     $pkg_stmt = $pdo->prepare($pkg_query);
-    if ($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'pending' && $status_filter != 'history') $pkg_stmt->bindValue(':status', $status_filter);
+    if ($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'pending' && $status_filter != 'history' && $status_filter != 'paid') $pkg_stmt->bindValue(':status', $status_filter);
     if ($search) $pkg_stmt->bindValue(':search', "%$search%");
     $pkg_stmt->execute();
     $package_bookings = $pkg_stmt->fetchAll();
@@ -903,11 +858,11 @@ $pending_food = $pdo->query("SELECT COUNT(*) FROM food_bookings WHERE payment_st
 $pending_package = 0;
 try { $pending_package = $pdo->query("SELECT COUNT(*) FROM package_bookings WHERE payment_status = 'pending' AND booking_status NOT IN ('cancelled', 'completed')")->fetchColumn(); } catch (PDOException $e) {}
 
-$paid_house = $pdo->query("SELECT COUNT(*) FROM house_bookings WHERE payment_status = 'paid' AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
-$paid_tour = $pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE payment_status = 'paid' AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
-$paid_food = $pdo->query("SELECT COUNT(*) FROM food_bookings WHERE payment_status = 'paid' AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
+$paid_house = $pdo->query("SELECT COUNT(*) FROM house_bookings WHERE payment_status IN ('reservation_paid','paid') AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
+$paid_tour = $pdo->query("SELECT COUNT(*) FROM tour_bookings WHERE payment_status IN ('reservation_paid','paid') AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
+$paid_food = $pdo->query("SELECT COUNT(*) FROM food_bookings WHERE payment_status IN ('reservation_paid','paid') AND booking_status NOT IN ('cancelled', 'completed') AND (package_id IS NULL OR package_id = 0)")->fetchColumn();
 $paid_package = 0;
-try { $paid_package = $pdo->query("SELECT COUNT(*) FROM package_bookings WHERE payment_status = 'paid' AND booking_status NOT IN ('cancelled', 'completed')")->fetchColumn(); } catch (PDOException $e) {}
+try { $paid_package = $pdo->query("SELECT COUNT(*) FROM package_bookings WHERE payment_status IN ('reservation_paid','paid') AND booking_status NOT IN ('cancelled', 'completed')")->fetchColumn(); } catch (PDOException $e) {}
 
 $total_active = count($active_house) + count($active_tour) + count($active_food) + count($active_package);
 $pending_count = $pending_house + $pending_tour + $pending_food + $pending_package;
@@ -919,7 +874,7 @@ $paid_count = $paid_house + $paid_tour + $paid_food + $paid_package;
 // ============================================================
 $calendar_events = [];
 foreach($active_house as $booking) {
-    $color = $booking['payment_status'] == 'paid' ? '#10b981' : '#f59e0b';
+    $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $calendar_events[] = [
         'title' => '🏠 ' . htmlspecialchars($booking['guest_name']),
         'start' => $booking['check_in_date'],
@@ -940,7 +895,7 @@ foreach($active_house as $booking) {
     ];
 }
 foreach($active_tour as $booking) {
-    $color = $booking['payment_status'] == 'paid' ? '#10b981' : '#f59e0b';
+    $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $calendar_events[] = [
         'title' => '🏖️ ' . htmlspecialchars($booking['guest_name']),
         'start' => $booking['booking_date'], 'end' => date('Y-m-d', strtotime($booking['booking_date'] . ' +1 day')),
@@ -957,7 +912,7 @@ foreach($active_tour as $booking) {
     ];
 }
 foreach($active_food as $booking) {
-    $color = $booking['payment_status'] == 'paid' ? '#10b981' : '#f59e0b';
+    $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $food_date = !empty($booking['preferred_date']) ? $booking['preferred_date'] : date('Y-m-d', strtotime($booking['created_at']));
     $calendar_events[] = [
         'title' => '🍽️ ' . htmlspecialchars($booking['guest_name']),
@@ -978,7 +933,7 @@ foreach($active_food as $booking) {
     ];
 }
 foreach($active_package as $pkg) {
-    $color = $pkg['payment_status'] == 'paid' ? '#10b981' : '#f59e0b';
+    $color = PaymentService::isSecured($pkg) ? '#10b981' : '#f59e0b';
     $pkg_date = date('Y-m-d', strtotime($pkg['created_at']));
     $items = [];
     if (!empty($pkg['house_name'])) $items[] = '🏠 ' . $pkg['house_name'];
@@ -1014,7 +969,7 @@ try {
     $blocked_for_calendar = $stmt->fetchAll();
     foreach($blocked_for_calendar as $bd) {
         $calendar_events[] = [
-            'title' => '🚫 BLOCKED: ' . htmlspecialchars($bd['item_name']),
+            'title' => '🚫 BLOCKED: ' . htmlspecialchars((string)($bd['item_name'] ?? '')),
             'start' => $bd['block_date'],
             'end' => date('Y-m-d', strtotime($bd['block_date'] . ' +1 day')),
             'color' => '#64748b',
@@ -1548,6 +1503,12 @@ function formatGuestNames($guest_names) {
 }
     </style>
     <link rel="stylesheet" href="assets/css/admin-responsive.css">
+<?php echo PaymentService::css(); ?>
+<style>
+.btn-sm.btn-balance{background:#10b981;color:#fff;border:none}
+.btn-sm.btn-balance:hover{background:#059669}
+.btn-card-action.btn-balance-mobile{background:#d1fae5;color:#065f46;border:1px solid #6ee7b7}
+</style>
 </head>
 <body>
 
@@ -1656,10 +1617,16 @@ function formatGuestNames($guest_names) {
         </div>
 
         <?php if(isset($success)): ?>
-        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <?php echo $success; ?></div>
+        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?></div>
         <?php endif; ?>
         <?php if(isset($error)): ?>
-        <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <?php echo $error; ?></div>
+        <div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
+        <?php endif; ?>
+        <?php if (!PaymentService::gcashConfig($pdo)['configured']): ?>
+        <div class="alert alert-danger"><i class="fas fa-exclamation-triangle"></i>
+            <strong>Payment account configuration required:</strong> the GCash account name/number still look like placeholders, so guests are told to contact you before paying.
+            <?php if ($is_admin): ?><a href="edit-content.php" style="font-weight:700;">Set the real GCash details in Edit Content</a>.<?php endif; ?>
+        </div>
         <?php endif; ?>
 
         <div class="page-title-banner">
@@ -1710,7 +1677,7 @@ function formatGuestNames($guest_names) {
             </a>
 <a href="?status=paid&view=<?php echo $view; ?>" class="stat-card paid-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-check-circle"></i></div></div>
                 <div class="stat-number"><?php echo $paid_count; ?></div>
-                <div class="stat-label">Paid</div>
+                <div class="stat-label">Secured (Fee / Fully Paid)</div>
             </a>
             <a href="blocked-dates.php" class="stat-card blocked-card">
                 <div class="stat-top"><div class="stat-icon" style="background: rgba(255,255,255,0.2);"><i class="fas fa-ban"></i></div></div>
@@ -1734,7 +1701,7 @@ function formatGuestNames($guest_names) {
                 <a href="?status=all&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'all' ? 'active' : ''; ?>">All</a>
                 <a href="?status=pending&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'pending' ? 'active' : ''; ?>">Pending</a>
                 <a href="?status=rebook&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo ($status_filter == 'rebook' || $status_filter == 'pending_rebook') ? 'active' : ''; ?>">Rebooks</a>
-                <a href="?status=paid&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'paid' ? 'active' : ''; ?>">Paid</a>
+                <a href="?status=paid&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'paid' ? 'active' : ''; ?>">Fee / Fully Paid</a>
                 <a href="?status=cancelled&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'cancelled' ? 'active' : ''; ?>">Cancelled</a>
                 <a href="?status=history&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'history' ? 'active' : ''; ?>">History</a>
             </div>
@@ -1757,7 +1724,7 @@ function formatGuestNames($guest_names) {
             <div class="card-header">
                 <h2><i class="fas fa-calendar-alt"></i> Booking Calendar</h2>
                 <div class="calendar-legend">
-                    <span class="legend-item"><span class="legend-color paid"></span> Paid</span>
+                    <span class="legend-item"><span class="legend-color paid"></span> Reservation Fee Paid / Fully Paid</span>
                     <span class="legend-item"><span class="legend-color pending"></span> Pending Payment</span>
                     <span class="legend-item"><span class="legend-color blocked"></span> Blocked</span>
                     <span class="legend-item">🏠 House</span>
@@ -1854,8 +1821,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo $booking['number_of_guests']; ?></td>
-                                <td>₱<?php echo number_format($booking['total_amount']); ?></td>
-                                <td><span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($booking); ?></td>
+                                <td><?php echo PaymentService::adminBadge($booking); ?></td>
                                 <td>
                                     <?php if($is_row_pending_rebook): ?>
                                         <span class="badge badge-warning"><i class="fas fa-clock"></i> Rebook Pending</span>
@@ -1891,7 +1858,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         </button>
                                         <?php endif; ?>
                                         <?php if($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'house', <?php echo $booking['total_amount']; ?>)">
+                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'house', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                             <i class="fas fa-check"></i> Confirm
                                         </button>
                                         <button type="button" class="btn-sm btn-danger" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'house', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
@@ -1899,7 +1866,12 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         </button>
                                         <?php endif; ?>
                                         <?php if(!$is_row_pending_rebook): ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                        <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                        <button type="button" class="btn-sm btn-balance" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'house', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                            <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                        </button>
+                                        <?php endif; ?>
+                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
                                         </button>
                                         <?php endif; ?>
@@ -1933,7 +1905,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <?php endif; ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span>
+                                    <?php echo PaymentService::adminBadge($booking); ?>
                                 </div>
                             </div>
                             <div class="card-row">
@@ -1991,7 +1963,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         <i class="fas fa-times"></i> Reject
                                     </button>
                                 <?php elseif($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'house', <?php echo $booking['total_amount']; ?>)">
+                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'house', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                         <i class="fas fa-check"></i> Confirm
                                     </button>
                                     <button type="button" class="btn-card-action btn-reject-mobile" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'house', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
@@ -1999,7 +1971,12 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     </button>
                                 <?php endif; ?>
                                 <?php if(!$is_row_pending_rebook): ?>
-                                    <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                    <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                    <button type="button" class="btn-card-action btn-balance-mobile" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'house', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                        <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                    </button>
+                                    <?php endif; ?>
+                                    <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                         <i class="fas fa-ban"></i> Cancel
                                     </button>
                                 <?php endif; ?>
@@ -2040,8 +2017,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                 <td><?php echo htmlspecialchars($booking['tour_name']); ?></td>
                                 <td><?php echo formatDateDisplay($booking['booking_date']); ?></td>
                                 <td><?php echo $booking['number_of_guests']; ?></td>
-                                <td>₱<?php echo number_format($booking['total_amount']); ?></td>
-                                <td><span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($booking); ?></td>
+                                <td><?php echo PaymentService::adminBadge($booking); ?></td>
                                 <td><span class="badge badge-info"><?php echo ucfirst($booking['booking_status']); ?></span></td>
                                 <td>
                                     <?php if($booking['payment_proof']): ?>
@@ -2061,14 +2038,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-eye"></i> View
                                         </button>
                                         <?php if($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'tour', <?php echo $booking['total_amount']; ?>)">
+                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'tour', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                             <i class="fas fa-check"></i> Confirm
                                         </button>
                                         <button type="button" class="btn-sm btn-danger" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'tour', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                             <i class="fas fa-times"></i> Reject
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                        <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                        <button type="button" class="btn-sm btn-balance" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'tour', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                            <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                        </button>
+                                        <?php endif; ?>
+                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
                                         </button>
                                     </div>
@@ -2095,7 +2077,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <?php echo htmlspecialchars($booking['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span>
+                                    <?php echo PaymentService::adminBadge($booking); ?>
                                 </div>
                             </div>
                             <div class="card-row"><i class="fas fa-user"></i><span class="card-label">Guest</span><span class="card-value"><?php echo htmlspecialchars($booking['guest_name']); ?></span></div>
@@ -2124,14 +2106,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
                                 <?php if($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'tour', <?php echo $booking['total_amount']; ?>)">
+                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'tour', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                         <i class="fas fa-check"></i> Confirm
                                     </button>
                                     <button type="button" class="btn-card-action btn-reject-mobile" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'tour', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times"></i> Reject
                                     </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                <button type="button" class="btn-card-action btn-balance-mobile" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'tour', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                    <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                </button>
+                                <?php endif; ?>
+                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
                                 </button>
                             </div>
@@ -2189,8 +2176,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         </a>
                                     <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
                                 </td>
-                                <td>₱<?php echo number_format($booking['total_amount']); ?></td>
-                                <td><span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($booking); ?></td>
+                                <td><?php echo PaymentService::adminBadge($booking); ?></td>
                                 <td><span class="badge badge-info"><?php echo ucfirst($booking['booking_status']); ?></span></td>
                                 <td>
                                     <?php if($booking['payment_proof']): ?>
@@ -2210,14 +2197,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-eye"></i> View
                                         </button>
                                         <?php if($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'food', <?php echo $booking['total_amount']; ?>)">
+                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'food', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                             <i class="fas fa-check"></i> Confirm
                                         </button>
                                         <button type="button" class="btn-sm btn-danger" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'food', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                             <i class="fas fa-times"></i> Reject
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                        <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                        <button type="button" class="btn-sm btn-balance" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'food', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                            <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                        </button>
+                                        <?php endif; ?>
+                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
                                         </button>
                                     </div>
@@ -2247,7 +2239,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <?php echo htmlspecialchars($booking['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span>
+                                    <?php echo PaymentService::adminBadge($booking); ?>
                                 </div>
                             </div>
                             <div class="card-row"><i class="fas fa-user"></i><span class="card-label">Guest</span><span class="card-value"><?php echo htmlspecialchars($booking['guest_name']); ?></span></div>
@@ -2283,14 +2275,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
                                 <?php if($booking['payment_status'] == 'pending' && $booking['payment_proof']): ?>
-                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'food', <?php echo $booking['total_amount']; ?>)">
+                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', 'food', <?php echo PaymentService::feeFor($booking['total_amount']); ?>)">
                                         <i class="fas fa-check"></i> Confirm
                                     </button>
                                     <button type="button" class="btn-card-action btn-reject-mobile" onclick="openRejectModal(<?php echo $booking['id']; ?>, 'food', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times"></i> Reject
                                     </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>')">
+                                <?php if (PaymentService::state($booking) === 'reservation_paid'): ?>
+                                <button type="button" class="btn-card-action btn-balance-mobile" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'food', 'id' => (int)$booking['id'], 'ref' => $booking['reference_number'], 'guest' => $booking['guest_name'] ?? '', 'total' => PaymentService::amounts($booking)['total'], 'paid' => PaymentService::amounts($booking)['paid'], 'balance' => PaymentService::amounts($booking)['balance'], 'reserved_at' => $booking['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                    <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                </button>
+                                <?php endif; ?>
+                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', <?php echo PaymentService::amounts($booking)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
                                 </button>
                             </div>
@@ -2349,8 +2346,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                         </a>
                                     <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
                                 </td>
-                                <td>₱<?php echo number_format($pkg['grand_total']); ?></td>
-                                <td><span class="badge <?php echo $pkg['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($pkg['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($pkg); ?></td>
+                                <td><?php echo PaymentService::adminBadge($pkg); ?></td>
                                 <td><span class="badge badge-info"><?php echo ucfirst($pkg['booking_status']); ?></span></td>
                                 <td>
                                     <?php if(!empty($pkg['payment_proof'])): ?>
@@ -2370,14 +2367,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                             <i class="fas fa-eye"></i> View Package
                                         </button>
                                         <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof']) && $pkg['booking_status'] != 'cancelled'): ?>
-                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo $pkg['grand_total']; ?>)">
+                                        <button type="button" class="btn-sm btn-success" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo PaymentService::feeFor($pkg['grand_total']); ?>)">
                                             <i class="fas fa-check"></i> Confirm
                                         </button>
                                         <button type="button" class="btn-sm btn-danger" onclick="openRejectModal(<?php echo $pkg['id']; ?>, 'package', '<?php echo htmlspecialchars($pkg['reference_number']); ?>')">
                                             <i class="fas fa-times"></i> Reject
                                         </button>
                                         <?php endif; ?>
-                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>')">
+                                        <?php if (PaymentService::state($pkg) === 'reservation_paid'): ?>
+                                        <button type="button" class="btn-sm btn-balance" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'package', 'id' => (int)$pkg['id'], 'ref' => $pkg['reference_number'], 'guest' => $pkg['guest_name'] ?? '', 'total' => PaymentService::amounts($pkg)['total'], 'paid' => PaymentService::amounts($pkg)['paid'], 'balance' => PaymentService::amounts($pkg)['balance'], 'reserved_at' => $pkg['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                            <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                        </button>
+                                        <?php endif; ?>
+                                        <button type="button" class="btn-sm btn-cancel-booking" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
                                             <i class="fas fa-ban"></i> Cancel
                                         </button>
                                     </div>
@@ -2410,7 +2412,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <span class="package-badge"><i class="fas fa-box-open"></i> <?php echo $itemCount; ?> items</span>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge <?php echo $pkg['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($pkg['payment_status']); ?></span>
+                                    <?php echo PaymentService::adminBadge($pkg); ?>
                                 </div>
                             </div>
                             <div class="card-row"><i class="fas fa-user"></i><span class="card-label">Guest</span><span class="card-value"><?php echo htmlspecialchars($pkg['guest_name']); ?></span></div>
@@ -2423,7 +2425,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <?php if(!empty($pkg['food_name'])): ?>
                             <div class="card-row"><i class="fas fa-utensils"></i><span class="card-label">Food</span><span class="card-value"><?php echo htmlspecialchars($pkg['food_name']); ?></span></div>
                             <?php endif; ?>
-                            <div class="card-row"><i class="fas fa-money-bill"></i><span class="card-label">Total</span><span class="card-value">₱<?php echo number_format($pkg['grand_total']); ?></span></div>
+                            <div class="card-row"><i class="fas fa-money-bill"></i><span class="card-label">Total</span><span class="card-value"><?php echo PaymentService::adminAmountCell($pkg); ?></span></div>
                             <div class="card-proof">
                                 <?php if(!empty($pkg['payment_proof'])): ?>
                                     <img class="card-proof-thumb" src="uploads/payments/<?php echo htmlspecialchars($pkg['payment_proof']); ?>?t=<?php echo time(); ?>" alt="Proof"
@@ -2447,14 +2449,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
                                 <?php if($pkg['payment_status'] == 'pending' && !empty($pkg['payment_proof']) && $pkg['booking_status'] != 'cancelled'): ?>
-                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo $pkg['grand_total']; ?>)">
+                                    <button type="button" class="btn-card-action btn-confirm-mobile" onclick="openConfirmModal('payment', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', 'package', <?php echo PaymentService::feeFor($pkg['grand_total']); ?>)">
                                         <i class="fas fa-check"></i> Confirm
                                     </button>
                                     <button type="button" class="btn-card-action btn-reject-mobile" onclick="openRejectModal(<?php echo $pkg['id']; ?>, 'package', '<?php echo htmlspecialchars($pkg['reference_number']); ?>')">
                                         <i class="fas fa-times"></i> Reject
                                     </button>
                                 <?php endif; ?>
-                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>')">
+                                <?php if (PaymentService::state($pkg) === 'reservation_paid'): ?>
+                                <button type="button" class="btn-card-action btn-balance-mobile" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => 'package', 'id' => (int)$pkg['id'], 'ref' => $pkg['reference_number'], 'guest' => $pkg['guest_name'] ?? '', 'total' => PaymentService::amounts($pkg)['total'], 'paid' => PaymentService::amounts($pkg)['paid'], 'balance' => PaymentService::amounts($pkg)['balance'], 'reserved_at' => $pkg['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                    <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                </button>
+                                <?php endif; ?>
+                                <button type="button" class="btn-card-action btn-reject-mobile" onclick="openAdminCancelModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', '<?php echo htmlspecialchars($pkg['guest_name']); ?>', <?php echo PaymentService::amounts($pkg)['paid']; ?>)">
                                     <i class="fas fa-ban"></i> Cancel
                                 </button>
                             </div>
@@ -2520,8 +2527,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo $booking['number_of_guests']; ?></td>
-                                <td>₱<?php echo number_format($booking['total_amount']); ?></td>
-                                <td><span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($booking['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($booking); ?></td>
+                                <td><?php echo PaymentService::adminBadge($booking); ?></td>
                                 <td>
                                     <div style="display: flex; flex-wrap: wrap; gap: 4px;">
                                         <button class="btn-view-booking" onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
@@ -2603,14 +2610,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                 <td><?php echo htmlspecialchars($item['guest_name'] ?? 'N/A'); ?></td>
                                 <td><?php echo htmlspecialchars($item['_item']); ?></td>
                                 <td><?php echo formatDateDisplay($item['created_at']); ?></td>
-                                <td>₱<?php echo number_format($item['total_amount'] ?? $item['grand_total'] ?? 0); ?></td>
-                                <td><span class="badge <?php echo $item['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>"><?php echo ucfirst($item['payment_status']); ?></span></td>
+                                <td><?php echo PaymentService::adminAmountCell($item); ?></td>
+                                <td><?php echo PaymentService::adminBadge($item); ?></td>
                                 <td><span class="badge <?php echo $status_class; ?>"><i class="fas <?php echo $status_icon; ?>"></i> <?php echo ucfirst($item['booking_status']); ?></span></td>
                                 <td>
                                     <div style="display: flex; gap: 4px; flex-wrap: wrap;">
                                         <button class="btn-view-booking" onclick='viewBooking("<?php echo $item['_type']; ?>", <?php echo htmlspecialchars(json_encode($item), ENT_QUOTES, "UTF-8"); ?>)'>
                                             <i class="fas fa-eye"></i> View
                                         </button>
+                                        <?php if (PaymentService::state($item) === 'reservation_paid'): ?>
+                                        <button type="button" class="btn-sm btn-balance" onclick='openBalanceModal(<?php echo htmlspecialchars(json_encode(['type' => $item['_type'], 'id' => (int)$item['id'], 'ref' => $item['reference_number'], 'guest' => $item['guest_name'] ?? '', 'total' => PaymentService::amounts($item)['total'], 'paid' => PaymentService::amounts($item)['paid'], 'balance' => PaymentService::amounts($item)['balance'], 'reserved_at' => $item['reservation_paid_at'] ?? null]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                            <i class="fas fa-hand-holding-usd"></i> Mark Balance Paid
+                                        </button>
+                                        <?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -2694,6 +2706,49 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 <button type="submit" class="btn-confirm-submit" id="confirmActionSubmitBtn" name="confirm_payment">
                     <i class="fas fa-check-circle"></i> <span id="confirmActionSubmitText">Confirm</span>
                 </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- MARK BALANCE PAID MODAL -->
+<div class="modal" id="balanceModal">
+    <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-header" style="border-bottom: 2px solid #d1fae5;">
+            <h3 style="color: #065f46;"><i class="fas fa-hand-holding-usd" style="color: #10b981;"></i> Mark Balance as Paid</h3>
+            <button class="close" type="button" onclick="closeBalanceModal()">&times;</button>
+        </div>
+        <form method="POST" id="balanceForm">
+            <input type="hidden" name="mark_balance_paid" value="1">
+            <input type="hidden" name="booking_id" id="balance_booking_id">
+            <input type="hidden" name="booking_type" id="balance_booking_type">
+            <div class="pay-summary">
+                <div class="row-line"><span>Reference</span><strong id="balanceRef">—</strong></div>
+                <div class="row-line"><span>Guest</span><span id="balanceGuest">—</span></div>
+                <div class="row-line"><span>Total booking price</span><span id="balanceTotal">₱0.00</span></div>
+                <div class="row-line"><span>Already paid</span><span id="balancePaid">₱0.00</span></div>
+                <div class="row-line due"><span>Balance to receive now</span><strong id="balanceDue">₱0.00</strong></div>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <label style="display:block; margin-bottom:6px; font-weight:600; color:#1e293b; font-size:13px;">How was it paid? <span style="color:#dc2626;">*</span></label>
+                <select name="payment_method" required style="width:100%; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; font-size:14px;">
+                    <?php foreach (PaymentService::METHODS as $mKey => $mLabel): ?>
+                        <option value="<?php echo $mKey; ?>"><?php echo htmlspecialchars($mLabel); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <label style="display:block; margin-bottom:6px; font-weight:600; color:#1e293b; font-size:13px;">Date &amp; time received</label>
+                <input type="datetime-local" name="received_at" id="balance_received_at" style="width:100%; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; font-size:14px;">
+                <div class="pay-note">Leave as is if the balance was received just now. For an earlier stay, enter the actual date it was received.</div>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <label style="display:block; margin-bottom:6px; font-weight:600; color:#1e293b; font-size:13px;">Note <span style="color:#94a3b8;">(optional)</span></label>
+                <input type="text" name="payment_notes" maxlength="255" placeholder="e.g. paid in cash at check-in" style="width:100%; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; font-size:14px;">
+            </div>
+            <div style="display:flex; gap:10px; margin-top:16px;">
+                <button type="button" onclick="closeBalanceModal()" style="flex:1; padding:12px; background:#e2e8f0; color:#475569; border:none; border-radius:10px; font-weight:700; cursor:pointer;"><i class="fas fa-times"></i> Cancel</button>
+                <button type="submit" style="flex:1; padding:12px; background:linear-gradient(135deg,#10b981,#059669); color:white; border:none; border-radius:10px; font-weight:700; cursor:pointer;"><i class="fas fa-check"></i> Balance Received</button>
             </div>
         </form>
     </div>
@@ -2817,6 +2872,11 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                     <span style="color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase;">Guest</span>
                     <span id="adminCancelGuest" style="font-weight: 600; color: #0B2447;">—</span>
                 </div>
+            </div>
+            <div id="adminCancelCreditNotice" style="display:none; background:#f5f3ff; border:1px solid #ddd6fe; color:#5b21b6; border-radius:12px; padding:10px 14px; margin-bottom:15px; font-size:13px; line-height:1.5;">
+                <i class="fas fa-redo"></i> <strong><span id="adminCancelCreditAmount">₱0.00</span> has already been paid.</strong>
+                Reservation fees are non-refundable, so this amount stays recorded as a <strong>rebooking credit</strong>.
+                The booking will show as <strong>Rebooking Required</strong> and its dates will be released.
             </div>
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 6px; font-weight: 600; color: #1e293b; font-size: 13px;">
@@ -2944,6 +3004,59 @@ function showBookingType(type) {
 /* ============================================================
    CONFIRM MODAL
    ============================================================ */
+
+// ============================================================
+// Payment state (mirrors includes/PaymentService.php)
+// ============================================================
+function payInfo(b) {
+    var total = parseFloat(b.grand_total !== undefined && b.grand_total !== null ? b.grand_total : (b.total_amount || 0)) || 0;
+    var isComponent = !!(b.package_id && parseInt(b.package_id, 10) > 0 && (b.grand_total === undefined || b.grand_total === null));
+    var isLegacy = !!(b.original_booking_id && parseInt(b.original_booking_id, 10) > 0);
+    var fee = parseFloat(b.reservation_fee_amount || 0) || Math.min(1000, total);
+    var paid = (b.amount_paid !== undefined && b.amount_paid !== null) ? (parseFloat(b.amount_paid) || 0)
+             : ((b.payment_status === 'paid' || b.payment_status === 'reservation_paid') ? Math.min(fee, total) : 0);
+    if (isComponent || isLegacy) { fee = 0; paid = 0; }
+    var balance = Math.max(0, Math.round((total - paid) * 100) / 100);
+    var state;
+    if (isLegacy) state = 'legacy_rebook';
+    else if (isComponent) state = 'component';
+    else if (b.booking_status === 'cancelled') state = paid > 0 ? 'rebook_required' : (b.payment_status === 'cancelled' ? 'rejected' : 'cancelled');
+    else if (b.payment_status === 'cancelled') state = 'rejected';
+    else if (paid <= 0) state = 'unpaid';
+    else if (balance <= 0) state = 'paid';
+    else state = 'reservation_paid';
+    var labels = {
+        unpaid: ['Pending Payment', 'badge-warning', 'fa-clock'],
+        reservation_paid: ['Reservation Fee Paid', 'badge-info', 'fa-receipt'],
+        paid: ['Fully Paid', 'badge-success', 'fa-check-circle'],
+        rebook_required: ['Rebooking Required', 'badge-rebook', 'fa-redo'],
+        cancelled: ['Cancelled (unpaid)', 'badge-danger', 'fa-times-circle'],
+        rejected: ['Payment Rejected', 'badge-danger', 'fa-times-circle'],
+        component: ['Part of package', 'badge-info', 'fa-box-open'],
+        legacy_rebook: ['Old rebooking record', 'badge-info', 'fa-history']
+    };
+    var l = labels[state];
+    return { state: state, total: total, fee: fee, paid: paid, balance: balance,
+             badge: '<span class="badge ' + l[1] + '"><i class="fas ' + l[2] + '"></i> ' + l[0] + '</span>' };
+}
+function pesoJs(n) { return '₱' + (parseFloat(n) || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function payRowsHtml(b, rowClass, labelClass, valueClass) {
+    var p = payInfo(b);
+    var row = function (icon, label, value) {
+        return '<div class="' + rowClass + '"><span class="' + labelClass + '"><i class="fas ' + icon + '"></i> ' + label + '</span><span class="' + valueClass + '">' + value + '</span></div>';
+    };
+    var h = row('fa-money-bill-wave', 'Total Booking Price', '<strong>' + pesoJs(p.total) + '</strong>');
+    if (p.state === 'component') return h + row('fa-box-open', 'Payment', 'Paid with the package');
+    if (p.state === 'legacy_rebook') return h + row('fa-history', 'Payment', 'Old rebooking record — not a separate sale');
+    h += row('fa-receipt', 'Reservation Fee', pesoJs(p.fee));
+    h += row('fa-coins', 'Amount Paid', pesoJs(p.paid));
+    if (p.state === 'rebook_required') h += row('fa-redo', 'Rebooking Credit', '<strong style="color:#6d28d9;">' + pesoJs(p.paid) + '</strong> (non-refundable)');
+    else if (p.state !== 'cancelled' && p.state !== 'rejected') h += row('fa-wallet', 'Balance Due', '<strong style="color:' + (p.balance > 0 ? '#b45309' : '#047857') + ';">' + pesoJs(p.balance) + '</strong>');
+    if (b.reservation_paid_at) h += row('fa-calendar-check', 'Reservation Fee Received', escapeHtml(b.reservation_paid_at));
+    if (b.balance_paid_at) h += row('fa-calendar-check', 'Balance Received', escapeHtml(b.balance_paid_at));
+    return h;
+}
+
 function openConfirmModal(actionType, bookingId, reference, guestName, extra, amount) {
     var modal = document.getElementById('confirmActionModal');
     var content = document.getElementById('confirmActionContent');
@@ -2975,7 +3088,7 @@ function openConfirmModal(actionType, bookingId, reference, guestName, extra, am
         itemLabel.textContent = 'House';
         itemEl.textContent = extra || '—';
         itemRow.style.display = 'flex';
-        warningText.innerHTML = 'Payment stays <strong>PAID</strong>. The new dates will be <strong>locked in</strong> and the guest will receive a confirmation email.';
+        warningText.innerHTML = 'The amount already paid is <strong>carried forward</strong> — no new reservation fee. The new dates will be <strong>locked in</strong> and the guest will receive a confirmation email.';
         submitBtn.innerHTML = '<i class="fas fa-check-circle"></i> Yes, Confirm Rebook';
         bookingTypeInput.value = 'house';
         typeInput.value = 'rebook';
@@ -2988,13 +3101,13 @@ function openConfirmModal(actionType, bookingId, reference, guestName, extra, am
             content.classList.add('payment-variant');
             iconInner.className = 'fas fa-check-circle';
         }
-        titleEl.textContent = 'Confirm Payment?';
-        msgEl.textContent = 'Please verify the payment proof before confirming.';
-        itemLabel.textContent = extra ? (extra.charAt(0).toUpperCase() + extra.slice(1)) : 'Booking';
-        itemEl.innerHTML = '₱' + parseFloat(amount || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+        titleEl.textContent = 'Confirm Reservation Fee?';
+        msgEl.textContent = 'Check the GCash proof: the guest should have paid the reservation fee shown below.';
+        itemLabel.textContent = 'Reservation fee';
+        itemEl.innerHTML = pesoJs(amount);
         itemRow.style.display = 'flex';
-        warningText.innerHTML = 'Confirming will mark this booking as <strong>PAID</strong> and the guest will receive a payment confirmation email.';
-        submitBtn.innerHTML = '<i class="fas fa-check-circle"></i> Yes, Confirm Payment';
+        warningText.innerHTML = 'This records <strong>' + pesoJs(amount) + ' received</strong>. The booking becomes <strong>Reservation Fee Paid</strong>; the remaining balance is collected on arrival with <strong>Mark Balance Paid</strong>.';
+        submitBtn.innerHTML = '<i class="fas fa-check-circle"></i> Yes, Fee Received';
         bookingTypeInput.value = extra || '';
         typeInput.value = 'payment';
         submitBtn.name = 'confirm_payment';
@@ -3003,6 +3116,48 @@ function openConfirmModal(actionType, bookingId, reference, guestName, extra, am
     modal.classList.add('show');
     document.body.style.overflow = 'hidden';
 }
+
+function openBalanceModal(d) {
+    document.getElementById('balance_booking_id').value = d.id;
+    document.getElementById('balance_booking_type').value = d.type;
+    document.getElementById('balanceRef').textContent = d.ref || '—';
+    document.getElementById('balanceGuest').textContent = d.guest || '—';
+    document.getElementById('balanceTotal').textContent = pesoJs(d.total);
+    document.getElementById('balancePaid').textContent = pesoJs(d.paid);
+    document.getElementById('balanceDue').textContent = pesoJs(d.balance);
+    var now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    var input = document.getElementById('balance_received_at');
+    input.value = now.toISOString().slice(0, 16);
+    input.max = input.value;
+    if (d.reserved_at) input.min = String(d.reserved_at).replace(' ', 'T').slice(0, 16);
+    document.getElementById('balanceModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+function closeBalanceModal() {
+    document.getElementById('balanceModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+// Prevent double submission of any action form (server side is idempotent too)
+document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement) || (form.method || '').toLowerCase() !== 'post') return;
+    if (form.dataset.submitting === '1') { e.preventDefault(); return; }
+    form.dataset.submitting = '1';
+    var submitter = e.submitter;
+    if (submitter && submitter.name && !form.querySelector('input[type=hidden][name="' + submitter.name + '"]')) {
+        var h = document.createElement('input');
+        h.type = 'hidden'; h.name = submitter.name; h.value = submitter.value || '1';
+        form.appendChild(h);
+    }
+    setTimeout(function () {
+        form.querySelectorAll('button[type=submit], input[type=submit]').forEach(function (b) {
+            b.disabled = true;
+            if (!b.dataset.origHtml) b.dataset.origHtml = b.innerHTML;
+            b.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing…';
+        });
+    }, 0);
+}, true);
 
 function closeConfirmModal() {
     document.getElementById('confirmActionModal').classList.remove('show');
@@ -3083,7 +3238,14 @@ function toggleRejectRebookOther() {
 /* ============================================================
    ADMIN CANCEL MODAL
    ============================================================ */
-function openAdminCancelModal(bookingType, bookingId, reference, guestName) {
+function openAdminCancelModal(bookingType, bookingId, reference, guestName, amountPaid) {
+    var creditBox = document.getElementById('adminCancelCreditNotice');
+    if (creditBox) {
+        var paidNum = parseFloat(amountPaid || 0) || 0;
+        creditBox.style.display = paidNum > 0 ? 'block' : 'none';
+        var amt = document.getElementById('adminCancelCreditAmount');
+        if (amt) amt.textContent = pesoJs(paidNum);
+    }
     document.getElementById('admin_cancel_booking_id').value = bookingId;
     document.getElementById('admin_cancel_booking_type').value = bookingType;
     document.getElementById('adminCancelRef').textContent = reference;
@@ -3394,13 +3556,9 @@ function viewBooking(type, booking) {
             if (bookingData.special_requests) {
                 html += '<div class="pkg-row"><span class="pkg-label"><i class="fas fa-comment"></i> Special Requests</span><span class="pkg-value" style="font-weight:500; color:#475569; white-space:pre-line;">' + escapeHtml(bookingData.special_requests) + '</span></div>';
             }
-            html += '<div class="pkg-row" style="background:#f0fdf4; border-radius:10px; margin-top:4px;"><span class="pkg-label"><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> Total Amount</span><span class="pkg-value pkg-total-amount">₱' + parseFloat(bookingData.grand_total || bookingData.total_amount || 0).toLocaleString('en-US',{minimumFractionDigits:2}) + '</span></div>';
+            html += payRowsHtml(bookingData, 'pkg-row', 'pkg-label', 'pkg-value');
 
-            var paymentBadge = '';
-            if (bookingData.payment_status === 'paid') paymentBadge = '<span class="pkg-status-pill paid"><i class="fas fa-check-circle"></i> PAID</span>';
-            else if (bookingData.payment_status === 'pending') paymentBadge = '<span class="pkg-status-pill pending"><i class="fas fa-clock"></i> PENDING</span>';
-            else if (bookingData.payment_status === 'cancelled') paymentBadge = '<span class="pkg-status-pill cancelled"><i class="fas fa-times-circle"></i> CANCELLED</span>';
-            else paymentBadge = '<span class="pkg-status-pill pending"><i class="fas fa-clock"></i> ' + escapeHtml(bookingData.payment_status || 'N/A') + '</span>';
+            var paymentBadge = payInfo(bookingData).badge;
             html += '<div class="pkg-row"><span class="pkg-label"><i class="fas fa-credit-card"></i> Payment Status</span><span class="pkg-value">' + paymentBadge + '</span></div>';
 
             var statusBadge = '';
@@ -3484,13 +3642,21 @@ function viewBooking(type, booking) {
                 if (bookingData.special_requests) details.push({ label: 'Special Requests', value: '<em style="color:#475569;">' + escapeHtml(bookingData.special_requests) + '</em>' });
             }
 
-            details.push({ label: 'Total Amount', value: '<strong style="color:#10b981; font-size:16px;">₱' + parseFloat(bookingData.grand_total || bookingData.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 }) + '</strong>' });
-
-            var paymentBadge2 = '';
-            if (bookingData.payment_status === 'paid') paymentBadge2 = '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Paid</span>';
-            else if (bookingData.payment_status === 'pending') paymentBadge2 = '<span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>';
-            else if (bookingData.payment_status === 'cancelled') paymentBadge2 = '<span class="badge badge-danger"><i class="fas fa-times-circle"></i> Cancelled</span>';
-            else paymentBadge2 = '<span class="badge badge-info">' + escapeHtml(bookingData.payment_status || 'N/A') + '</span>';
+            (function () {
+                var p = payInfo(bookingData);
+                details.push({ label: 'Total Booking Price', value: '<strong style="color:#0B2447; font-size:16px;">' + pesoJs(p.total) + '</strong>' });
+                if (p.state !== 'component' && p.state !== 'legacy_rebook') {
+                    details.push({ label: 'Reservation Fee', value: pesoJs(p.fee) });
+                    details.push({ label: 'Amount Paid', value: pesoJs(p.paid) });
+                    if (p.state === 'rebook_required') details.push({ label: 'Rebooking Credit', value: '<strong style="color:#6d28d9;">' + pesoJs(p.paid) + '</strong> (non-refundable)' });
+                    else if (p.state !== 'cancelled' && p.state !== 'rejected') details.push({ label: 'Balance Due', value: '<strong style="color:' + (p.balance > 0 ? '#b45309' : '#047857') + ';">' + pesoJs(p.balance) + '</strong>' });
+                    if (bookingData.reservation_paid_at) details.push({ label: 'Reservation Fee Received', value: escapeHtml(bookingData.reservation_paid_at) });
+                    if (bookingData.balance_paid_at) details.push({ label: 'Balance Received', value: escapeHtml(bookingData.balance_paid_at) });
+                } else {
+                    details.push({ label: 'Payment', value: p.state === 'component' ? 'Paid with the package' : 'Old rebooking record — not a separate sale' });
+                }
+            })();
+            var paymentBadge2 = payInfo(bookingData).badge;
             details.push({ label: 'Payment Status', value: paymentBadge2 });
 
             var statusBadge2 = '';
@@ -3810,7 +3976,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 var status = (props.payment || props.status || 'pending').toString().toLowerCase();
                 var icon = props.type === 'house' ? '🏠' : props.type === 'tour' ? '🏖' : props.type === 'food' ? '🍽' : '📦';
-                var statusText = status === 'paid' ? 'PAID' : 'PENDING';
+                var statusText = status === 'paid' ? 'FULLY PAID' : (status === 'reservation_paid' ? 'FEE PAID' : 'PENDING');
                 return { html: '<div class="fc-modern-event"><strong>' + icon + ' ' + statusText + '</strong><br><span>' + (props.guest_name || arg.event.title) + '</span></div>' };
             },
             eventClick: function(info) {

@@ -1,6 +1,7 @@
 <?php
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', '0');   // never show errors to visitors (production)
+ini_set('log_errors', '1');
 session_start();
 
 require_once 'database.php';
@@ -298,6 +299,16 @@ if(isset($_POST['register'])) {
             if ($emergencyError) $errors['emergency_number'] = $emergencyError;
         }
 
+        // EMERGENCY CONTACT NAME — letters, spaces and hyphens only (optional field)
+        $emergency_name_clean = trim(preg_replace('/\s+/u', ' ', (string)($_POST['emergency_name'] ?? '')));
+        if ($emergency_name_clean !== '') {
+            if (mb_strlen($emergency_name_clean) > 100) {
+                $errors['emergency_name'] = "Emergency contact name must not exceed 100 characters";
+            } elseif (!preg_match('/^(?=.*\p{L})[\p{L} \-]+$/u', $emergency_name_clean)) {
+                $errors['emergency_name'] = "Emergency contact name can only contain letters, spaces, and hyphens";
+            }
+        }
+
         // ID NUMBER VALIDATION — STRICT 5-20 CHARACTERS
         $id_number = trim($_POST['id_number'] ?? '');
 
@@ -438,7 +449,7 @@ if(isset($_POST['register'])) {
             $_POST['address'],
             $_POST['id_type'],
             $id_number,
-            $_POST['emergency_name'],
+            $emergency_name_clean,
             $full_emergency,
             $has_asthma,
             $_POST['asthma_severity'] ?? null,
@@ -1812,7 +1823,8 @@ i.fab {
         <div class="form-row-2">
             <div class="form-group">
                 <label>Emergency Contact Name</label>
-                <input type="text" name="emergency_name" class="form-control" value="<?php echo value('emergency_name'); ?>" placeholder="Person to contact in emergency">
+                <input type="text" name="emergency_name" id="emergency_name_input" class="form-control <?php echo hasError('emergency_name'); ?>" value="<?php echo value('emergency_name'); ?>" placeholder="Person to contact in emergency" maxlength="100" autocomplete="off">
+                <div class="error-field-label" id="emergencyNameMsg" style="<?php echo hasError('emergency_name') ? '' : 'display:none;'; ?>"><i class="fas fa-exclamation-circle"></i> <span><?php echo hasError('emergency_name') ? htmlspecialchars($errors['emergency_name']) : ''; ?></span></div>
             </div>
             
             <div class="form-group">
@@ -2582,6 +2594,48 @@ function showStep(step){
 }
 
 
+// Emergency contact name: letters, spaces and hyphens only
+function checkEmergencyName(focus){
+    const input = document.getElementById('emergency_name_input');
+    const msg = document.getElementById('emergencyNameMsg');
+    if (!input || !msg) return true;
+    const v = input.value.trim();
+    const ok = v === '' || /^(?=.*\p{L})[\p{L} \-]+$/u.test(v.replace(/\s+/g, ' '));
+    input.classList.toggle('error', !ok);
+    msg.style.display = ok ? 'none' : '';
+    if (!ok) {
+        msg.querySelector('span').textContent = 'Emergency contact name can only contain letters, spaces, and hyphens.';
+        if (focus) input.focus();
+    }
+    return ok;
+}
+(function(){
+    const input = document.getElementById('emergency_name_input');
+    if (!input) return;
+    const BAD = /[^\p{L} \-]/gu;
+    const clean = function(str){ return str.replace(BAD, '').replace(/ {2,}/g, ' '); };
+    input.addEventListener('input', function(){
+        const before = this.value, after = clean(before);
+        if (before !== after) {
+            this.value = after;
+            const msg = document.getElementById('emergencyNameMsg');
+            this.classList.add('error');
+            msg.querySelector('span').textContent = 'Only letters, spaces, and hyphens are allowed.';
+            msg.style.display = '';
+        } else {
+            checkEmergencyName(false);
+        }
+    });
+    input.addEventListener('paste', function(e){
+        e.preventDefault();
+        const t = (e.clipboardData || window.clipboardData).getData('text');
+        const c = clean(t);
+        const s = this.selectionStart, en = this.selectionEnd;
+        this.value = (this.value.slice(0, s) + c + this.value.slice(en)).slice(0, 100);
+        this.dispatchEvent(new Event('input'));
+    });
+})();
+
 function validateStep(step){
 
     let panel=document.querySelector(
@@ -2592,6 +2646,10 @@ function validateStep(step){
         'input[required], select[required]'
     );
 
+
+    if (step === 2 && !checkEmergencyName(true)) {
+        return false;
+    }
 
     for(let field of required){
 

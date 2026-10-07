@@ -1,9 +1,10 @@
 <?php
 session_start();
 
-// ✅ FIX #1: Enable error reporting
+// Errors are logged, not shown to guests
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 
 if (isset($_SESSION['flash_success'])) {
     $success = $_SESSION['flash_success'];
@@ -18,6 +19,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && empty($_FILES) && 
 require_once 'database.php';
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
+require_once 'includes/PaymentService.php';
+require_once 'includes/RebookService.php';
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -133,13 +136,15 @@ function getGoogleMapsUrl($address) {
     return 'https://www.google.com/maps/search/?api=1&query=' . urlencode($address);
 }
 function getBookedDates($pdo, $house_id, $exclude_booking_id = null) {
-    $query = "SELECT check_in_date, check_out_date FROM house_bookings 
-              WHERE house_id = ? AND booking_status != 'cancelled'";
-    if($exclude_booking_id) $query .= " AND id != ?";
-    $stmt = $pdo->prepare($query);
-    if($exclude_booking_id) $stmt->execute([$house_id, $exclude_booking_id]);
-    else $stmt->execute([$house_id]);
-    return $stmt->fetchAll();
+    // Same rule as new bookings (AvailabilityService): confirmed/completed stays
+    // occupy nights [check-in, check-out); blocked dates are one-night ranges.
+    $own_ref = null;
+    if ($exclude_booking_id) {
+        $r = $pdo->prepare("SELECT reference_number FROM house_bookings WHERE id = ?");
+        $r->execute([$exclude_booking_id]);
+        $own_ref = $r->fetchColumn() ?: null;
+    }
+    return AvailabilityService::houseOccupiedRanges($pdo, $house_id, $exclude_booking_id, $own_ref);
 }
 function getProfilePhoto($guest) {
     if ($guest && !empty($guest['profile_photo'])) {
@@ -171,24 +176,22 @@ function hasFeedback($booking) {
     return !empty($booking['feedback_text']);
 }
 function getBookingStatusLabel($status, $payment_status = null, $rebook_count = 0, $rebooked_at = null, $rebook_confirmed_at = null) {
-    if (!empty($rebooked_at) && empty($rebook_confirmed_at)) {
+    $secured = in_array($payment_status, ['reservation_paid', 'paid'], true);
+    if (!empty($rebooked_at) && empty($rebook_confirmed_at) && $status !== 'cancelled' && $status !== 'completed') {
         return '<span class="badge badge-warning"><i class="fas fa-redo"></i> Pending Rebook</span>';
-    }
-    if (!empty($rebooked_at) && !empty($rebook_confirmed_at)) {
-        if ($payment_status == 'paid') return '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Confirmed</span>';
-        return '<span class="badge badge-info"><i class="fas fa-hourglass-half"></i> Awaiting Payment</span>';
-    }
-    if ($status == 'confirmed' && $payment_status == 'paid') {
-        return '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Confirmed</span>';
     }
     if ($status == 'completed') {
         return '<span class="badge badge-completed"><i class="fas fa-check-double"></i> Completed</span>';
     }
     if ($status == 'cancelled') {
+        if ($secured) return '<span class="badge badge-info"><i class="fas fa-redo"></i> Rebooking Required</span>';
         return '<span class="badge badge-danger"><i class="fas fa-times-circle"></i> Cancelled</span>';
     }
-    if ($status == 'confirmed' && $payment_status != 'paid') {
-        return '<span class="badge badge-info"><i class="fas fa-hourglass-half"></i> Awaiting Payment</span>';
+    if ($status == 'confirmed' && $secured) {
+        return '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Confirmed</span>';
+    }
+    if ($status == 'confirmed') {
+        return '<span class="badge badge-info"><i class="fas fa-hourglass-half"></i> Awaiting Reservation Fee</span>';
     }
     return '<span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>';
 }
@@ -205,21 +208,20 @@ function canRebook($pdo, $booking_id, $user_id, &$message = '') {
     $guest = $stmt->fetch();
     if(!$guest) { $message = "Guest profile not found."; return false; }
 
-    $stmt = $pdo->prepare("
-        SELECT booking_status, payment_status, rebook_count, created_at,
-               check_in_date, check_out_date,
-               previous_check_in_date, previous_check_out_date
-        FROM house_bookings WHERE id = ?
-    ");
+    $stmt = $pdo->prepare("SELECT * FROM house_bookings WHERE id = ?");
     $stmt->execute([$booking_id]);
     $booking = $stmt->fetch();
     if(!$booking) { $message = "Booking not found."; return false; }
+    if((int)$booking['guest_id'] !== (int)$guest['id']) { $message = "Booking not found."; return false; }
+    if(!empty($booking['original_booking_id'])) { $message = "This is an old rebooking record."; return false; }
 
-    if($booking['booking_status'] != 'completed' && $booking['booking_status'] != 'confirmed') {
-        $message = "Only confirmed or completed bookings can be rebooked."; return false;
+    // Paid reservations (reservation fee or more received) can be rebooked; a cancelled
+    // paid reservation keeps its payment as a rebooking credit.
+    if(!in_array($booking['booking_status'], ['confirmed', 'cancelled'], true)) {
+        $message = "Only confirmed bookings or paid cancelled reservations can be rebooked (completed stays cannot)."; return false;
     }
-    if($booking['payment_status'] != 'paid') {
-        $message = "Only paid bookings can be rebooked."; return false;
+    if(PaymentService::amounts($booking)['paid'] <= 0) {
+        $message = "Only bookings with a paid reservation fee can be rebooked."; return false;
     }
 
     $rebook_count = (int)($booking['rebook_count'] ?? 0);
@@ -238,7 +240,7 @@ function canRebook($pdo, $booking_id, $user_id, &$message = '') {
         $days_elapsed = (int)$today->diff($reference_date)->days;
 
         if ($days_elapsed > 7) {
-            $message = "Rebook option expired. You can only rebook within 7 days from your booking date (" . $reference_date->format('M d, Y') . ").";
+            $message = "Rebook option expired. You can only rebook within 7 days from booking date (" . $reference_date->format('M d, Y') . "). The amount already paid is carried forward when you rebook.";
             return false;
         }
     } catch (Exception $e) {
@@ -249,29 +251,47 @@ function canRebook($pdo, $booking_id, $user_id, &$message = '') {
     return true;
 }
 
-function getRebookCount($pdo, $user_id) {
-    $stmt = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
-    $stmt->execute([$user_id]);
-    $guest = $stmt->fetch();
-    if(!$guest) return 0;
-    $stmt = $pdo->prepare("SELECT COALESCE(SUM(rebook_count), 0) FROM house_bookings WHERE guest_id = ? AND rebook_count > 0");
-    $stmt->execute([$guest['id']]);
-    return (int)$stmt->fetchColumn();
+// Rebook limit is PER BOOKING (max 2 for each booking) — the same rule canRebook() enforces.
+function getRemainingRebooksForBooking(array $booking) {
+    return max(0, 2 - (int)($booking['rebook_count'] ?? 0));
 }
-function getRemainingRebooks($pdo, $user_id) {
-    return max(0, 2 - getRebookCount($pdo, $user_id));
+
+// CSRF token for state-changing admin actions on this page (Manual Complete)
+if (session_status() === PHP_SESSION_ACTIVE && empty($_SESSION['profile_csrf'])) $_SESSION['profile_csrf'] = bin2hex(random_bytes(16));
+$profile_csrf = (string)($_SESSION['profile_csrf'] ?? '');
+
+/** POST form for "Complete" (admin/staff). */
+function completeBookingButton($type, $id) {
+    global $profile_csrf;
+    return '<form method="POST" style="display:inline;margin:0;" onsubmit="return confirm(\'Mark as completed?\')">'
+         . '<input type="hidden" name="complete_booking" value="' . (int)$id . '">'
+         . '<input type="hidden" name="booking_type" value="' . htmlspecialchars($type, ENT_QUOTES) . '">'
+         . '<input type="hidden" name="csrf" value="' . htmlspecialchars($profile_csrf, ENT_QUOTES) . '">'
+         . '<button type="submit" class="btn-sm btn-complete"><i class="fas fa-check-double"></i> Complete</button></form>';
+}
+
+/** "Rebook" button for a paid tour / food / package booking (date change, payment carried forward). */
+function serviceRebookButton($type, array $row, $mobile) {
+    if (!RebookService::canRebookService($type, $row)) return '';
+    if ($type === 'tour') $current = $row['booking_date'] ?? '';
+    elseif ($type === 'food') $current = $row['preferred_date'] ?? '';
+    else {
+        $d = array_filter([$row['house_check_in'] ?? null, $row['tour_date'] ?? null, $row['food_date'] ?? null]);
+        $current = $d ? min($d) : '';
+    }
+    $args = htmlspecialchars(json_encode([$type, (int)$row['id'], (string)$row['reference_number'], (string)$current,
+        RebookService::remaining($row), RebookService::daysLeft($row), ($row['booking_status'] ?? '') === 'cancelled']), ENT_QUOTES, 'UTF-8');
+    $cls = $mobile ? 'btn-card-action btn-rebook-svc-mobile' : 'btn-sm btn-rebook-svc';
+    return '<button type="button" class="' . $cls . '" onclick="openServiceRebookModal.apply(null, ' . $args . ')"><i class="fas fa-redo"></i> Rebook</button>';
 }
 
 function getRebookDaysRemaining($pdo, $booking_id) {
-    $stmt = $pdo->prepare("
-        SELECT created_at, booking_status, payment_status
-        FROM house_bookings WHERE id = ?
-    ");
+    $stmt = $pdo->prepare("SELECT * FROM house_bookings WHERE id = ?");
     $stmt->execute([$booking_id]);
     $booking = $stmt->fetch();
     if(!$booking) return 0;
-    if($booking['booking_status'] != 'completed' && $booking['booking_status'] != 'confirmed') return 0;
-    if($booking['payment_status'] != 'paid') return 0;
+    if(!in_array($booking['booking_status'], ['confirmed', 'cancelled'], true)) return 0;
+    if(PaymentService::amounts($booking)['paid'] <= 0) return 0;
 
     try {
         $created = new DateTime($booking['created_at']);
@@ -280,7 +300,7 @@ function getRebookDaysRemaining($pdo, $booking_id) {
         $today->setTime(0, 0, 0);
 
         $elapsed = (int)$today->diff($created)->days;
-        $remaining = 7 - $elapsed;
+        $remaining = 8 - $elapsed;   // eligible through day 7 from booking date (count includes today)
         return max(0, $remaining);
     } catch (Exception $e) {
         return 0;
@@ -290,7 +310,7 @@ function getRebookDaysRemaining($pdo, $booking_id) {
 function computeRebookInfo($pdo, $booking, $user_id) {
     $info = [
         'days_remaining' => 0,
-        'remaining_rebooks' => getRemainingRebooks($pdo, $user_id),
+        'remaining_rebooks' => getRemainingRebooksForBooking($booking),
         'rebooks_used' => 0,
         'is_eligible' => false,
         'is_expired' => false,
@@ -299,11 +319,11 @@ function computeRebookInfo($pdo, $booking, $user_id) {
         'rebook_status' => 'unavailable',
         'rebook_message' => ''
     ];
-    $info['rebooks_used'] = 2 - $info['remaining_rebooks'];
+    $info['rebooks_used'] = min(2, (int)($booking['rebook_count'] ?? 0));
     $info['days_remaining'] = getRebookDaysRemaining($pdo, $booking['id']);
 
-    $is_rebookable_status = in_array($booking['booking_status'], ['confirmed', 'completed']);
-    if ($is_rebookable_status && $booking['payment_status'] == 'paid') {
+    $is_rebookable_status = in_array($booking['booking_status'], ['confirmed', 'cancelled'], true);
+    if ($is_rebookable_status && PaymentService::amounts($booking)['paid'] > 0) {
         $msg = '';
         $can = canRebook($pdo, $booking['id'], $user_id, $msg);
         $info['is_eligible'] = $can;
@@ -413,8 +433,10 @@ $stmt = $pdo->query("SELECT content_key, content_value FROM site_content WHERE s
 while($row = $stmt->fetch()) {
     $gcash_settings[$row['content_key']] = $row['content_value'];
 }
-$gcash_name = $gcash_settings['account_name'] ?? 'Juan Dela Cruz';
-$gcash_number = $gcash_settings['number'] ?? '09123456789';
+$gcash_cfg = PaymentService::gcashConfig($pdo);
+$gcash_configured = $gcash_cfg['configured'];   // placeholders are never shown to guests
+$gcash_name = $gcash_settings['account_name'] ?? '';
+$gcash_number = $gcash_settings['number'] ?? '';
 $gcash_qr = $gcash_settings['qr_code'] ?? '';
 $gcash_instructions = $gcash_settings['instructions'] ?? "1. Open GCash app\n2. Click 'Pay QR' or 'Scan QR'\n3. Scan the QR code above\n4. Enter the exact amount shown\n5. Complete the payment\n6. Take a screenshot of the transaction\n7. Upload screenshot as proof of payment";
 
@@ -478,15 +500,19 @@ if (!file_exists('uploads/payments/')) {
 // ---- REBOOK BOOKING ----
 if(isset($_POST['rebook_booking'])) {
     try {
-        $booking_id = $_POST['booking_id'];
-        $check_in = $_POST['check_in'];
-        $check_out = $_POST['check_out'];
-        $guests = $_POST['guests'];
+        $booking_id = (int)($_POST['booking_id'] ?? 0);
+        $check_in = (string)($_POST['check_in'] ?? '');
+        $check_out = (string)($_POST['check_out'] ?? '');
+        $guests = (int)($_POST['guests'] ?? 0);
 
-        $stmt = $pdo->prepare("SELECT * FROM house_bookings WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT b.*, h.capacity FROM house_bookings b JOIN houses h ON h.id = b.house_id WHERE b.id = ?");
         $stmt->execute([$booking_id]);
         $original_booking = $stmt->fetch();
         if(!$original_booking) throw new Exception("Booking not found");
+        if($guests < 1) throw new Exception("Please enter the number of guests.");
+        if(!empty($original_booking['capacity']) && $guests > (int)$original_booking['capacity']) {
+            throw new Exception("This house accommodates up to " . (int)$original_booking['capacity'] . " guests.");
+        }
 
         $message = '';
         if(!canRebook($pdo, $booking_id, $_SESSION['user_id'], $message)) throw new Exception($message);
@@ -507,21 +533,23 @@ if(isset($_POST['rebook_booking'])) {
 
         $nights = $check_out_date->diff($check_in_date)->days;
         $orig_nights = (new DateTime($original_booking['check_out_date']))->diff(new DateTime($original_booking['check_in_date']))->days;
+        // House price is per NIGHT (not per guest): keep the booked nightly rate.
         $price_per_night = $orig_nights > 0 ? $original_booking['total_amount'] / $orig_nights : $original_booking['total_amount'];
-        $total = $price_per_night * $nights * $guests;
+        $total = round($price_per_night * $nights, 2);
 
+        // The payment already received stays on this booking (carried forward); no new reservation fee.
         $stmt = $pdo->prepare("UPDATE house_bookings SET 
             previous_check_in_date = ?, previous_check_out_date = ?,
-            previous_number_of_guests = ?, previous_total_amount = ?,
+            previous_number_of_guests = ?, previous_total_amount = ?, previous_booking_status = ?,
             check_in_date = ?, check_out_date = ?, number_of_guests = ?, total_amount = ?,
             booking_status = 'pending',
             rebook_count = COALESCE(rebook_count, 0) + 1,
             rebooked_at = NOW(), rebook_confirmed_at = NULL
-            WHERE id = ?");
+            WHERE id = ? AND guest_id = ?");
         $stmt->execute([
             $original_booking['check_in_date'], $original_booking['check_out_date'],
-            $original_booking['number_of_guests'], $original_booking['total_amount'],
-            $check_in, $check_out, $guests, $total, $booking_id
+            $original_booking['number_of_guests'], $original_booking['total_amount'], $original_booking['booking_status'],
+            $check_in, $check_out, $guests, $total, $booking_id, $original_booking['guest_id']
         ]);
 
         try { EmailNotifications::sendRebookAlert($booking_id, $pdo); } catch (Throwable $mailEx) {}
@@ -555,6 +583,31 @@ if(isset($_POST['rebook_booking'])) {
     }
 }
 
+// ---- REBOOK TOUR / FOOD / PACKAGE (no refund; payment carried forward) ----
+if(isset($_POST['rebook_service'])) {
+    try {
+        $svc_type = (string)($_POST['booking_type'] ?? '');
+        $svc_id   = (int)($_POST['booking_id'] ?? 0);
+        $svc_date = (string)($_POST['new_date'] ?? '');
+        $g = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
+        $g->execute([$_SESSION['user_id']]);
+        $svc_guest = $g->fetchColumn();
+        if (!$svc_guest) throw new Exception("Guest profile not found.");
+        $res = RebookService::rebookService($pdo, $svc_type, $svc_id, $svc_date, (int)$svc_guest, (int)$_SESSION['user_id']);
+        if (class_exists('SystemLogger')) {
+            SystemLogger::log($pdo, 'rebook', 'booking',
+                "Guest rebooked {$svc_type} booking '{$res['reference']}' from {$res['old_date']} to {$res['new_date']} (payment carried forward, no new fee)",
+                $svc_id, $svc_type . '_booking', ['old_date' => $res['old_date']], ['new_date' => $res['new_date']]);
+        }
+        header("Location: profile.php?rebooked=service");
+        exit();
+    } catch (AvailabilityConflictException $e) {
+        $error = "❌ That date is not available — " . $e->getMessage() . " Please choose another date.";
+    } catch (Exception $e) {
+        $error = "❌ " . $e->getMessage();
+    }
+}
+
 // ---- CANCEL REBOOK ----
 if(isset($_POST['cancel_rebook'])) {
     try {
@@ -563,7 +616,7 @@ if(isset($_POST['cancel_rebook'])) {
         $stmt = $pdo->prepare("SELECT id, guest_id, booking_status, payment_status, 
             rebook_count, rebooked_at, rebook_confirmed_at,
             previous_check_in_date, previous_check_out_date,
-            previous_number_of_guests, previous_total_amount, reference_number
+            previous_number_of_guests, previous_total_amount, previous_booking_status, reference_number
             FROM house_bookings WHERE id = ?");
         $stmt->execute([$booking_id]);
         $booking = $stmt->fetch();
@@ -578,6 +631,8 @@ if(isset($_POST['cancel_rebook'])) {
 
         $new_rebook_count = max(0, ($booking['rebook_count'] ?? 0) - 1);
         $has_backup = !empty($booking['previous_check_in_date']) && !empty($booking['previous_check_out_date']);
+        $restore_status = in_array($booking['previous_booking_status'] ?? '', ['confirmed', 'cancelled', 'completed', 'pending'], true)
+            ? $booking['previous_booking_status'] : 'confirmed';
 
         if ($has_backup) {
             $stmt = $pdo->prepare("UPDATE house_bookings SET 
@@ -586,17 +641,17 @@ if(isset($_POST['cancel_rebook'])) {
                 number_of_guests = previous_number_of_guests,
                 total_amount = previous_total_amount,
                 previous_check_in_date = NULL, previous_check_out_date = NULL,
-                previous_number_of_guests = NULL, previous_total_amount = NULL,
-                booking_status = 'confirmed',
+                previous_number_of_guests = NULL, previous_total_amount = NULL, previous_booking_status = NULL,
+                booking_status = ?,
                 rebook_count = ?, rebooked_at = NULL, rebook_confirmed_at = NULL
                 WHERE id = ?");
         } else {
             $stmt = $pdo->prepare("UPDATE house_bookings SET 
-                booking_status = 'confirmed',
+                booking_status = ?, previous_booking_status = NULL,
                 rebook_count = ?, rebooked_at = NULL, rebook_confirmed_at = NULL
                 WHERE id = ?");
         }
-        $stmt->execute([$new_rebook_count, $booking_id]);
+        $stmt->execute([$restore_status, $new_rebook_count, $booking_id]);
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log(
@@ -637,43 +692,23 @@ if(isset($_POST['cancel_booking'])) {
         if (!$guestRow) throw new Exception("Guest profile not found.");
 
         $table = $booking_type . '_bookings';
-        $has_rebooked_at = ($booking_type === 'house');
-
-        if ($has_rebooked_at) {
-            $stmt = $pdo->prepare("SELECT id, reference_number, payment_status, booking_status, rebooked_at 
-                                   FROM `$table` WHERE id = ? AND guest_id = ?");
-        } else {
-            $stmt = $pdo->prepare("SELECT id, reference_number, payment_status, booking_status, NULL AS rebooked_at 
-                                   FROM `$table` WHERE id = ? AND guest_id = ?");
-        }
+        $stmt = $pdo->prepare("SELECT * FROM `$table` WHERE id = ? AND guest_id = ?");
         $stmt->execute([$booking_id, $guestRow['id']]);
         $booking = $stmt->fetch();
 
         if (!$booking) throw new Exception("Booking not found or does not belong to you.");
-
-        if ($booking['payment_status'] === 'paid') {
-            throw new Exception("This booking has already been paid and cannot be cancelled. Please use the Rebook feature instead.");
+        if (PaymentService::isComponent($booking)) {
+            throw new Exception("This item is part of a package. Please cancel the whole package instead.");
         }
-
+        if (PaymentService::amounts($booking)['paid'] > 0 || in_array($booking['payment_status'], ['reservation_paid', 'paid'], true)) {
+            throw new Exception("Your reservation fee is non-refundable. You may rebook your reservation subject to availability and the rebooking rules.");
+        }
         if ($booking['booking_status'] === 'cancelled') {
             throw new Exception("This booking is already cancelled.");
         }
 
-        if ($booking_type === 'house') {
-            $pdo->prepare("UPDATE `$table` 
-                           SET booking_status = 'cancelled', 
-                               cancelled_at = NOW(),
-                               rebooked_at = NULL,
-                               rebook_confirmed_at = NULL
-                           WHERE id = ?")
-                ->execute([$booking_id]);
-        } else {
-            $pdo->prepare("UPDATE `$table` 
-                           SET booking_status = 'cancelled', 
-                               cancelled_at = NOW()
-                           WHERE id = ?")
-                ->execute([$booking_id]);
-        }
+        // Unpaid booking: normal cancellation (no money was received)
+        PaymentService::cancelBooking($pdo, $booking_type, $booking_id, 'Cancelled by guest (unpaid reservation)', $guestRow['id']);
 
         // ✅ SEND CANCELLATION EMAIL (package-aware via EmailNotifications)
         try {
@@ -719,11 +754,14 @@ if(isset($_POST['confirm_payment']) && isset($_SESSION['user_id'])) {
         $check->execute([$_SESSION['user_id']]);
         if(!in_array($check->fetchColumn(), ['admin', 'staff'])) throw new Exception("Only admin or staff can confirm payments.");
 
-        $booking_type = $_POST['booking_type'];
-        $booking_id = $_POST['booking_id'];
-        $table = $booking_type . '_bookings';
-        $pdo->prepare("UPDATE `$table` SET payment_status = 'paid', booking_status = 'confirmed', paid_at = NOW() WHERE id = ?")->execute([$booking_id]);
-        try { EmailNotifications::sendPaymentConfirmation($booking_id, $booking_type, $pdo); } catch (Throwable $e) {}
+        $booking_type = (string)($_POST['booking_type'] ?? '');
+        $booking_id = (int)($_POST['booking_id'] ?? 0);
+        if (!isset(PaymentService::TABLES[$booking_type])) throw new Exception("Invalid booking type.");
+        // Records the reservation fee only (idempotent); the balance is recorded on arrival.
+        $res = PaymentService::confirmReservation($pdo, $booking_type, $booking_id, (int)$_SESSION['user_id']);
+        if ($res['status'] === 'recorded') {
+            try { EmailNotifications::sendPaymentConfirmation($booking_id, $booking_type, $pdo); } catch (Throwable $e) {}
+        }
 
         header("Location: profile.php?confirmed=1");
         exit();
@@ -735,14 +773,15 @@ if(isset($_POST['confirm_payment']) && isset($_SESSION['user_id'])) {
 // ============================================================
 // ✅ FIXED: COMPLETE BOOKING (house / tour / food / package)
 // ============================================================
-if(isset($_GET['complete_booking'])) {
+if($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['complete_booking'])) {
     try {
+        if (!hash_equals($profile_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page and try again.");
         $check = $pdo->prepare("SELECT role FROM users WHERE id = ?");
         $check->execute([$_SESSION['user_id']]);
-        if(!in_array($check->fetchColumn(), ['admin', 'staff'])) throw new Exception("Only admin or staff can complete bookings.");
+        if(!in_array($check->fetchColumn(), ['admin', 'staff'], true)) throw new Exception("Only admin or staff can complete bookings.");
 
-        $booking_id   = (int)$_GET['complete_booking'];
-        $booking_type = $_GET['booking_type'] ?? 'house';
+        $booking_id   = (int)$_POST['complete_booking'];
+        $booking_type = (string)($_POST['booking_type'] ?? '');
 
         $allowed_tables = [
             'house'   => 'house_bookings',
@@ -754,8 +793,18 @@ if(isset($_GET['complete_booking'])) {
 
         $table = $allowed_tables[$booking_type];
 
-        $pdo->prepare("UPDATE `$table` SET booking_status = 'completed', completed_at = NOW() WHERE id = ?")
-            ->execute([$booking_id]);
+        // Only a secured booking (reservation fee received) can become a completed booking.
+        $done = $pdo->prepare("UPDATE `$table` SET booking_status = 'completed', completed_at = NOW()
+                                WHERE id = ? AND amount_paid > 0 AND booking_status = 'confirmed'");
+        $done->execute([$booking_id]);
+        if ($done->rowCount() !== 1) throw new Exception("Only confirmed bookings whose reservation fee was received can be marked completed.");
+        if ($booking_type === 'package') {
+            foreach (['house_bookings' => 'house_booking_id', 'tour_bookings' => 'tour_booking_id', 'food_bookings' => 'food_booking_id'] as $ct => $col) {
+                $pdo->prepare("UPDATE `$ct` c JOIN package_bookings p ON p.id = c.package_id AND p.$col = c.id
+                                  SET c.booking_status = 'completed', c.completed_at = COALESCE(c.completed_at, NOW())
+                                WHERE p.id = ? AND c.booking_status IN ('pending','confirmed')")->execute([$booking_id]);
+            }
+        }
 
         // ✅ Email — package-aware na via EmailNotifications
         try { EmailNotifications::sendBookingCompleted($booking_id, $booking_type, $pdo); } catch (Throwable $e) {
@@ -790,6 +839,15 @@ if(isset($_POST['upload_proof'])) {
 
         if (!in_array($booking_type, ['house', 'tour', 'food', 'package'])) throw new Exception("Invalid booking type.");
         if (empty($gcash_reference)) throw new Exception("GCash reference number is required.");
+        // Only the booking owner can upload proof, and only for a payable (unpaid, non-component) booking
+        $own = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
+        $own->execute([$_SESSION['user_id']]);
+        $proof_guest_id = (int)$own->fetchColumn();
+        $chk = $pdo->prepare("SELECT * FROM `" . $booking_type . "_bookings` WHERE id = ? AND guest_id = ?");
+        $chk->execute([(int)$booking_id, $proof_guest_id]);
+        $proof_row = $chk->fetch();
+        if (!$proof_row) throw new Exception("Booking not found or does not belong to you.");
+        if (!PaymentService::canPayReservation($proof_row)) throw new Exception("This booking is not awaiting a reservation fee payment.");
         if (!preg_match('/^[0-9]{6,20}$/', $gcash_reference)) throw new Exception("GCash reference number must be 6-20 digits.");
 
         $new_filename = null;
@@ -823,8 +881,13 @@ if(isset($_POST['upload_proof'])) {
         }
 
         $table = $booking_type . '_bookings';
-        $pdo->prepare("UPDATE `$table` SET payment_proof = ?, gcash_reference = ?, proof_uploaded_at = NOW() WHERE id = ?")
-            ->execute([$new_filename, $gcash_reference, $booking_id]);
+        $up = $pdo->prepare("UPDATE `$table` SET payment_proof = ?, gcash_reference = ?, proof_uploaded_at = NOW()
+                             WHERE id = ? AND guest_id = ? AND payment_status = 'pending'");
+        $up->execute([$new_filename, $gcash_reference, (int)$booking_id, $proof_guest_id]);
+        if ($up->rowCount() !== 1) {
+            @unlink($upload_dir . $new_filename);
+            throw new Exception("This booking is not awaiting a reservation fee payment.");
+        }
 
         try { EmailNotifications::sendPaymentProofAlert($booking_id, $booking_type, $pdo); } catch (Throwable $e) {}
         try { EmailNotifications::sendPaymentUnderReview($booking_id, $booking_type, $pdo); } catch (Throwable $e) {}
@@ -1198,8 +1261,8 @@ background-position: center top;
     background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%);
     <?php endif; ?>
 
-    height: 220px;
-    min-height: 220px;
+    height: auto;
+    min-height: 0;
     padding: 0;
 
     display:flex;
@@ -1214,13 +1277,13 @@ background-position: center top;
 .hero-content {
     max-width: 800px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 34px 20px 30px;
     position: relative;
     z-index: 1;
 }
-        .hero h1 { font-size: 48px; font-weight: 700; margin-bottom: 20px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); word-wrap: break-word; }
+        .hero h1 { font-size: 30px; font-weight: 700; margin-bottom: 6px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); word-wrap: break-word; }
         .hero h1 i { color: #7bb8f0; }
-        .hero p { font-size: 18px; margin-bottom: 30px; opacity: 0.95; text-shadow: 0 1px 15px rgba(0,0,0,0.15); }
+        .hero p { font-size: 15px; margin-bottom: 0; opacity: 0.95; text-shadow: 0 1px 15px rgba(0,0,0,0.15); }
 
         .main-container { max-width: 1300px; margin: 30px auto; padding: 0 20px; }
 
@@ -1231,12 +1294,6 @@ background-position: center top;
         .alert i { font-size: 18px; flex-shrink: 0; margin-top: 2px; }
 
         /* STATS */
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: #4DA6D9; border-radius: 16px; padding: 25px 20px; text-align: center; box-shadow: 0 10px 30px rgba(77, 166, 217, 0.2); transition: transform 0.3s; border: 1px solid rgba(255,255,255,0.15); }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(77, 166, 217, 0.3); }
-        .stat-icon { width: 50px; height: 50px; background: rgba(255,255,255,0.2); border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 15px; color: white; font-size: 20px; border: 2px solid rgba(255,255,255,0.1); }
-        .stat-number { font-size: 28px; font-weight: 700; color: white; word-break: break-word; }
-        .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; }
 
 .featured-package{
     background:linear-gradient(135deg,#0B2447,#4DA6D9);
@@ -1348,6 +1405,7 @@ background-position: center top;
         .btn-pay { background: #10b981; color: white; }
         .btn-pay:hover { background: #059669; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }
         .btn-cancel-booking { background: #ef4444; color: white; }
+        .btn-rebook-svc { background: #4DA6D9; color: white; }
         .btn-cancel-booking:hover { background: #dc2626; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
         .btn-complete { background: #8b5cf6; color: white; }
         .btn-complete:hover { background: #7c3aed; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3); }
@@ -1399,6 +1457,7 @@ background-position: center top;
         .booking-card-mobile .btn-rebook-confirm-mobile { background: linear-gradient(135deg, #8b5cf6, #a78bfa); color: white; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.25); }
         .booking-card-mobile .btn-pay-mobile { background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25); }
         .booking-card-mobile .btn-cancel-booking-mobile { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25); }
+        .booking-card-mobile .btn-rebook-svc-mobile { background: linear-gradient(135deg, #4DA6D9, #2b8bc4); color: white; }
         .booking-card-mobile .btn-cancel-rebook-mobile { background: #f59e0b; color: #0B2447; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.25); }
 
         .rebook-info-container { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
@@ -1640,14 +1699,8 @@ background-position: center top;
         }
         @media (max-width: 768px) {
             .main-container { padding: 0 15px; margin: 20px auto; }
-            .hero { padding: 50px 0; }
-            .hero h1 { font-size: 28px; }
-            .hero p { font-size: 15px; }
-            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-            .stat-card { padding: 18px 12px; border-radius: 12px; }
-            .stat-icon { width: 40px; height: 40px; font-size: 16px; margin-bottom: 10px; }
-            .stat-number { font-size: 22px; }
-            .stat-label { font-size: 11px; }
+            .hero h1 { font-size: 24px; }
+            .hero p { font-size: 14px; }
             .profile-card { padding: 20px 18px; border-radius: 18px; }
             .avatar { width: 100px; height: 100px; font-size: 40px; }
             .profile-name { font-size: 20px; }
@@ -1688,11 +1741,6 @@ background-position: center top;
         @media (max-width: 480px) {
             body { font-size: 13px; }
             .main-container { padding: 0 12px; margin: 15px auto; }
-            .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
-            .stat-card { padding: 14px 10px; border-radius: 10px; }
-            .stat-icon { width: 34px; height: 34px; font-size: 14px; border-radius: 8px; margin-bottom: 8px; }
-            .stat-number { font-size: 18px; }
-            .stat-label { font-size: 10px; }
             .profile-card { padding: 18px 15px; border-radius: 16px; }
             .avatar { width: 88px; height: 88px; font-size: 36px; border-width: 3px; }
             .profile-name { font-size: 18px; }
@@ -1732,8 +1780,7 @@ background-position: center top;
         }
         @media (max-width: 360px) {
             .hero h1 { font-size: 20px; }
-            .hero p { font-size: 12px; }
-            .stats-grid { grid-template-columns: 1fr; }
+            .hero p { font-size: 12.5px; }
             .section-tabs { gap: 3px; }
             .tab { padding: 6px 8px; font-size: 10px; }
             .modal-content { padding: 14px 12px; }
@@ -1754,12 +1801,9 @@ background-position: center top;
         /* PROFILE HERO OVERRIDE */
 /* PROFILE HERO FIX */
 .hero {
-    min-height:420px !important;
-    height:420px !important;
+    min-height:0 !important;
+    height:auto !important;
     padding:0 !important;
-}
-
-.hero {
     background-size:cover !important;
     background-position:center center !important;
 }
@@ -1790,7 +1834,141 @@ background-position: center top;
 .featured-package .package-content p {
     color:rgba(255,255,255,0.9) !important;
 }
+
+/* ===== GUEST DASHBOARD REFRESH ===== */
+.hero-content { padding: 30px 20px 26px !important; }
+.main-container { margin-top: 20px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat-card { position: relative; background: #fff; border: 1px solid #dce8f3; border-radius: 14px; padding: 14px 14px 14px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; align-items: center; text-align: left; box-shadow: 0 2px 8px rgba(11,36,71,0.05); overflow: hidden; }
+.stat-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: #4DA6D9; }
+.stat-card:hover { transform: none; box-shadow: 0 2px 8px rgba(11,36,71,0.05); }
+.stat-icon { grid-row: 1 / span 2; width: 42px; height: 42px; margin: 0; background: #eaf5fc; color: #2f8dc4; border: 1px solid #d5eaf7; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 17px; }
+.stat-number { font-size: 24px; line-height: 1.1; font-weight: 800; color: #0B2447; grid-column: 2; word-break: normal; }
+.stat-label { color: #4a6a8c; font-size: 12.5px; font-weight: 600; grid-column: 2; }
+@media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .stat-card { padding: 12px; } .stat-icon { width: 36px; height: 36px; font-size: 15px; } .stat-number { font-size: 20px; } }
+@media (max-width: 360px) { .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; } .stat-card { column-gap: 8px; padding: 10px 8px; } .stat-icon { width: 30px; height: 30px; font-size: 13px; } .stat-label { font-size: 11px; } }
+
+.featured-package { padding: 14px 18px !important; border-radius: 14px !important; margin-bottom: 18px !important; box-shadow: 0 2px 8px rgba(11,36,71,.12) !important; }
+.featured-package .package-title { font-size: 12px !important; text-transform: uppercase; letter-spacing: .5px; opacity: .9; }
+.featured-package .package-content h3 { font-size: 18px !important; }
+.featured-package .package-content p { font-size: 13px; margin-top: 2px; }
+
+.profile-grid { margin-top: 0; gap: 18px; grid-template-columns: 320px minmax(0, 1fr); }
+.profile-card, .bookings-section { border-radius: 16px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); border: 1px solid #dce8f3; }
+.profile-card { padding: 20px; top: 90px; }
+.profile-header { margin-bottom: 14px; }
+.profile-card .avatar { width: 88px; height: 88px; font-size: 36px; margin-bottom: 10px; }
+.profile-name { font-size: 19px; }
+.profile-role { display: inline-block; margin: 4px 0 0; padding: 2px 12px; background: #eaf5fc; color: #1f6f9f; border-radius: 20px; font-size: 12px; font-weight: 700; }
+.contact-summary { border-top: 1px solid #e8f0fe; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.contact-summary .cs-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #0B2447; min-width: 0; }
+.contact-summary .cs-row i { width: 16px; text-align: center; color: #4DA6D9; flex-shrink: 0; }
+.contact-summary .cs-row span { overflow-wrap: anywhere; min-width: 0; }
+.profile-card .btn-edit { margin-top: 14px; padding: 11px; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; }
+.more-details { margin-top: 12px; border: 1px solid #dce8f3; border-radius: 12px; background: #f8fbfe; }
+.more-details > summary { cursor: pointer; list-style: none; padding: 11px 14px; font-weight: 700; font-size: 13px; color: #0B2447; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; }
+.more-details > summary::-webkit-details-marker { display: none; }
+.more-details > summary::after { content: "\f078"; font-family: "Font Awesome 6 Free", "Font Awesome 5 Free", sans-serif; font-weight: 900; font-size: 11px; color: #4DA6D9; transition: transform .2s; }
+.more-details[open] > summary::after { transform: rotate(180deg); }
+.more-details > summary:focus-visible { outline: 3px solid rgba(77,166,217,.45); outline-offset: 2px; border-radius: 12px; }
+.more-details .more-body { padding: 0 14px 14px; }
+.more-details .info-item { padding: 8px 0; gap: 10px; }
+.more-details .info-label { color: #5b6b7e; }
+
+.bookings-section { padding: 18px; }
+.section-tabs { flex-wrap: nowrap; gap: 6px; margin-bottom: 16px; padding-bottom: 12px; overflow-x: auto; scroll-snap-type: x proximity; }
+.tab { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border-radius: 10px; font-size: 13px; color: #4a6a8c; flex-shrink: 0; scroll-snap-align: start; min-height: 40px; }
+.tab i { font-size: 13px; }
+.tab:hover { background: #eaf5fc; color: #1f6f9f; }
+.tab.active { background: #0B2447; color: #fff; box-shadow: 0 2px 6px rgba(11,36,71,.2); }
+.tab:focus-visible { outline: 3px solid rgba(77,166,217,.5); outline-offset: 2px; }
+
+/* Booking tables: compact, business-friendly columns (full details are in "View") */
+.table-responsive { border-color: #dce8f3; }
+table { min-width: 0; }
+thead th { background: #0B2447; color: #e6f2fb; padding: 11px 10px; font-size: 10.5px; letter-spacing: .4px; border-bottom: none; }
+tbody td { padding: 12px 10px; vertical-align: middle; }
+tbody tr:hover td { background: #f1f8fd; }
+.badge, .table-responsive .badge { white-space: normal; }
+#houses-tab .desktop-table :is(th,td):nth-child(3),
+#packages-tab .desktop-table :is(th,td):nth-child(3),
+#rebooks-tab .desktop-table :is(th,td):nth-child(3),
+#history-tab .desktop-table :is(th,td):nth-child(4) { display: none; }
+#tours-tab .desktop-table :is(th,td):is(:nth-child(3),:nth-child(4),:nth-child(7)),
+#food-tab .desktop-table :is(th,td):is(:nth-child(3),:nth-child(5),:nth-child(6)) { display: none; }
+.action-cell { min-width: 0; }
+.desktop-table tbody td div, .desktop-table tbody td small { white-space: normal !important; }
+.desktop-table tbody td { max-width: 260px; }
+#history-tab .desktop-table thead th, #history-tab .desktop-table tbody td { padding: 10px 7px; font-size: 12px; }
+#history-tab .desktop-table td:nth-child(3) { min-width: 120px; }
+#history-tab .desktop-table td:nth-child(2) { min-width: 96px; word-break: break-all; }
+.desktop-table .badge, .desktop-table [class*="pay-badge"], .desktop-table [class*="status-badge"] { padding: 3px 8px; font-size: 9.5px; }
+.action-cell .btn-rebook-link, .action-cell .btn-cancel-rebook, .action-cell .btn-sm { white-space: normal; text-align: left; max-width: 100%; }
+@media (max-width: 1100px) {
+    .profile-grid { grid-template-columns: minmax(0, 1fr) !important; }
+    .profile-card { position: static; }
+    table { min-width: 640px; }
+}
+@media (max-width: 768px) {
+    .bookings-section { padding: 14px 12px; border-radius: 14px; }
+    .profile-card { padding: 16px; }
+    .tab { padding: 8px 12px; font-size: 12.5px; }
+}
+@media (max-width: 480px) { .tab { padding: 8px 10px; font-size: 12px; } .tab i { display: none; } .hero-content { padding: 24px 16px 20px !important; } }
+
+/* ===== DASHBOARD ORDER: summary, reminders, tabs, profile, health, feedback ===== */
+.dash-top { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-bottom: 18px; align-items: start; }
+.dash-card { background: #fff; border: 1px solid #dce8f3; border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); min-width: 0; }
+.dash-card h2 { font-size: 16px; font-weight: 700; color: #0B2447; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.dash-card h2 i { color: #2f8dc4; background: #eaf5fc; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; font-size: 13px; }
+.res-list { display: flex; flex-direction: column; gap: 8px; }
+.res-item { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; background: #f8fbfe; border: 1px solid #e3edf6; border-radius: 12px; }
+.res-icon { width: 38px; height: 38px; border-radius: 10px; background: #0B2447; color: #7bb8f0; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.res-main { min-width: 0; }
+.res-name { font-weight: 700; color: #0B2447; font-size: 14px; overflow-wrap: anywhere; }
+.res-ref { font-weight: 500; color: #5b6b7e; font-size: 12px; margin-left: 4px; white-space: nowrap; }
+.res-sub { font-size: 12.5px; color: #4a6a8c; margin-top: 2px; overflow-wrap: anywhere; }
+.res-money { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: #5b6b7e; margin-top: 4px; }
+.res-money strong { color: #0B2447; }
+.res-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.res-link { background: none; border: none; color: #1f78ad; font-weight: 700; font-size: 12.5px; cursor: pointer; padding: 4px 2px; font-family: inherit; min-height: 32px; }
+.res-link:hover { text-decoration: underline; }
+.rem-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border-left: 4px solid; }
+.rem-item.due { background: #fffbeb; border-left-color: #f59e0b; }
+.rem-item.info { background: #eff6ff; border-left-color: #4DA6D9; }
+.rem-item .res-main { flex: 1; }
+.res-pay { background: #10b981; color: #fff; border: none; border-radius: 10px; padding: 9px 14px; font-weight: 700; font-size: 12.5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; min-height: 40px; white-space: nowrap; font-family: inherit; }
+.res-pay:hover { background: #059669; }
+.res-link:focus-visible, .res-pay:focus-visible, .btn-side:focus-visible { outline: 3px solid rgba(77,166,217,.5); outline-offset: 2px; }
+.dash-empty { padding: 18px 8px; text-align: center; color: #4a6a8c; font-size: 13.5px; }
+.dash-empty i { display: block; font-size: 26px; color: #4DA6D9; margin-bottom: 8px; }
+.dash-empty.ok i { color: #10b981; }
+.dash-empty a { color: #1f78ad; font-weight: 700; }
+@media (max-width: 992px) { .dash-top { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) { .res-item { grid-template-columns: 34px minmax(0, 1fr); } .res-side { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; align-items: center; } .rem-item { flex-wrap: wrap; } .res-pay { width: 100%; justify-content: center; } }
+
+/* bookings first, account area after */
+.profile-grid { grid-template-columns: minmax(0, 1fr) !important; margin-top: 0; }
+.account-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 18px; }
+.account-row .profile-card { position: static; }
+.side-card { background: #fff; border: 1px solid #dce8f3; border-radius: 16px; padding: 18px; box-shadow: 0 2px 8px rgba(11,36,71,0.05); min-width: 0; }
+.side-card h3 { font-size: 16px; font-weight: 700; color: #0B2447; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.side-card h3 i { color: #2f8dc4; }
+.side-card p { font-size: 13.5px; color: #4a6a8c; line-height: 1.5; margin: 0 0 14px; }
+.mini-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mini-card { background: #f5f9fd; border: 1px solid #dce8f3; border-radius: 12px; padding: 12px; }
+.mini-card .mc-num { font-size: 22px; font-weight: 800; color: #0B2447; line-height: 1.1; }
+.mini-card .mc-label { font-size: 12px; color: #4a6a8c; margin-top: 2px; }
+.btn-side { width: 100%; min-height: 44px; background: #2f8dc4; color: #fff; border: none; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit; }
+.btn-side:hover { background: #247aab; }
+.health-card .more-details { background: #fff; }
+.card-proof:not(:has(img)):not(:has(.card-gcash)) { display: none; }
+@media (max-width: 1100px) { .account-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .account-row .profile-card { grid-column: 1 / -1; } }
+@media (max-width: 700px) { .account-row { grid-template-columns: minmax(0, 1fr); } }
     </style>
+<?php echo PaymentService::css(); ?>
 </head>
 <body>
 
@@ -1811,7 +1989,7 @@ Welcome back,
 </h1>
 
 <p>
-Your travel dashboard — manage trips, payments, and vacation plans in one place.
+Manage your reservations, payments, and vacation plans in one place.
 </p>
     </div>
 </div>
@@ -1826,7 +2004,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
     <?php if(isset($_GET['proof_uploaded'])): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Payment proof uploaded! Please wait for admin confirmation.</span></div>
     <?php endif; ?>
-    <?php if(isset($_GET['rebooked'])): ?>
+    <?php if(isset($_GET['rebooked']) && $_GET['rebooked'] === 'service'): ?>
+    <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebooked! Your new date is confirmed. The amount already paid is carried forward — no new reservation fee.</span></div>
+    <?php elseif(isset($_GET['rebooked'])): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebook submitted! Waiting for admin confirmation.</span></div>
     <?php endif; ?>
     <?php if(isset($_GET['rebook_cancelled'])): ?>
@@ -1860,7 +2040,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
 
     <div class="stat-card">
         <div class="stat-icon">
-            <i class="fas fa-suitcase"></i>
+            <i class="fas fa-box-open"></i>
         </div>
 
         <div class="stat-number">
@@ -1875,7 +2055,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
 
     <div class="stat-card">
         <div class="stat-icon">
-            <i class="fas fa-calendar-check"></i>
+            <i class="fas fa-suitcase-rolling"></i>
         </div>
 
         <div class="stat-number">
@@ -1890,7 +2070,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
 
     <div class="stat-card">
         <div class="stat-icon">
-            <i class="fas fa-clock"></i>
+            <i class="fas fa-hourglass-half"></i>
         </div>
 
         <div class="stat-number">
@@ -1898,7 +2078,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
         </div>
 
         <div class="stat-label">
-            Pending Action
+            Pending Actions
         </div>
     </div>
 
@@ -1928,7 +2108,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
         </div>
 
         <div class="stat-label">
-            Review
+            Reviews
         </div>
     </div>
 
@@ -1966,141 +2146,132 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
 
 <?php endif; ?>
     
+<?php
+// ---- Dashboard summary (display only; reads data already loaded above) ----
+$dash_today = date('Y-m-d');
+$dash_items = [];
+$dash_push = function($type, $tab, $icon, $row, $name, $when_text, $date) use (&$dash_items, $dash_today) {
+    if (PaymentService::isComponent($row) || PaymentService::isLegacyRebook($row)) return;
+    if (in_array($row['booking_status'] ?? '', ['cancelled', 'completed'], true)) return;
+    if (!$date || $date < $dash_today) return;
+    $dash_items[] = [
+        'type' => $type, 'tab' => $tab, 'icon' => $icon, 'row' => $row, 'name' => $name,
+        'when' => $when_text, 'date' => $date, 'a' => PaymentService::amounts($row),
+        'state' => PaymentService::state($row),
+    ];
+};
+foreach ($house_bookings as $b) {
+    $w = formatDateDisplay($b['check_in_date']) . ' → ' . formatDateDisplay($b['check_out_date']);
+    $dash_push('house', 'houses', 'fa-home', $b, $b['house_name'] ?? 'House stay', $w, $b['check_in_date']);
+}
+foreach ($tour_bookings as $b) {
+    $w = formatDateDisplay($b['booking_date']) . (!empty($b['preferred_time']) ? ' · ' . formatTimeDisplay($b['preferred_time']) : '');
+    $dash_push('tour', 'tours', 'fa-compass', $b, $b['tour_name'] ?? 'Tour', $w, $b['booking_date']);
+}
+foreach ($food_bookings as $b) {
+    $fd = !empty($b['preferred_date']) ? $b['preferred_date'] : ($b['booking_date'] ?? null);
+    $w = formatDateDisplay($fd) . (!empty($b['preferred_time']) ? ' · ' . formatTimeDisplay($b['preferred_time']) : '');
+    $dash_push('food', 'food', 'fa-utensils', $b, $b['food_name'] ?? 'Food order', $w, $fd);
+}
+foreach ($package_bookings as $b) {
+    $cands = array_filter([$b['house_check_in'] ?? null, $b['tour_date'] ?? null, $b['food_date'] ?? null], function($d) use ($dash_today) { return $d && $d >= $dash_today; });
+    $first = $cands ? min($cands) : null;
+    $dash_push('package', 'packages', 'fa-box-open', $b, $b['package_name'] ?? 'Vacation package', $first ? 'Starts ' . formatDateDisplay($first) : '', $first);
+}
+usort($dash_items, function($x, $y) { return strcmp($x['date'], $y['date']); });
+$dash_upcoming = array_slice($dash_items, 0, 4);
+$dash_reminders = [];
+foreach ($dash_items as $it) {
+    if ($it['state'] === 'unpaid') $dash_reminders[] = $it + ['kind' => 'fee'];
+    elseif ($it['state'] === 'reservation_paid' && $it['a']['balance'] > 0) $dash_reminders[] = $it + ['kind' => 'balance'];
+}
+$dash_reminders = array_slice($dash_reminders, 0, 4);
+?>
+<div class="dash-top">
+    <section class="dash-card" aria-labelledby="upTitle">
+        <h2 id="upTitle"><i class="fas fa-calendar-check"></i> Upcoming Reservations</h2>
+        <?php if(empty($dash_upcoming)): ?>
+            <div class="dash-empty"><i class="fas fa-umbrella-beach"></i> No upcoming reservations yet. <a href="houses.php">Plan your next stay</a></div>
+        <?php else: ?>
+        <div class="res-list">
+            <?php foreach($dash_upcoming as $it): ?>
+            <div class="res-item">
+                <div class="res-icon"><i class="fas <?php echo $it['icon']; ?>"></i></div>
+                <div class="res-main">
+                    <div class="res-name"><?php echo htmlspecialchars($it['name']); ?></div>
+                    <div class="res-sub"><?php echo htmlspecialchars($it['when']); ?> &middot; Ref <?php echo htmlspecialchars($it['row']['reference_number']); ?></div>
+                    <div class="res-money">
+                        <span>Total <strong><?php echo PaymentService::peso($it['a']['total'], 0); ?></strong></span>
+                        <span>Fee paid <strong><?php echo PaymentService::peso(min($it['a']['paid'], $it['a']['fee']), 0); ?></strong></span>
+                        <span>Balance <strong><?php echo PaymentService::peso($it['a']['balance'], 0); ?></strong></span>
+                    </div>
+                </div>
+                <div class="res-side">
+                    <?php echo PaymentService::guestBadge($it['row']); ?>
+                    <button type="button" class="res-link" onclick="showTab('<?php echo $it['tab']; ?>'); document.getElementById('bookingsSection').scrollIntoView({behavior:'smooth', block:'start'});">View</button>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </section>
+
+    <section class="dash-card" aria-labelledby="remTitle">
+        <h2 id="remTitle"><i class="fas fa-bell"></i> Payment Reminders</h2>
+        <?php if(empty($dash_reminders)): ?>
+            <div class="dash-empty ok"><i class="fas fa-check-circle"></i> You're all caught up. No payments are due right now.</div>
+        <?php else: ?>
+        <div class="res-list">
+            <?php foreach($dash_reminders as $it): $r = $it['row']; ?>
+            <div class="rem-item <?php echo $it['kind'] === 'fee' ? 'due' : 'info'; ?>">
+                <div class="res-main">
+                    <div class="res-name"><?php echo htmlspecialchars($it['name']); ?> <span class="res-ref">Ref <?php echo htmlspecialchars($r['reference_number']); ?></span></div>
+                    <?php if($it['kind'] === 'fee'): ?>
+                        <div class="res-sub"><?php echo !empty($r['payment_proof'])
+                            ? 'Payment proof submitted. Waiting for confirmation.'
+                            : 'Pay the ' . PaymentService::peso($it['a']['fee'], 0) . ' reservation fee to secure this booking.'; ?></div>
+                    <?php else: ?>
+                        <div class="res-sub">Reservation fee received. Remaining balance <strong><?php echo PaymentService::peso($it['a']['balance'], 0); ?></strong> &mdash; pay on arrival.</div>
+                    <?php endif; ?>
+                </div>
+                <?php if($it['kind'] === 'fee' && empty($r['payment_proof']) && PaymentService::canPayReservation($r)): ?>
+                <button type="button" class="res-pay" onclick="openPaymentModal('<?php echo $it['type']; ?>', <?php echo (int)$r['id']; ?>, <?php echo PaymentService::feeFor($it['a']['total']); ?>, '<?php echo htmlspecialchars($r['reference_number'], ENT_QUOTES); ?>')"><i class="fas fa-credit-card"></i> Pay now</button>
+                <?php endif; ?>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </section>
+</div>
+
     <!-- PROFILE GRID -->
     <div class="profile-grid">
         
-        <!-- PROFILE CARD -->
-        <div class="profile-card">
-            <div class="profile-header">
-                <div class="avatar">
-                    <?php if ($profile_photo): ?>
-                        <img src="<?php echo $profile_photo; ?>?<?php echo time(); ?>" alt="Profile Photo">
-                    <?php else: ?>
-                        <span class="default-icon"><i class="fas fa-user"></i></span>
-                    <?php endif; ?>
-                </div>
-                <div class="profile-name"><?php echo $guest ? htmlspecialchars($guest['full_name']) : htmlspecialchars($user['username']); ?></div>
-                <div class="profile-role"><?php echo ucfirst($user['role']); ?></div>
-            </div>
-            <div class="profile-info">
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-user"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">Username</div>
-                        <div class="info-value"><?php echo htmlspecialchars($user['username']); ?></div>
-                    </div>
-                </div>
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-envelope"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">Email</div>
-                        <div class="info-value"><?php echo htmlspecialchars($user['email']); ?></div>
-                    </div>
-                </div>
-                <?php if($guest): ?>
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-phone"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">Contact Number</div>
-                        <div class="info-value"><?php echo htmlspecialchars($guest['contact_number'] ?? 'Not provided'); ?></div>
-                    </div>
-                </div>
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-map-marker-alt"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">Address</div>
-                        <div class="info-value"><?php echo htmlspecialchars($guest['address'] ?? 'Not provided'); ?></div>
-                    </div>
-                </div>
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-id-card"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">ID Type / Number</div>
-                        <div class="info-value"><?php echo htmlspecialchars($guest['id_type'] ?? 'N/A'); ?>: <?php echo htmlspecialchars($guest['id_number'] ?? 'N/A'); ?></div>
-                    </div>
-                </div>
-                <div class="info-item">
-                    <div class="info-icon"><i class="fas fa-phone-alt"></i></div>
-                    <div style="min-width:0;flex:1;">
-                        <div class="info-label">Emergency Contact</div>
-                        <div class="info-value"><?php echo htmlspecialchars($guest['emergency_contact'] ?? 'N/A'); ?> (<?php echo htmlspecialchars($guest['emergency_number'] ?? 'N/A'); ?>)</div>
-                    </div>
-                </div>
-                <?php endif; ?>
-            </div>
-            
-            <!-- ID PHOTO -->
-            <div class="id-photo-display">
-                <div class="id-photo-label"><i class="fas fa-id-card"></i> ID Photo</div>
-                <div class="id-photo-container">
-                    <?php if($id_photo): ?>
-                        <img src="<?php echo $id_photo; ?>?<?php echo time(); ?>" alt="ID Photo">
-                        <div class="id-details">
-                            <div><strong>Type:</strong> <?php echo htmlspecialchars($guest['id_type'] ?? 'N/A'); ?></div>
-                            <div><strong>Number:</strong> <?php echo htmlspecialchars($guest['id_number'] ?? 'N/A'); ?></div>
-                        </div>
-                    <?php else: ?>
-                        <div class="no-photo"><i class="fas fa-id-card" style="font-size:30px;display:block;color:#cbd5e1;"></i><span>No ID photo uploaded</span></div>
-                    <?php endif; ?>
-                </div>
-            </div>
-            
-            <!-- HEALTH INFO -->
-            <?php if($guest): ?>
-            <div class="health-info-section">
-                <h5><i class="fas fa-heartbeat"></i> Health Information</h5>
-                <?php if($guest['has_asthma']): ?>
-                    <span class="health-tag asthma"><i class="fas fa-lungs"></i> Asthma</span>
-                    <?php if($guest['asthma_severity']): ?><span style="font-size:11px;color:#64748b;">(<?php echo ucfirst($guest['asthma_severity']); ?>)</span><?php endif; ?>
-                <?php endif; ?>
-                <?php if($guest['has_allergies']): ?>
-                    <span class="health-tag allergy"><i class="fas fa-allergies"></i> Allergies</span>
-                    <?php $allergy_types = decodeJson($guest['allergy_types']); if(!empty($allergy_types)): ?>
-                        <span style="font-size:11px;color:#64748b;">(<?php echo implode(', ', $allergy_types); ?>)</span>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <?php if($guest['has_medical_condition']): ?><span class="health-tag medical"><i class="fas fa-notes-medical"></i> Medical Condition</span><?php endif; ?>
-                <?php if($guest['has_dietary']): ?><span class="health-tag dietary"><i class="fas fa-utensils"></i> Dietary Restriction</span><?php endif; ?>
-                <?php if($guest['has_accessibility']): ?><span class="health-tag access"><i class="fas fa-wheelchair"></i> Accessibility Need</span><?php endif; ?>
-                <?php if(!$guest['has_asthma'] && !$guest['has_allergies'] && !$guest['has_medical_condition'] && !$guest['has_dietary'] && !$guest['has_accessibility']): ?>
-                    <p style="color:#94a3b8;font-size:13px;margin:5px 0;">No health conditions reported</p>
-                <?php endif; ?>
-                <?php if($guest['emergency_medication']): ?>
-                    <div style="margin-top:8px;font-size:13px;color:#475569;word-break:break-word;">
-                        <i class="fas fa-pills" style="color:#4DA6D9;"></i> Emergency Medication: <?php echo htmlspecialchars($guest['emergency_medication']); ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-            <?php endif; ?>
-            
-            <a href="edit-profile.php" class="btn-edit"><i class="fas fa-edit"></i> Edit Profile</a>
-        </div>
-        
         <!-- BOOKINGS SECTION -->
-        <div class="bookings-section">
+        <div class="bookings-section" id="bookingsSection">
             <div class="section-tabs">
                <div class="tab <?php echo $default_tab === 'houses' ? 'active' : ''; ?>" onclick="showTab('houses')">
-    My Stays
+    <i class="fas fa-house"></i> My Stays
 </div>
 
 <div class="tab <?php echo $default_tab === 'tours' ? 'active' : ''; ?>" onclick="showTab('tours')">
-    My Tours
+    <i class="fas fa-compass"></i> My Tours
 </div>
 
 <div class="tab <?php echo $default_tab === 'food' ? 'active' : ''; ?>" onclick="showTab('food')">
-    Food Orders
+    <i class="fas fa-utensils"></i> Food Orders
 </div>
 
 <div class="tab <?php echo $default_tab === 'packages' ? 'active' : ''; ?>" onclick="showTab('packages')">
-    Vacation Packages
+    <i class="fas fa-suitcase"></i> Vacation Packages
 </div>
 
 <div class="tab <?php echo $default_tab === 'rebooks' ? 'active' : ''; ?>" onclick="showTab('rebooks')">
-    Rebook
+    <i class="fas fa-rotate"></i> Rebook
 </div>
 
 <div class="tab <?php echo $default_tab === 'history' ? 'active' : ''; ?>" onclick="showTab('history')">
-    Past Trips
+    <i class="fas fa-clock-rotate-left"></i> Past Trips
 </div>
             </div>
             
@@ -2118,8 +2289,8 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Ref #</th><th>House</th><th>Booked On</th><th>Check In</th>
-                                    <th>Check Out</th><th>Total</th><th>Payment</th><th>Status</th><th>Action</th>
+                                    <th>Reference</th><th>House</th><th>Booked On</th><th>Check In</th>
+                                    <th>Check Out</th><th>Total Amount</th><th>Payment</th><th>Status</th><th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2127,7 +2298,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     $rb = computeRebookInfo($pdo, $booking, $_SESSION['user_id']);
                                     $pending_rebook = !empty($booking['rebooked_at']) 
                                                    && empty($booking['rebook_confirmed_at'])
-                                                   && $booking['payment_status'] == 'paid'
+                                                   && PaymentService::isSecured($booking)
                                                    && !in_array($booking['booking_status'] ?? '', ['cancelled', 'completed']);
                                 ?>
                                 <tr>
@@ -2152,11 +2323,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             </div>
                                         <?php endif; ?>
                                     </td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td>
                                         <?php echo getBookingStatusLabel(
@@ -2188,10 +2357,10 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 </div>
                                             <?php endif; ?>
                                             
-                                            <?php if($booking['payment_status'] == 'pending'): ?>
+                                            <?php if(PaymentService::canPayReservation($booking)): ?>
                                                 <div class="action-row">
                                                     <?php if(!$booking['payment_proof']): ?>
-                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('house', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('house', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                                             <i class="fas fa-credit-card"></i> Pay
                                                         </button>
                                                     <?php else: ?>
@@ -2203,7 +2372,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 </div>
                                             <?php endif; ?>
                                             
-                                            <?php if($booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid' && !$pending_rebook): ?>
+                                            <?php if($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && !$pending_rebook): ?>
                                                 <?php if($rb['is_eligible']): ?>
                                                     <div class="action-row">
                                                         <button class="btn-rebook-link" onclick="showRebookPolicyPopup(
@@ -2232,11 +2401,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <?php endif; ?>
                                             <?php endif; ?>
                                             
-                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid'): ?>
+                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
                                                 <div class="action-row" style="margin-top:4px;">
-                                                    <a href="?complete_booking=<?php echo $booking['id']; ?>&booking_type=house" class="btn-sm btn-complete" onclick="return confirm('Mark as completed?')">
-                                                        <i class="fas fa-check-double"></i> Complete
-                                                    </a>
+                                                    <?php echo completeBookingButton('house', (int)$booking['id']); ?>
                                                 </div>
                                             <?php endif; ?>
                                         </div>
@@ -2252,7 +2419,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                             $rb = computeRebookInfo($pdo, $booking, $_SESSION['user_id']);
                             $pending_rebook = !empty($booking['rebooked_at']) 
                                            && empty($booking['rebook_confirmed_at'])
-                                           && $booking['payment_status'] == 'paid'
+                                           && PaymentService::isSecured($booking)
                                            && !in_array($booking['booking_status'] ?? '', ['cancelled', 'completed']);
                         ?>
                         <div class="booking-card-mobile">
@@ -2262,9 +2429,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <?php echo htmlspecialchars($booking['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                        <?php echo ucfirst($booking['payment_status']); ?>
-                                    </span>
+                                    <?php echo PaymentService::guestBadge($booking); ?>
                                     <?php if($pending_rebook): ?>
                                         <span class="badge badge-warning"><i class="fas fa-clock"></i> Rebook</span>
                                     <?php endif; ?>
@@ -2291,6 +2456,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <small style="color:#64748b; font-weight:400;">(<?php echo formatTimeDisplay($booking['check_out_time']); ?>)</small>
                                     <?php endif; ?>
                                 </span>
+                            </div>
+
+                            <div class="card-row">
+                                <i class="fas fa-peso-sign"></i>
+                                <span class="card-label">Total</span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
                             </div>
 
                             <div class="card-proof">
@@ -2324,10 +2495,10 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             onclick="cancelRebook(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-undo"></i> Cancel Rebook
                                     </button>
-                                <?php elseif($booking['payment_status'] == 'pending'): ?>
+                                <?php elseif(PaymentService::canPayReservation($booking)): ?>
                                     <?php if(!$booking['payment_proof']): ?>
                                         <button type="button" class="btn-card-action btn-pay-mobile"
-                                                onclick="openPaymentModal('house', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                onclick="openPaymentModal('house', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
@@ -2335,7 +2506,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             onclick="openCancelBookingModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times-circle"></i> Cancel
                                     </button>
-                                <?php elseif($booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid' && $rb['is_eligible']): ?>
+                                <?php elseif($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && $rb['is_eligible']): ?>
                                     <button type="button" class="btn-card-action btn-rebook-confirm-mobile"
                                             onclick="showRebookPolicyPopup(
                                                 '<?php echo $booking['id']; ?>',
@@ -2346,7 +2517,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             )">
                                         <i class="fas fa-redo"></i> Rebook
                                     </button>
-                                <?php elseif($booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid' && !$rb['is_eligible']): ?>
+                                <?php elseif($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && !$rb['is_eligible']): ?>
                                     <button type="button" class="btn-card-action" disabled
                                             style="background:#cbd5e1; color:#94a3b8; cursor:not-allowed;"
                                             title="<?php echo htmlspecialchars($rb['rebook_message'] ?: 'Not eligible for rebook'); ?>">
@@ -2380,8 +2551,8 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Ref #</th><th>Tour</th><th>Guest Name</th><th>Contact #</th>
-                                    <th>Date</th><th>Time</th><th>Pax</th><th>Total</th>
+                                    <th>Reference</th><th>Tour</th><th>Guest Name</th><th>Contact #</th>
+                                    <th>Date</th><th>Time</th><th>Pax</th><th>Total Amount</th>
                                     <th>Payment</th><th>Status</th><th>Action</th>
                                 </tr>
                             </thead>
@@ -2411,11 +2582,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
                                     </td>
                                     <td><?php echo $booking['number_of_guests']; ?></td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($booking['booking_status'], $booking['payment_status']); ?></td>
                                     <td>
@@ -2424,11 +2593,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("tour", <?php echo json_encode($booking); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('tour', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
-                                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                                     <?php if(!$booking['payment_proof']): ?>
-                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                                             <i class="fas fa-credit-card"></i> Pay
                                                         </button>
                                                     <?php else: ?>
@@ -2439,11 +2609,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                     </button>
                                                 <?php endif; ?>
                                             </div>
-                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid'): ?>
+                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
                                                 <div class="action-row" style="margin-top:4px;">
-                                                    <a href="?complete_booking=<?php echo $booking['id']; ?>&booking_type=tour" class="btn-sm btn-complete" onclick="return confirm('Mark as completed?')">
-                                                        <i class="fas fa-check-double"></i> Complete
-                                                    </a>
+                                                    <?php echo completeBookingButton('tour', (int)$booking['id']); ?>
                                                 </div>
                                             <?php endif; ?>
                                         </div>
@@ -2463,9 +2631,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <?php echo htmlspecialchars($booking['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                        <?php echo ucfirst($booking['payment_status']); ?>
-                                    </span>
+                                    <?php echo PaymentService::guestBadge($booking); ?>
                                 </div>
                             </div>
 
@@ -2479,6 +2645,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                 <i class="fas fa-calendar-alt"></i>
                                 <span class="card-label">Date</span>
                                 <span class="card-value"><?php echo formatDateDisplay($booking['booking_date']); ?></span>
+                            </div>
+
+                            <div class="card-row">
+                                <i class="fas fa-peso-sign"></i>
+                                <span class="card-label">Total</span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
                             </div>
 
                             <div class="card-proof">
@@ -2506,11 +2678,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         onclick='viewBooking("tour", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
+<?php echo serviceRebookButton('tour', $booking, true); ?>
 
-                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                     <?php if(!$booking['payment_proof']): ?>
                                         <button type="button" class="btn-card-action btn-pay-mobile"
-                                                onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
@@ -2540,8 +2713,8 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Ref #</th><th>Food Package</th><th>Guest Name</th><th>Date & Time</th>
-                                    <th>Persons</th><th>Qty</th><th>Total</th><th>Payment</th><th>Status</th><th>Action</th>
+                                    <th>Reference</th><th>Food Package</th><th>Guest Name</th><th>Date & Time</th>
+                                    <th>Persons</th><th>Qty</th><th>Total Amount</th><th>Payment</th><th>Status</th><th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2583,11 +2756,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
                                     </td>
                                     <td><?php echo $booking['quantity']; ?></td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($booking['booking_status'], $booking['payment_status']); ?></td>
                                     <td>
@@ -2596,11 +2767,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("food", <?php echo json_encode($booking); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('food', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
-                                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                                     <?php if(!$booking['payment_proof']): ?>
-                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('food', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('food', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                                             <i class="fas fa-credit-card"></i> Pay
                                                         </button>
                                                     <?php else: ?>
@@ -2611,11 +2783,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                     </button>
                                                 <?php endif; ?>
                                             </div>
-                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && $booking['payment_status'] == 'paid'): ?>
+                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
                                                 <div class="action-row" style="margin-top:4px;">
-                                                    <a href="?complete_booking=<?php echo $booking['id']; ?>&booking_type=food" class="btn-sm btn-complete" onclick="return confirm('Mark as completed?')">
-                                                        <i class="fas fa-check-double"></i> Complete
-                                                    </a>
+                                                    <?php echo completeBookingButton('food', (int)$booking['id']); ?>
                                                 </div>
                                             <?php endif; ?>
                                         </div>
@@ -2635,9 +2805,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <?php echo htmlspecialchars($booking['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                        <?php echo ucfirst($booking['payment_status']); ?>
-                                    </span>
+                                    <?php echo PaymentService::guestBadge($booking); ?>
                                 </div>
                             </div>
 
@@ -2650,7 +2818,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                             <div class="card-row">
                                 <i class="fas fa-money-bill"></i>
                                 <span class="card-label">Total</span>
-                                <span class="card-value">₱<?php echo number_format($booking['total_amount']); ?></span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
                             </div>
 
                             <div class="card-proof">
@@ -2678,11 +2846,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         onclick='viewBooking("food", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
+<?php echo serviceRebookButton('food', $booking, true); ?>
 
-                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                     <?php if(!$booking['payment_proof']): ?>
                                         <button type="button" class="btn-card-action btn-pay-mobile"
-                                                onclick="openPaymentModal('food', <?php echo $booking['id']; ?>, <?php echo $booking['total_amount']; ?>, '<?php echo $booking['reference_number']; ?>')">
+                                                onclick="openPaymentModal('food', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
@@ -2713,8 +2882,8 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Ref #</th><th>Items</th><th>Booked On</th>
-                                    <th>Grand Total</th><th>Payment</th><th>Status</th><th>Action</th>
+                                    <th>Reference</th><th>Items</th><th>Booked On</th>
+                                    <th>Total Amount</th><th>Payment</th><th>Status</th><th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2734,11 +2903,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php endif; ?>
                                     </td>
                                     <td><?php echo formatDateTimeDisplay($pkg['created_at']); ?></td>
-                                    <td><strong style="color:#10b981;">₱<?php echo number_format($pkg['grand_total'], 2); ?></strong></td>
+                                    <td><strong style="color:#10b981;"><?php echo PaymentService::guestAmountCell($pkg); ?></strong></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $pkg['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                            <?php echo ucfirst($pkg['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($pkg); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($pkg['booking_status'], $pkg['payment_status']); ?></td>
                                     <td>
@@ -2747,11 +2914,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("package", <?php echo json_encode($pkg); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('package', $pkg, false); ?>
                                             </div>
-                                            <?php if($pkg['payment_status'] == 'pending'): ?>
+                                            <?php if(PaymentService::canPayReservation($pkg)): ?>
                                                 <div class="action-row">
                                                     <?php if(empty($pkg['payment_proof'])): ?>
-                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('package', <?php echo $pkg['id']; ?>, <?php echo $pkg['grand_total']; ?>, '<?php echo $pkg['reference_number']; ?>')">
+                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('package', <?php echo $pkg['id']; ?>, <?php echo PaymentService::feeFor($pkg['grand_total']); ?>, '<?php echo $pkg['reference_number']; ?>')">
                                                             <i class="fas fa-credit-card"></i> Pay
                                                         </button>
                                                     <?php else: ?>
@@ -2762,11 +2930,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                     </button>
                                                 </div>
                                             <?php endif; ?>
-                                            <?php if($is_admin && $pkg['booking_status'] == 'confirmed' && $pkg['payment_status'] == 'paid'): ?>
+                                            <?php if($is_admin && $pkg['booking_status'] == 'confirmed' && PaymentService::isSecured($pkg)): ?>
                                                 <div class="action-row" style="margin-top:4px;">
-                                                    <a href="?complete_booking=<?php echo $pkg['id']; ?>&booking_type=package" class="btn-sm btn-complete" onclick="return confirm('Mark as completed?')">
-                                                        <i class="fas fa-check-double"></i> Complete
-                                                    </a>
+                                                    <?php echo completeBookingButton('package', (int)$pkg['id']); ?>
                                                 </div>
                                             <?php endif; ?>
                                         </div>
@@ -2814,9 +2980,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <?php echo htmlspecialchars($pkg['reference_number']); ?>
                                 </div>
                                 <div class="card-badges">
-                                    <span class="badge badge-<?php echo $pkg['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
-                                        <?php echo ucfirst($pkg['payment_status']); ?>
-                                    </span>
+                                    <?php echo PaymentService::guestBadge($pkg); ?>
                                 </div>
                             </div>
 
@@ -2829,7 +2993,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                             <div class="card-row">
                                 <i class="fas fa-money-bill"></i>
                                 <span class="card-label">Total</span>
-                                <span class="card-value" style="color:#10b981; font-size:15px;">₱<?php echo number_format($pkg['grand_total'], 2); ?></span>
+                                <span class="card-value" style="color:#10b981; font-size:15px;"><?php echo PaymentService::guestAmountCell($pkg); ?></span>
                             </div>
 
                             <div class="card-proof">
@@ -2857,11 +3021,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         onclick='viewBooking("package", <?php echo htmlspecialchars(json_encode($pkg), ENT_QUOTES, "UTF-8"); ?>)'>
                                     <i class="fas fa-eye"></i> More / View
                                 </button>
+<?php echo serviceRebookButton('package', $pkg, true); ?>
 
-                                <?php if($pkg['payment_status'] == 'pending'): ?>
+                                <?php if(PaymentService::canPayReservation($pkg)): ?>
                                     <?php if(empty($pkg['payment_proof'])): ?>
                                         <button type="button" class="btn-card-action btn-pay-mobile"
-                                                onclick="openPaymentModal('package', <?php echo $pkg['id']; ?>, <?php echo $pkg['grand_total']; ?>, '<?php echo $pkg['reference_number']; ?>')">
+                                                onclick="openPaymentModal('package', <?php echo $pkg['id']; ?>, <?php echo PaymentService::feeFor($pkg['grand_total']); ?>, '<?php echo $pkg['reference_number']; ?>')">
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
@@ -2892,14 +3057,14 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Ref #</th><th>House</th><th>Rebooked On</th><th>New Check In</th>
-                                    <th>New Check Out</th><th>Total</th><th>Status</th><th>Action</th>
+                                    <th>Reference</th><th>House</th><th>Rebooked On</th><th>New Check In</th>
+                                    <th>New Check Out</th><th>Total Amount</th><th>Status</th><th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php foreach($rebooked_house as $booking): 
                                     $is_pending = !empty($booking['rebooked_at']) && empty($booking['rebook_confirmed_at'])
-                                               && $booking['payment_status'] == 'paid'
+                                               && PaymentService::isSecured($booking)
                                                && !in_array($booking['booking_status'] ?? '', ['cancelled', 'completed']);
                                     $is_locked = !empty($booking['rebook_confirmed_at']);
                                 ?>
@@ -2925,7 +3090,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             </div>
                                         <?php endif; ?>
                                     </td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
                                         <?php echo getBookingStatusLabel(
                                             $booking['booking_status'], $booking['payment_status'],
@@ -2970,7 +3135,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                     <div class="booking-cards-mobile">
                         <?php foreach($rebooked_house as $booking): 
                             $is_pending = !empty($booking['rebooked_at']) && empty($booking['rebook_confirmed_at'])
-                                       && $booking['payment_status'] == 'paid'
+                                       && PaymentService::isSecured($booking)
                                        && !in_array($booking['booking_status'] ?? '', ['cancelled', 'completed']);
                         ?>
                         <div class="booking-card-mobile">
@@ -3008,6 +3173,12 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <small style="color:#64748b; font-weight:400;">(<?php echo formatTimeDisplay($booking['check_out_time']); ?>)</small>
                                     <?php endif; ?>
                                 </span>
+                            </div>
+
+                            <div class="card-row">
+                                <i class="fas fa-peso-sign"></i>
+                                <span class="card-label">Total</span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
                             </div>
 
                             <div class="card-actions">
@@ -3052,7 +3223,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                     <div class="table-responsive desktop-table">
                         <table>
                             <thead>
-                                <tr><th>Type</th><th>Ref #</th><th>Item</th><th>Booked On</th><th>Date</th><th>Total</th><th>Payment</th><th>Status</th><th>Feedback</th><th>Action</th></tr>
+                                <tr><th>Type</th><th>Reference</th><th>Item</th><th>Booked On</th><th>Date</th><th>Total Amount</th><th>Payment</th><th>Status</th><th>Feedback</th><th>Action</th></tr>
                             </thead>
                             <tbody>
                                 <?php foreach($completed_house as $booking): 
@@ -3072,11 +3243,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             </div>
                                         <?php endif; ?>
                                     </td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($booking['booking_status'], $booking['payment_status'],
                                         $booking['rebook_count'] ?? 0, $booking['rebooked_at'] ?? null, $booking['rebook_confirmed_at'] ?? null); ?></td>
@@ -3094,7 +3263,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
                                             </div>
-                                            <?php if($booking['booking_status'] == 'completed' && $booking['payment_status'] == 'paid' && $rb['is_eligible']): ?>
+                                            <?php if($booking['booking_status'] === 'cancelled' && PaymentService::amounts($booking)['paid'] > 0 && $rb['is_eligible']): ?>
                                                 <div class="action-row">
                                                     <button class="btn-rebook-link" onclick="showRebookPolicyPopup(
                                                         '<?php echo $booking['id']; ?>',
@@ -3133,11 +3302,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <td><?php echo htmlspecialchars($booking['tour_name']); ?></td>
                                     <td><?php echo formatDateTimeDisplay($booking['created_at']); ?></td>
                                     <td><?php echo formatDateDisplay($booking['booking_date']); ?></td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($booking['booking_status'], $booking['payment_status']); ?></td>
                                     <td>
@@ -3153,6 +3320,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("tour", <?php echo json_encode($booking); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('tour', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
                                                 <?php if(canGiveFeedback($booking)): ?>
@@ -3180,11 +3348,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <td><?php echo htmlspecialchars($booking['food_name']); ?></td>
                                     <td><?php echo formatDateTimeDisplay($booking['created_at']); ?></td>
                                     <td><?php echo formatDateDisplay($booking['preferred_date'] ?? $booking['created_at']); ?></td>
-                                    <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($booking['booking_status'], $booking['payment_status']); ?></td>
                                     <td>
@@ -3200,6 +3366,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("food", <?php echo json_encode($booking); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('food', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
                                                 <?php if(canGiveFeedback($booking)): ?>
@@ -3233,11 +3400,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <td style="max-width:250px; word-break:break-word;"><?php echo $itemsStr; ?></td>
                                     <td><?php echo formatDateTimeDisplay($pkg['created_at']); ?></td>
                                     <td><?php echo formatDateDisplay($pkg['created_at']); ?></td>
-                                    <td>₱<?php echo number_format($pkg['grand_total'], 2); ?></td>
+                                    <td><?php echo PaymentService::guestAmountCell($pkg); ?></td>
                                     <td>
-                                        <span class="badge badge-<?php echo $pkg['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($pkg['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($pkg); ?>
                                     </td>
                                     <td><?php echo getBookingStatusLabel($pkg['booking_status'], $pkg['payment_status']); ?></td>
                                     <td>
@@ -3253,6 +3418,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                                 <button class="btn-view-booking" onclick='viewBooking("package", <?php echo json_encode($pkg); ?>)'>
                                                     <i class="fas fa-eye"></i> View
                                                 </button>
+<?php echo serviceRebookButton('package', $pkg, false); ?>
                                             </div>
                                             <div class="action-row">
                                                 <?php if(canGiveFeedback($pkg)): ?>
@@ -3282,9 +3448,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php echo htmlspecialchars($booking['reference_number']); ?>
                                     </div>
                                     <div class="card-badges">
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </div>
                                 </div>
                                 <div class="card-row">
@@ -3307,7 +3471,13 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php endif; ?>
                                     </span>
                                 </div>
-                                <div class="card-actions">
+                                <div class="card-row">
+                                <i class="fas fa-peso-sign"></i>
+                                <span class="card-label">Total</span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
+                            </div>
+
+                            <div class="card-actions">
                                     <button type="button" class="btn-card-action btn-more"
                                             onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-eye"></i> More / View
@@ -3329,9 +3499,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php echo htmlspecialchars($booking['reference_number']); ?>
                                     </div>
                                     <div class="card-badges">
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </div>
                                 </div>
                                 <div class="card-row">
@@ -3344,11 +3512,18 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                     <span class="card-label">Date</span>
                                     <span class="card-value"><?php echo formatDateDisplay($booking['booking_date']); ?></span>
                                 </div>
-                                <div class="card-actions">
+                                <div class="card-row">
+                                <i class="fas fa-peso-sign"></i>
+                                <span class="card-label">Total</span>
+                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
+                            </div>
+
+                            <div class="card-actions">
                                     <button type="button" class="btn-card-action btn-more"
                                             onclick='viewBooking("tour", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
+<?php echo serviceRebookButton('tour', $booking, true); ?>
                                     <?php if(canGiveFeedback($booking)): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>')">
@@ -3366,9 +3541,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php echo htmlspecialchars($booking['reference_number']); ?>
                                     </div>
                                     <div class="card-badges">
-                                        <span class="badge badge-<?php echo $booking['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($booking['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($booking); ?>
                                     </div>
                                 </div>
                                 <div class="card-row">
@@ -3379,13 +3552,14 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                 <div class="card-row">
                                     <i class="fas fa-money-bill"></i>
                                     <span class="card-label">Total</span>
-                                    <span class="card-value">₱<?php echo number_format($booking['total_amount']); ?></span>
+                                    <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
                                 </div>
                                 <div class="card-actions">
                                     <button type="button" class="btn-card-action btn-more"
                                             onclick='viewBooking("food", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
+<?php echo serviceRebookButton('food', $booking, true); ?>
                                     <?php if(canGiveFeedback($booking)): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['food_name']); ?>')">
@@ -3403,15 +3577,13 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                         <?php echo htmlspecialchars($pkg['reference_number']); ?>
                                     </div>
                                     <div class="card-badges">
-                                        <span class="badge badge-<?php echo $pkg['payment_status'] == 'paid' ? 'success' : 'danger'; ?>">
-                                            <?php echo ucfirst($pkg['payment_status']); ?>
-                                        </span>
+                                        <?php echo PaymentService::guestBadge($pkg); ?>
                                     </div>
                                 </div>
                                 <div class="card-row">
                                     <i class="fas fa-box-open"></i>
                                     <span class="card-label">Package</span>
-                                    <span class="card-value">₱<?php echo number_format($pkg['grand_total'], 2); ?></span>
+                                    <span class="card-value"><?php echo PaymentService::guestAmountCell($pkg); ?></span>
                                 </div>
                                 <div class="card-row">
                                     <i class="fas fa-calendar-alt"></i>
@@ -3423,6 +3595,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                                             onclick='viewBooking("package", <?php echo htmlspecialchars(json_encode($pkg), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
+<?php echo serviceRebookButton('package', $pkg, true); ?>
                                     <?php if(canGiveFeedback($pkg)): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', 'Package')">
@@ -3436,6 +3609,154 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                 <?php endif; ?>
             </div>
         </div>
+
+        <!-- ACCOUNT AREA: profile, health, feedback -->
+        <div class="account-row">
+        <div class="profile-card">
+            <div class="profile-header">
+                <div class="avatar">
+                    <?php if ($profile_photo): ?>
+                        <img src="<?php echo $profile_photo; ?>?<?php echo time(); ?>" alt="Profile Photo">
+                    <?php else: ?>
+                        <span class="default-icon"><i class="fas fa-user"></i></span>
+                    <?php endif; ?>
+                </div>
+                <div class="profile-name"><?php echo $guest ? htmlspecialchars($guest['full_name']) : htmlspecialchars($user['username']); ?></div>
+                <div class="profile-role"><?php echo ucfirst($user['role']); ?></div>
+            </div>
+            <div class="contact-summary">
+                <div class="cs-row"><i class="fas fa-envelope"></i><span><?php echo htmlspecialchars($user['email']); ?></span></div>
+                <?php if($guest): ?>
+                <div class="cs-row"><i class="fas fa-phone"></i><span><?php echo htmlspecialchars($guest['contact_number'] ?? 'Not provided'); ?></span></div>
+                <?php endif; ?>
+            </div>
+
+            <a href="edit-profile.php" class="btn-edit"><i class="fas fa-edit"></i> Edit Profile</a>
+
+            <details class="more-details">
+                <summary><span><i class="fas fa-user" style="color:#4DA6D9;margin-right:8px;"></i>Personal details</span></summary>
+                <div class="more-body"><div class="profile-info" style="border-top:none;padding-top:0;">
+                    <div class="info-item">
+                    <div class="info-icon"><i class="fas fa-user"></i></div>
+                    <div style="min-width:0;flex:1;">
+                        <div class="info-label">Username</div>
+                        <div class="info-value"><?php echo htmlspecialchars($user['username']); ?></div>
+                    </div>
+                </div>
+                    <?php if($guest): ?>
+                    <div class="info-item">
+                    <div class="info-icon"><i class="fas fa-map-marker-alt"></i></div>
+                    <div style="min-width:0;flex:1;">
+                        <div class="info-label">Address</div>
+                        <div class="info-value"><?php echo htmlspecialchars($guest['address'] ?? 'Not provided'); ?></div>
+                    </div>
+                </div>
+                    <?php endif; ?>
+                </div></div>
+            </details>
+            <?php if($guest): ?>
+            <details class="more-details">
+                <summary><span><i class="fas fa-id-card" style="color:#4DA6D9;margin-right:8px;"></i>Identification</span></summary>
+                <div class="more-body"><div class="profile-info" style="border-top:none;padding-top:0;">
+                    <div class="info-item">
+                    <div class="info-icon"><i class="fas fa-id-card"></i></div>
+                    <div style="min-width:0;flex:1;">
+                        <div class="info-label">ID Type / Number</div>
+                        <div class="info-value"><?php echo htmlspecialchars($guest['id_type'] ?? 'N/A'); ?>: <?php echo htmlspecialchars($guest['id_number'] ?? 'N/A'); ?></div>
+                    </div>
+                </div>
+                </div>
+            <!-- ID PHOTO -->
+            <div class="id-photo-display">
+                <div class="id-photo-label"><i class="fas fa-id-card"></i> ID Photo</div>
+                <div class="id-photo-container">
+                    <?php if($id_photo): ?>
+                        <img src="<?php echo $id_photo; ?>?<?php echo time(); ?>" alt="ID Photo">
+                        <div class="id-details">
+                            <div><strong>Type:</strong> <?php echo htmlspecialchars($guest['id_type'] ?? 'N/A'); ?></div>
+                            <div><strong>Number:</strong> <?php echo htmlspecialchars($guest['id_number'] ?? 'N/A'); ?></div>
+                        </div>
+                    <?php else: ?>
+                        <div class="no-photo"><i class="fas fa-id-card" style="font-size:30px;display:block;color:#cbd5e1;"></i><span>No ID photo uploaded</span></div>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+                </div>
+            </details>
+            <details class="more-details">
+                <summary><span><i class="fas fa-phone-alt" style="color:#4DA6D9;margin-right:8px;"></i>Emergency contact</span></summary>
+                <div class="more-body"><div class="profile-info" style="border-top:none;padding-top:0;">
+                    <div class="info-item">
+                    <div class="info-icon"><i class="fas fa-phone-alt"></i></div>
+                    <div style="min-width:0;flex:1;">
+                        <div class="info-label">Emergency Contact</div>
+                        <div class="info-value"><?php echo htmlspecialchars($guest['emergency_contact'] ?? 'N/A'); ?> (<?php echo htmlspecialchars($guest['emergency_number'] ?? 'N/A'); ?>)</div>
+                    </div>
+                </div>
+                </div></div>
+            </details>
+            <?php endif; ?>
+        </div>
+
+        <?php if($guest):
+            $health_count = (int)!empty($guest['has_asthma']) + (int)!empty($guest['has_allergies']) + (int)!empty($guest['has_medical_condition']) + (int)!empty($guest['has_dietary']) + (int)!empty($guest['has_accessibility']);
+        ?>
+        <!-- HEALTH SUMMARY -->
+        <div class="side-card health-card">
+            <h3><i class="fas fa-heartbeat"></i> Health &amp; Accessibility</h3>
+            <div class="mini-cards">
+                <div class="mini-card"><div class="mc-num"><?php echo $health_count; ?></div><div class="mc-label">Health notes on file</div></div>
+                <div class="mini-card"><div class="mc-num"><?php echo !empty($guest['emergency_medication']) ? 'Yes' : 'No'; ?></div><div class="mc-label">Emergency medication</div></div>
+            </div>
+            <details class="more-details">
+                <summary><span><i class="fas fa-eye" style="color:#4DA6D9;margin-right:8px;"></i>View Details</span></summary>
+                <div class="more-body">
+            <!-- HEALTH INFO -->
+            
+            <div class="health-info-section">
+                <h5><i class="fas fa-heartbeat"></i> Health Information</h5>
+                <?php if($guest['has_asthma']): ?>
+                    <span class="health-tag asthma"><i class="fas fa-lungs"></i> Asthma</span>
+                    <?php if($guest['asthma_severity']): ?><span style="font-size:11px;color:#64748b;">(<?php echo ucfirst($guest['asthma_severity']); ?>)</span><?php endif; ?>
+                <?php endif; ?>
+                <?php if($guest['has_allergies']): ?>
+                    <span class="health-tag allergy"><i class="fas fa-allergies"></i> Allergies</span>
+                    <?php $allergy_types = decodeJson($guest['allergy_types']); if(!empty($allergy_types)): ?>
+                        <span style="font-size:11px;color:#64748b;">(<?php echo implode(', ', $allergy_types); ?>)</span>
+                    <?php endif; ?>
+                <?php endif; ?>
+                <?php if($guest['has_medical_condition']): ?><span class="health-tag medical"><i class="fas fa-notes-medical"></i> Medical Condition</span><?php endif; ?>
+                <?php if($guest['has_dietary']): ?><span class="health-tag dietary"><i class="fas fa-utensils"></i> Dietary Restriction</span><?php endif; ?>
+                <?php if($guest['has_accessibility']): ?><span class="health-tag access"><i class="fas fa-wheelchair"></i> Accessibility Need</span><?php endif; ?>
+                <?php if(!$guest['has_asthma'] && !$guest['has_allergies'] && !$guest['has_medical_condition'] && !$guest['has_dietary'] && !$guest['has_accessibility']): ?>
+                    <p style="color:#94a3b8;font-size:13px;margin:5px 0;">No health conditions reported</p>
+                <?php endif; ?>
+                <?php if($guest['emergency_medication']): ?>
+                    <div style="margin-top:8px;font-size:13px;color:#475569;word-break:break-word;">
+                        <i class="fas fa-pills" style="color:#4DA6D9;"></i> Emergency Medication: <?php echo htmlspecialchars($guest['emergency_medication']); ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+            
+                </div>
+            </details>
+        </div>
+        <?php endif; ?>
+
+        <!-- FEEDBACK -->
+        <div class="side-card feedback-card">
+            <h3><i class="fas fa-star"></i> Feedback</h3>
+            <?php if($user_has_feedback): ?>
+                <p>Thank you for sharing your experience! You rated us <strong><?php echo (int)$user_feedback['rating']; ?>/5</strong>.</p>
+                <button type="button" class="btn-side" onclick="openOverallFeedbackModal(event)"><i class="fas fa-pen"></i> Edit Feedback</button>
+            <?php else: ?>
+                <p>Enjoyed your stay? Tell us about your experience &mdash; it helps us and future guests.</p>
+                <button type="button" class="btn-side" onclick="openOverallFeedbackModal(event)"><i class="fas fa-star"></i> Leave Feedback</button>
+            <?php endif; ?>
+        </div>
+        </div>
+
     </div>
 </div>
 
@@ -3465,9 +3786,9 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
         <p>Please read the rebooking policy carefully before proceeding:</p>
         <div class="policy-list">
             <li><i class="fas fa-check-circle check"></i> <strong>Maximum of 2 rebooks</strong> per booking</li>
-            <li><i class="fas fa-clock info"></i> <strong>Within 7 days</strong> from your original check-in date</li>
-            <li><i class="fas fa-check-circle check"></i> Only <strong>confirmed &amp; paid</strong> bookings can be rebooked</li>
-            <li><i class="fas fa-info-circle info"></i> Payment stays <strong>PAID</strong> — no new payment needed</li>
+            <li><i class="fas fa-clock info"></i> <strong>Within 7 days</strong> from booking date</li>
+            <li><i class="fas fa-check-circle check"></i> House, Tour, Food and Package bookings that are <strong>confirmed or cancelled with money received</strong> can be rebooked — completed bookings cannot</li>
+            <li><i class="fas fa-info-circle info"></i> The <strong>amount already paid is carried forward</strong> — no second ₱1,000 reservation fee, no refund</li>
             <li><i class="fas fa-clock info"></i> Status will be <strong>pending</strong> until admin confirms</li>
         </div>
 
@@ -3522,9 +3843,14 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
                 <?php endif; ?>
             </div>
             <div style="background:#f8fafc;padding:15px;border-radius:12px;margin:15px 0;">
+                <?php if ($gcash_configured): ?>
                 <p><strong><i class="fas fa-user"></i> Account Name:</strong> <?php echo htmlspecialchars($gcash_name); ?></p>
                 <p><strong><i class="fas fa-mobile-alt"></i> GCash Number:</strong> <?php echo htmlspecialchars($gcash_number); ?></p>
-                <p><strong><i class="fas fa-money-bill"></i> Amount to Pay:</strong> <span id="modal_amount" style="color:#10b981;font-size:20px;font-weight:bold;">₱0.00</span></p>
+                <?php else: ?>
+                <p style="color:#9a3412;"><strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong> The GCash details have not been set up yet — please contact us before sending any payment.</p>
+                <?php endif; ?>
+                <p><strong><i class="fas fa-money-bill"></i> Reservation Fee to Pay:</strong> <span id="modal_amount" style="color:#10b981;font-size:20px;font-weight:bold;">₱0.00</span></p>
+                <p style="font-size:12px;color:#64748b;margin-top:6px;">Pay only the reservation fee now. It is part of your total and is non-refundable; the remaining balance is paid upon arrival.</p>
             </div>
             <div style="background:#fef3c7;padding:15px;border-radius:12px;margin:15px 0;">
                 <p><strong><i class="fas fa-info-circle"></i> Instructions:</strong></p>
@@ -3636,6 +3962,39 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
     </div>
 </div>
 
+<!-- ✅ REBOOK TOUR / FOOD / PACKAGE MODAL (payment carried forward, no new fee) -->
+<div class="modal" id="serviceRebookModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3><i class="fas fa-redo"></i> Rebook <span id="svc_rebook_kind"></span></h3>
+            <span class="close" onclick="closeServiceRebookModal()">&times;</span>
+        </div>
+        <div style="padding:15px;">
+            <p style="font-size:14px;color:#64748b;margin:0 0 6px;">Ref: <strong id="svc_rebook_ref"></strong> · Current date: <strong id="svc_rebook_current"></strong></p>
+            <div style="background:#ecfdf5;padding:12px;border-radius:10px;margin:12px 0;font-size:13px;color:#065f46;">
+                <i class="fas fa-info-circle"></i> The amount already paid is <strong>carried forward</strong> to the new date. There is <strong>no new reservation fee</strong> and no refund. Rebooking is allowed within 7 days from booking date (max 2 per booking).
+                <span id="svc_rebook_pkg_note" style="display:none;"><br>All items in the package move together by the same number of days (house nights stay the same).</span>
+            </div>
+            <form method="POST" id="serviceRebookForm">
+                <input type="hidden" name="rebook_service" value="1">
+                <input type="hidden" name="booking_type" id="svc_rebook_type">
+                <input type="hidden" name="booking_id" id="svc_rebook_id">
+                <label for="svc_rebook_date" style="display:block;font-weight:600;margin-bottom:6px;" id="svc_rebook_label">New date</label>
+                <input type="date" name="new_date" id="svc_rebook_date" required style="width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;box-sizing:border-box;">
+                <p style="font-size:12px;color:#64748b;margin:8px 0 0;"><span id="svc_rebook_left"></span> The date is checked when you submit; if it was taken, nothing changes.</p>
+                <div style="margin-top:18px;display:flex;flex-wrap:wrap;gap:10px;">
+                    <button type="submit" style="padding:12px 24px;background:#4DA6D9;color:white;border:none;border-radius:8px;font-weight:600;cursor:pointer;flex:1;min-width:140px;">
+                        <i class="fas fa-check-circle"></i> Rebook to this date
+                    </button>
+                    <button type="button" style="background:#64748b;color:white;border:none;padding:12px 24px;border-radius:8px;font-weight:600;cursor:pointer;flex:1;min-width:140px;" onclick="closeServiceRebookModal()">
+                        <i class="fas fa-times"></i> Close
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <!-- ✅ CANCEL UNPAID BOOKING MODAL -->
 <div class="modal" id="cancelBookingModal">
     <div class="modal-content">
@@ -3648,7 +4007,7 @@ Your travel dashboard — manage trips, payments, and vacation plans in one plac
             <p><strong>Are you sure you want to cancel this booking?</strong></p>
             <p style="font-size:14px;color:#64748b;">Ref: <strong id="cancel_booking_reference"></strong></p>
             <div style="background:#dbeafe;padding:12px;border-radius:10px;margin:15px 0;font-size:13px;color:#1e40af;text-align:left;">
-                <i class="fas fa-info-circle"></i> <strong>Note:</strong> Since you haven't paid yet, this cancellation is <strong>FREE</strong>. You can book again anytime.
+                <i class="fas fa-info-circle"></i> <strong>Note:</strong> Since no reservation fee has been paid yet, this cancellation is <strong>FREE</strong>. You can book again anytime. (Once a reservation fee is paid it is non-refundable; paid reservations can be rebooked instead.)
             </div>
             <form method="POST" style="margin-top:20px;display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
                 <input type="hidden" name="cancel_booking" value="1">
@@ -4340,12 +4699,33 @@ function viewBooking(type, booking) {
         }
     }
     
-    details.push({ label: 'Total Amount', value: '<strong style="color:#10b981; font-size:16px;">₱' + parseFloat(bookingData.grand_total || bookingData.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 }) + '</strong>' });
-    
+    // Customer view of the money: total, reservation fee, amount received, balance on arrival
+    (function () {
+        const total = parseFloat(bookingData.grand_total !== undefined && bookingData.grand_total !== null ? bookingData.grand_total : (bookingData.total_amount || 0)) || 0;
+        const fee = parseFloat(bookingData.reservation_fee_amount || 0) || Math.min(1000, total);
+        const paid = (bookingData.amount_paid !== undefined && bookingData.amount_paid !== null) ? (parseFloat(bookingData.amount_paid) || 0)
+                   : ((bookingData.payment_status === 'paid' || bookingData.payment_status === 'reservation_paid') ? Math.min(fee, total) : 0);
+        const peso = n => '₱' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        details.push({ label: 'Total Price', value: '<strong style="color:#0B2447; font-size:16px;">' + peso(total) + '</strong>' });
+        details.push({ label: 'Reservation Fee', value: peso(fee) });
+        if (bookingData.booking_status === 'cancelled' && paid > 0) {
+            details.push({ label: 'Rebooking Credit', value: '<strong style="color:#6d28d9;">' + peso(paid) + '</strong> — non-refundable; kept for rebooking' });
+        } else if (paid > 0) {
+            details.push({ label: 'Amount Received', value: '<strong style="color:#047857;">' + peso(paid) + '</strong>' });
+            const bal = Math.max(0, total - paid);
+            details.push({ label: 'Remaining Balance', value: bal > 0 ? '<strong style="color:#b45309;">' + peso(bal) + '</strong> — pay upon arrival' : '<strong style="color:#047857;">₱0.00 — fully paid</strong>' });
+        } else if (bookingData.booking_status !== 'cancelled') {
+            details.push({ label: 'Balance on Arrival', value: peso(Math.max(0, total - fee)) });
+        }
+    })();
+
     let paymentBadge = '';
-    if (bookingData.payment_status === 'paid') paymentBadge = '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Paid</span>';
-    else if (bookingData.payment_status === 'pending') paymentBadge = '<span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>';
-    else if (bookingData.payment_status === 'cancelled') paymentBadge = '<span class="badge badge-danger"><i class="fas fa-times-circle"></i> Cancelled</span>';
+    const _paidNow = (bookingData.amount_paid !== undefined && bookingData.amount_paid !== null) ? parseFloat(bookingData.amount_paid) || 0 : 0;
+    if (bookingData.booking_status === 'cancelled' && (_paidNow > 0 || bookingData.payment_status === 'reservation_paid' || bookingData.payment_status === 'paid')) paymentBadge = '<span class="badge badge-info"><i class="fas fa-redo"></i> Rebooking Required</span>';
+    else if (bookingData.payment_status === 'paid') paymentBadge = '<span class="badge badge-success"><i class="fas fa-check-circle"></i> Fully Paid</span>';
+    else if (bookingData.payment_status === 'reservation_paid') paymentBadge = '<span class="badge badge-success"><i class="fas fa-shield-alt"></i> Reservation Secured</span>';
+    else if (bookingData.payment_status === 'pending') paymentBadge = '<span class="badge badge-warning"><i class="fas fa-clock"></i> Awaiting Reservation Fee</span>';
+    else if (bookingData.payment_status === 'cancelled') paymentBadge = '<span class="badge badge-danger"><i class="fas fa-times-circle"></i> Payment Not Accepted</span>';
     else paymentBadge = '<span class="badge badge-info">' + escapeHtml(bookingData.payment_status || 'N/A') + '</span>';
     details.push({ label: 'Payment Status', value: paymentBadge });
     
@@ -4665,6 +5045,28 @@ function closeCancelRebookModal() {
 // ============================================================
 // CANCEL UNPAID BOOKING MODAL
 // ============================================================
+function openServiceRebookModal(type, bookingId, reference, currentDate, remaining, daysLeft, isCredit) {
+    var kinds = { tour: 'Tour', food: 'Food Order', package: 'Package' };
+    document.getElementById('svc_rebook_kind').textContent = kinds[type] || '';
+    document.getElementById('svc_rebook_type').value = type;
+    document.getElementById('svc_rebook_id').value = bookingId;
+    document.getElementById('svc_rebook_ref').textContent = reference;
+    document.getElementById('svc_rebook_current').textContent = currentDate || '—';
+    document.getElementById('svc_rebook_pkg_note').style.display = type === 'package' ? 'inline' : 'none';
+    document.getElementById('svc_rebook_label').textContent = type === 'package' ? 'New first day of the package' : 'New date';
+    var t = new Date(); var today = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+    var input = document.getElementById('svc_rebook_date');
+    input.min = today; input.value = '';
+    document.getElementById('svc_rebook_left').textContent = 'Rebooks left for this booking: ' + remaining + ' · ' + daysLeft + ' day(s) left (including today) to rebook within 7 days from booking date.';
+    document.getElementById('serviceRebookModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeServiceRebookModal() {
+    document.getElementById('serviceRebookModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
 function openCancelBookingModal(type, bookingId, reference) {
     document.getElementById('cancel_booking_type').value = type;
     document.getElementById('cancel_booking_id').value = bookingId;
@@ -4904,7 +5306,8 @@ document.addEventListener('DOMContentLoaded', function() {
             if (index < rating) star.classList.add('active');
             else star.classList.remove('active');
         });
-        document.getElementById('overallRatingText').textContent = overallRatingTexts[rating] || 'Select a rating';
+        var ratingTextEl = document.getElementById('overallRatingText');   // absent once feedback was given
+        if (ratingTextEl) ratingTextEl.textContent = overallRatingTexts[rating] || 'Select a rating';
     <?php endif; ?>
 
     var urlParams = new URLSearchParams(window.location.search);

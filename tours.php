@@ -6,6 +6,7 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
+require_once 'includes/PaymentService.php';
 require_once 'includes/TermsGate.php';
 $termsGate = new TermsGate($pdo);
 
@@ -90,8 +91,10 @@ while($row = $stmt->fetch()) {
     $gcash_settings[$row['content_key']] = $row['content_value'];
 }
 
-$gcash_name = $gcash_settings['account_name'] ?? 'Juan Dela Cruz';
-$gcash_number = $gcash_settings['number'] ?? '09123456789';
+$gcash_cfg = PaymentService::gcashConfig($pdo);
+$gcash_configured = $gcash_cfg['configured'];   // placeholders are never shown to guests
+$gcash_name = $gcash_settings['account_name'] ?? '';
+$gcash_number = $gcash_settings['number'] ?? '';
 $gcash_qr = $gcash_settings['qr_code'] ?? '';
 $gcash_instructions = $gcash_settings['instructions'] ?? "1. Open GCash app\n2. Click 'Pay QR' or 'Scan QR'\n3. Scan the QR code above\n4. Enter the exact amount shown\n5. Complete the payment\n6. Take a screenshot of the transaction\n7. Upload screenshot as proof of payment";
 
@@ -320,12 +323,12 @@ if(isset($_POST['tour_booking']) && isset($_SESSION['user_id'])) {
         $stmt = $pdo->prepare("INSERT INTO tour_bookings
             (guest_id, tour_id, reference_number, booking_date, number_of_guests,
              guest_name, contact_number, preferred_time,
-             total_amount, special_requests, payment_status, booking_status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+             total_amount, reservation_fee_amount, special_requests, payment_status, booking_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
         $stmt->execute([
             $guest_id, $tour_id, $reference, $booking_date, $number_of_guests,
             $guest_name, $contact_number, $preferred_time,
-            $total, $_POST['special_requests'] ?? null
+            $total, PaymentService::feeFor($total), $_POST['special_requests'] ?? null
         ]);
 
         $booking_id = $pdo->lastInsertId();
@@ -348,7 +351,7 @@ if(isset($_POST['tour_booking']) && isset($_SESSION['user_id'])) {
             'tour_name' => $tour['tour_name']
         ];
 
-        $success = "Tour booking submitted! Ref#: " . $reference . ". Please upload your payment proof in your profile to finalize.";
+        $success = "Tour booking submitted! Ref#: " . $reference . ". Pay the reservation fee of " . PaymentService::peso(PaymentService::feeFor($total)) . " and upload the proof in your profile to secure it.";
 
     } catch(Exception $e) {
         $pdo->rollBack();
@@ -1081,6 +1084,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
         }
     </style>
+<?php echo PaymentService::css(); ?>
 </head>
 <body>
 
@@ -1215,11 +1219,9 @@ $is_logged_in = isset($_SESSION['user_id']);
                             <?php endif; ?>
                         </td>
                         <td><?php echo $booking['number_of_guests']; ?></td>
-                        <td>₱<?php echo number_format($booking['total_amount']); ?></td>
+                        <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
                         <td>
-                            <span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>">
-                                <?php echo ucfirst($booking['payment_status']); ?>
-                            </span>
+                            <?php echo PaymentService::guestBadge($booking); ?>
                         </td>
                         <td>
                             <?php
@@ -1243,13 +1245,13 @@ $is_logged_in = isset($_SESSION['user_id']);
                         </td>
                         <td>
                             <div style="display: flex; flex-wrap: wrap; gap: 4px;">
-                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                     <a href="profile.php#tours-tab" class="btn-sm btn-pay" style="text-decoration:none;">
                                         <i class="fas fa-credit-card"></i> Pay
                                     </a>
                                 <?php endif; ?>
 
-                                <?php if(($booking['booking_status'] == 'completed' || $booking['payment_status'] == 'paid') && empty($booking['feedback_text'])): ?>
+                                <?php if(($booking['booking_status'] == 'completed' || PaymentService::isSecured($booking)) && empty($booking['feedback_text'])): ?>
                                     <button class="btn-sm btn-rate" onclick="openTourFeedbackModal(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['tour_name']); ?>', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-star"></i> Rate
                                     </button>
@@ -1611,7 +1613,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         <div class="popup-header">
             <div class="success-icon"><i class="fas fa-check-circle"></i></div>
             <h2>Booking Submitted! 🎉</h2>
-            <p>Please complete your payment via GCash</p>
+            <p>Pay the reservation fee via GCash to secure your booking</p>
         </div>
         <div class="popup-body">
             <div style="text-align: center; margin-bottom: 15px;">
@@ -1622,9 +1624,21 @@ $is_logged_in = isset($_SESSION['user_id']);
                 <span class="value" id="popup_tour">Tour Name</span>
             </div>
             <div class="payment-detail">
-                <span class="label">Total Amount</span>
-                <span class="value amount" id="popup_amount">₱0.00</span>
+                <span class="label">Total Price</span>
+                <span class="value" id="popup_amount">₱0.00</span>
             </div>
+            <div class="payment-detail">
+                <span class="label">Reservation Fee (pay now)</span>
+                <span class="value amount" id="popup_fee">₱0.00</span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Balance on Arrival</span>
+                <span class="value" id="popup_balance">₱0.00</span>
+            </div>
+            <p style="font-size:12px;color:#64748b;margin:6px 0 0;line-height:1.5;">
+                Pay only the reservation fee now to secure your booking. It is part of your total price and is non-refundable;
+                paid reservations may be rebooked. The remaining balance is paid upon arrival or before the service begins.
+            </p>
             <div class="qr-section">
                 <?php if($gcash_qr && file_exists("uploads/gcash/" . $gcash_qr)): ?>
                     <img src="uploads/gcash/<?php echo $gcash_qr; ?>" alt="GCash QR Code">
@@ -1632,10 +1646,17 @@ $is_logged_in = isset($_SESSION['user_id']);
                     <div class="no-qr"><i class="fas fa-qrcode" style="font-size: 48px;"></i><p>QR Code will appear here</p></div>
                 <?php endif; ?>
             </div>
+            <?php if ($gcash_configured): ?>
             <div style="background: #f8fafc; padding: 12px; border-radius: 12px; margin: 10px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>Account Name:</strong> <?php echo htmlspecialchars($gcash_name); ?></p>
                 <p style="margin: 0; font-size: 14px;"><strong>GCash Number:</strong> <?php echo htmlspecialchars($gcash_number); ?></p>
             </div>
+            <?php else: ?>
+            <div style="background: #fff7ed; border:1px solid #fed7aa; color:#9a3412; padding: 12px; border-radius: 12px; margin: 10px 0; font-size:13px;">
+                <strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong>
+                The GCash payment details have not been set up yet. Please contact us before sending any payment.
+            </div>
+            <?php endif; ?>
             <div class="instructions">
                 <strong><i class="fas fa-info-circle"></i> How to Pay:</strong>
                 <p style="margin: 5px 0 0; white-space: pre-line;"><?php echo nl2br(htmlspecialchars($gcash_instructions)); ?></p>
@@ -2187,7 +2208,12 @@ function hideModal(type) { var modal = document.getElementById(type + 'Modal'); 
 function showPaymentPopup(reference, tourName, total) {
     document.getElementById('popup_reference').textContent = reference;
     document.getElementById('popup_tour').textContent = tourName;
-    document.getElementById('popup_amount').textContent = '₱' + parseFloat(total).toLocaleString('en-US', {minimumFractionDigits: 2});
+    var totalNum = parseFloat(total) || 0;
+    var feeNum = Math.min(<?php echo json_encode(PaymentService::RESERVATION_FEE); ?>, totalNum);
+    var pesoFmt = function (n) { return '₱' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
+    document.getElementById('popup_amount').textContent = pesoFmt(totalNum);
+    document.getElementById('popup_fee').textContent = pesoFmt(feeNum);
+    document.getElementById('popup_balance').textContent = pesoFmt(Math.max(0, totalNum - feeNum));
     document.getElementById('paymentPopup').classList.add('show');
     document.body.style.overflow = 'hidden';
 }

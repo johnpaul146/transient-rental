@@ -7,6 +7,8 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
+require_once 'includes/PaymentService.php';
+
 // ✨ TERMS: Load the terms gate
 require_once 'includes/TermsGate.php';
 $termsGate = new TermsGate($pdo);
@@ -81,8 +83,10 @@ while($row = $stmt->fetch()) {
     $gcash_settings[$row['content_key']] = $row['content_value'];
 }
 
-$gcash_name = $gcash_settings['account_name'] ?? 'Juan Dela Cruz';
-$gcash_number = $gcash_settings['number'] ?? '09123456789';
+$gcash_cfg = PaymentService::gcashConfig($pdo);
+$gcash_configured = $gcash_cfg['configured'];   // placeholders are never shown to guests
+$gcash_name = $gcash_settings['account_name'] ?? '';
+$gcash_number = $gcash_settings['number'] ?? '';
 $gcash_qr = $gcash_settings['qr_code'] ?? '';
 $gcash_instructions = $gcash_settings['instructions'] ?? "1. Open GCash app\n2. Click 'Pay QR' or 'Scan QR'\n3. Scan the QR code above\n4. Enter the exact amount shown\n5. Complete the payment\n6. Take a screenshot of the transaction\n7. Upload screenshot as proof of payment";
 
@@ -95,28 +99,36 @@ if (empty(trim($bookingTermsBody))) {
     $bookingTermsBody = '<h3>📋 Booking Policy</h3>
 <p>By confirming your booking, you agree to the following terms:</p>
 
-<h3>❌ No Cancellation Policy</h3>
+<h3>💳 Reservation Fee &amp; Payment</h3>
 <ul>
-    <li>All bookings are <strong>final and non-cancellable</strong>.</li>
-    <li>Once a booking is confirmed, it <strong>cannot be cancelled</strong> and payments are <strong>non-refundable</strong>.</li>
-    <li>No-shows will result in <strong>full forfeiture</strong> of payment.</li>
+    <li>A <strong>₱1,000 reservation fee</strong> is required to secure your booking.</li>
+    <li>The reservation fee <strong>forms part of the total booking amount</strong>.</li>
+    <li>The <strong>remaining balance is payable upon arrival / check-in</strong>.</li>
+    <li>Upload your GCash reference and screenshot of the reservation fee through your profile.</li>
+</ul>
+
+<h3>❌ Cancellation Policy</h3>
+<ul>
+    <li><strong>Reservation fees are non-refundable.</strong></li>
+    <li>Unpaid reservations may be cancelled at no charge.</li>
+    <li>Paid reservations cannot be cancelled for a refund, but they <strong>may be rebooked</strong> subject to availability and the rebooking rules. The amount already paid is carried forward.</li>
+    <li>No-shows forfeit the reservation fee.</li>
 </ul>
 
 <h3>🔄 Rebooking Policy</h3>
 <ul>
-    <li>Guests may <strong>rebook their stay</strong> instead of cancelling.</li>
+    <li>House, Tour, Food and Package bookings that are <strong>confirmed or cancelled with money received</strong> may be rebooked instead of cancelled. <strong>Completed bookings cannot be rebooked.</strong></li>
     <li>Rebooking is allowed a maximum of <strong>2 times per booking</strong>.</li>
-    <li>Rebooking must be requested within <strong>7 days from the original booking date</strong>.</li>
+    <li>Rebooking must be requested within <strong>7 days from booking date</strong>. The amount already paid is carried forward — no second reservation fee and no refund.</li>
     <li>The <strong>stay duration (number of nights) must remain the same</strong> when rebooking — dates may change, but the length of stay cannot be shortened or extended.</li>
     <li>Rebooking is subject to <strong>admin approval</strong> and availability.</li>
+    <li>Your reservation fee is <strong>carried forward</strong> — no second reservation fee is charged.</li>
     <li>If the new dates are unavailable, you may choose different dates within the allowed rebook window.</li>
 </ul>
 
-<h3>💳 Payment Terms</h3>
+<h3>⏳ Unpaid Reservations</h3>
 <ul>
-    <li>Payment must be completed to confirm your booking.</li>
-    <li>Proof of payment (GCash reference + screenshot) must be uploaded through your profile.</li>
-    <li>Bookings with pending payments may be subject to cancellation by admin.</li>
+    <li>Bookings without a confirmed reservation fee may be cancelled by the owner.</li>
 </ul>
 
 <h3>👥 Guest Policy</h3>
@@ -127,7 +139,7 @@ if (empty(trim($bookingTermsBody))) {
 </ul>
 
 <h3>✅ Acknowledgment</h3>
-<p>By checking the box below and clicking "Accept &amp; Confirm Booking", you acknowledge that you have read, understood, and agreed to these terms — including the <strong>no cancellation policy</strong> and <strong>rebook-only option</strong>.</p>';
+<p>By checking the box below and clicking "Accept &amp; Confirm Booking", you acknowledge that you have read, understood, and agreed to these terms — including the <strong>non-refundable reservation fee</strong> and <strong>rebook-only option</strong> for paid reservations.</p>';
 }
 
 // Generate reference number
@@ -175,39 +187,15 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
         $check_in_time_db = $check_in_time . ':00';
         $check_out_time_db = $check_out_time . ':00';
         
-        // ✅ FIXED: Only block if booking is confirmed/approved/completed (NOT pending)
-        $check_availability = $pdo->prepare("SELECT id FROM house_bookings 
-            WHERE house_id = ? 
-            AND booking_status IN ({$blocking_placeholders})
-            AND NOT (check_out_date <= ? OR check_in_date > ?)");
-        $check_availability->execute([
-            $_POST['house_id'], 
-            $_POST['check_in'], 
-            $_POST['check_out']
-        ]);
-        
-        if($check_availability->fetch()) {
-            throw new Exception("Selected dates are not available. Please choose different dates.");
+        // Same rule everywhere (AvailabilityService): confirmed/completed stays hold the
+        // nights [check-in, check-out); blocked dates count for those nights only.
+        // Pending reservations may overlap — the first confirmed fee wins, and the
+        // check is repeated when the fee is confirmed.
+        $house_conflict = AvailabilityService::houseConflict($pdo, (int)$_POST['house_id'], $_POST['check_in'], $_POST['check_out']);
+        if ($house_conflict !== null) {
+            throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
         }
-        
-        // ✅ NEW: Check against blocked_dates table
-        $check_blocked = $pdo->prepare("SELECT block_date, reason, block_type FROM blocked_dates 
-            WHERE item_type = 'house' 
-            AND item_id = ? 
-            AND block_date BETWEEN ? AND ?");
-        $check_blocked->execute([
-            $_POST['house_id'],
-            $_POST['check_in'],
-            $_POST['check_out']
-        ]);
-        
-        $blocked_conflict = $check_blocked->fetch();
-        if ($blocked_conflict) {
-            $reason = $blocked_conflict['reason'] ?: 'Not available';
-            $btype = ucwords(str_replace('_', ' ', $blocked_conflict['block_type']));
-            throw new Exception("Selected dates include a BLOCKED date (" . date('M d, Y', strtotime($blocked_conflict['block_date'])) . ") — " . $btype . ": " . $reason . ". Please choose different dates.");
-        }
-        
+
         $guest_stmt = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
         $guest_stmt->execute([$_SESSION['user_id']]);
         $guest = $guest_stmt->fetch();
@@ -258,8 +246,8 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
         // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
         $stmt = $pdo->prepare("INSERT INTO house_bookings 
             (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time, 
-             number_of_guests, total_amount, guest_names, payment_status, booking_status, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+             number_of_guests, total_amount, reservation_fee_amount, guest_names, payment_status, booking_status, created_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
         $stmt->execute([
             $guest_id, 
             $_POST['house_id'], 
@@ -270,6 +258,7 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
             $check_out_time_db,
             $guests, 
             $total, 
+            PaymentService::feeFor($total),
             $guest_names_clean
         ]);
         
@@ -312,7 +301,7 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
             'check_out_time' => $check_out_time
         ];
         
-        $success = "Booking confirmed! Your reference number is: " . $reference;
+        $success = "Booking received! Your reference number is: " . $reference . ". Pay the reservation fee of " . PaymentService::peso(PaymentService::feeFor($total)) . " to secure it.";
         
     } catch(Exception $e) {
         $pdo->rollBack();
@@ -2400,6 +2389,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             .shopee-close-btn { width: 34px; height: 34px; font-size: 15px; top: 10px; right: 10px; }
         }
     </style>
+<?php echo PaymentService::css(); ?>
 </head>
 <body>
 
@@ -2574,24 +2564,22 @@ $is_logged_in = isset($_SESSION['user_id']);
                                 <?php echo formatTimeDisplay($booking['check_out_time'] ?? '12:00:00'); ?>
                             </div>
                         </td>
-                        <td style="padding: 12px;">₱<?php echo number_format($booking['total_amount']); ?></td>
+                        <td style="padding: 12px;"><?php echo PaymentService::guestAmountCell($booking); ?></td>
                         <td style="padding: 12px;">
-                            <span class="badge <?php echo $booking['payment_status'] == 'paid' ? 'badge-success' : 'badge-warning'; ?>">
-                                <?php echo ucfirst($booking['payment_status']); ?>
-                            </span>
+                            <?php echo PaymentService::guestBadge($booking); ?>
                         </td>
                         <td style="padding: 12px;">
                             <span class="badge badge-info"><?php echo ucfirst($booking['booking_status']); ?></span>
                         </td>
                         <td style="padding: 12px;">
                             <div style="display: flex; flex-wrap: wrap; gap: 4px;">
-                                <?php if($booking['payment_status'] == 'pending'): ?>
+                                <?php if(PaymentService::canPayReservation($booking)): ?>
                                     <a href="profile.php#houses-tab" class="btn" style="padding: 4px 12px; background: #10b981; color: white; border: none; border-radius: 6px; font-size: 11px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
                                         <i class="fas fa-credit-card"></i> Pay
                                     </a>
                                 <?php endif; ?>
                                 
-                                <?php if(($booking['booking_status'] == 'completed' || $booking['payment_status'] == 'paid') && empty($booking['feedback_text'])): ?>
+                                <?php if(($booking['booking_status'] == 'completed' || PaymentService::isSecured($booking)) && empty($booking['feedback_text'])): ?>
                                     <button class="btn" style="padding: 4px 12px; background: #8b5cf6; color: white; border: none; border-radius: 6px; font-size: 11px; cursor: pointer;" onclick="openFeedbackModal(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['house_name']); ?>', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-star"></i> Rate
                                     </button>
@@ -2965,8 +2953,8 @@ $is_logged_in = isset($_SESSION['user_id']);
     <div class="payment-popup">
         <div class="popup-header">
             <div class="success-icon"><i class="fas fa-check-circle"></i></div>
-            <h2>Booking Confirmed! 🎉</h2>
-            <p>Please complete your payment via GCash</p>
+            <h2>Booking Received! 🎉</h2>
+            <p>Pay the reservation fee via GCash to secure your booking</p>
         </div>
         
         <div class="popup-body">
@@ -2989,9 +2977,21 @@ $is_logged_in = isset($_SESSION['user_id']);
             </div>
 
             <div class="payment-detail">
-                <span class="label">Total Amount</span>
-                <span class="value amount" id="popup_amount">₱0.00</span>
+                <span class="label">Total Price</span>
+                <span class="value" id="popup_amount">₱0.00</span>
             </div>
+            <div class="payment-detail">
+                <span class="label">Reservation Fee (pay now)</span>
+                <span class="value amount" id="popup_fee">₱0.00</span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Balance on Arrival</span>
+                <span class="value" id="popup_balance">₱0.00</span>
+            </div>
+            <p style="font-size:12px;color:#64748b;margin:6px 0 0;line-height:1.5;">
+                Pay only the reservation fee now to secure your booking. It is part of your total price and is non-refundable;
+                paid reservations may be rebooked. The remaining balance is paid upon arrival / check-in.
+            </p>
             
             <div class="qr-section">
                 <?php if($gcash_qr && file_exists("uploads/gcash/" . $gcash_qr)): ?>
@@ -3004,10 +3004,17 @@ $is_logged_in = isset($_SESSION['user_id']);
                 <?php endif; ?>
             </div>
             
+            <?php if ($gcash_configured): ?>
             <div style="background: #f8fafc; padding: 12px; border-radius: 12px; margin: 10px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong><i class="fas fa-user"></i> Account Name:</strong> <?php echo htmlspecialchars($gcash_name); ?></p>
                 <p style="margin: 0; font-size: 14px;"><strong><i class="fas fa-mobile-alt"></i> GCash Number:</strong> <?php echo htmlspecialchars($gcash_number); ?></p>
             </div>
+            <?php else: ?>
+            <div style="background: #fff7ed; border:1px solid #fed7aa; color:#9a3412; padding: 12px; border-radius: 12px; margin: 10px 0; font-size:13px;">
+                <strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong>
+                The GCash payment details have not been set up yet. Please contact us before sending any payment.
+            </div>
+            <?php endif; ?>
             
             <div class="instructions">
                 <strong><i class="fas fa-info-circle"></i> How to Pay:</strong>
@@ -3366,7 +3373,12 @@ function hideModal(type) {
 function showPaymentPopup(reference, houseName, total, checkIn, checkInTime, checkOut, checkOutTime) {
     document.getElementById('popup_reference').textContent = reference;
     document.getElementById('popup_house').textContent = houseName;
-    document.getElementById('popup_amount').textContent = '₱' + parseFloat(total).toLocaleString('en-US', {minimumFractionDigits: 2});
+    var totalNum = parseFloat(total) || 0;
+    var feeNum = Math.min(<?php echo json_encode(PaymentService::RESERVATION_FEE); ?>, totalNum);
+    var pesoFmt = function (n) { return '₱' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
+    document.getElementById('popup_amount').textContent = pesoFmt(totalNum);
+    document.getElementById('popup_fee').textContent = pesoFmt(feeNum);
+    document.getElementById('popup_balance').textContent = pesoFmt(Math.max(0, totalNum - feeNum));
 
     var checkinEl = document.getElementById('popup_checkin');
     var checkoutEl = document.getElementById('popup_checkout');
@@ -3627,7 +3639,8 @@ function generateCalendar(month, year, bookedDates) {
         for (var j = 0; j < bookedDates.length; j++) {
             var bookedIn = parseDateYMD(bookedDates[j].check_in_date);
             var bookedOut = parseDateYMD(bookedDates[j].check_out_date);
-            if (bookedIn && bookedOut && dateObj >= bookedIn && dateObj <= bookedOut) {
+            // nights rule: [check-in, check-out) — the check-out day is free for the next guest
+            if (bookedIn && bookedOut && dateObj >= bookedIn && dateObj < bookedOut) {
                 if (bookedDates[j]._is_blocked) {
                     isBlocked = true;
                 } else {
@@ -3675,12 +3688,18 @@ function selectDate(dateStr) {
     
     if (selectedDate < today) { alert('❌ Cannot select past dates.'); return; }
     
-    // ✅ Check for booked OR blocked date
+    // ✅ Check for booked OR blocked nights.
+    // Picking check-in: that night must be free. Picking check-out: every night from
+    // check-in up to (not including) the check-out day must be free — the check-out
+    // day itself may be someone else's check-in day (12 NN check-out / 2 PM check-in).
+    var pickingCheckOut = !!(selectedStartDate && !selectedEndDate && selectedDate > parseDateYMD(selectedStartDate));
+    var rangeStart = pickingCheckOut ? parseDateYMD(selectedStartDate) : selectedDate;
+    var rangeEnd = pickingCheckOut ? selectedDate : new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate() + 1);
     var conflict = null;
     for (var j = 0; j < currentBookedDates.length; j++) {
         var bookedIn = parseDateYMD(currentBookedDates[j].check_in_date);
         var bookedOut = parseDateYMD(currentBookedDates[j].check_out_date);
-        if (bookedIn && bookedOut && selectedDate >= bookedIn && selectedDate <= bookedOut) {
+        if (bookedIn && bookedOut && rangeStart < bookedOut && rangeEnd > bookedIn) {
             conflict = currentBookedDates[j];
             break;
         }
@@ -3798,11 +3817,13 @@ function bookHouse(houseId, price, houseName) {
     // ✅ NEW: Get blocked dates for this house
     var blocked = blockedDatesData[houseId] || [];
     
-    // ✅ NEW: Treat each blocked date as a 1-day booking (so it appears red in calendar)
+    // ✅ Each blocked date is a one-night range [date, next day) (appears red in calendar)
     blocked.forEach(function(bd) {
+        var p = String(bd.block_date).split('-');
+        var nx = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10) + 1);
         currentBookedDates.push({
             check_in_date: bd.block_date,
-            check_out_date: bd.block_date,
+            check_out_date: nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0'),
             _is_blocked: true,
             _reason: bd.reason || 'Blocked',
             _block_type: bd.block_type || 'walk_in'
