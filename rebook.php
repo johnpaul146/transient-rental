@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';

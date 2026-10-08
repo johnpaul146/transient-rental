@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 
 // ✅ NEW: Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {
@@ -174,26 +176,23 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
         
         if($check_out <= $check_in) throw new Exception("Check-out must be after check-in");
         
-        // ✅ NEW: Validate & sanitize time inputs
-        $check_in_time = $_POST['check_in_time'] ?? '14:00';
-        $check_out_time = $_POST['check_out_time'] ?? '12:00';
-        
-        if (!preg_match('/^\d{2}:\d{2}$/', $check_in_time)) {
+        // Check-out TIME always follows check-in TIME (AvailabilityService::houseStayTimes).
+        // A posted check_out_time is ignored, so a forged value is never saved.
+        try {
+            $stayTimes = AvailabilityService::houseStayTimes($_POST['check_in_time'] ?? '14:00');
+        } catch (InvalidArgumentException $e) {
             throw new Exception("Invalid check-in time format");
         }
-        if (!preg_match('/^\d{2}:\d{2}$/', $check_out_time)) {
-            throw new Exception("Invalid check-out time format");
-        }
-        
-        // Normalize to HH:MM:SS for MySQL TIME column
-        $check_in_time_db = $check_in_time . ':00';
-        $check_out_time_db = $check_out_time . ':00';
-        
+        $check_in_time_db  = $stayTimes['in'];
+        $check_out_time_db = $stayTimes['out'];
+        $check_in_time  = substr($check_in_time_db, 0, 5);
+        $check_out_time = substr($check_out_time_db, 0, 5);
+
         // Same rule everywhere (AvailabilityService): confirmed/completed stays hold the
         // nights [check-in, check-out); blocked dates count for those nights only.
         // Pending reservations may overlap — the first confirmed fee wins, and the
         // check is repeated when the fee is confirmed.
-        $house_conflict = AvailabilityService::houseConflict($pdo, (int)$_POST['house_id'], $_POST['check_in'], $_POST['check_out']);
+        $house_conflict = AvailabilityService::houseConflict($pdo, (int)$_POST['house_id'], $_POST['check_in'], $_POST['check_out'], [], [], $check_in_time_db, $check_out_time_db);
         if ($house_conflict !== null) {
             throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
         }
@@ -1263,6 +1262,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             font-weight: 400;
         }
         .time-helper i { color: #4DA6D9; }
+        .form-control.time-locked, .form-control.time-locked:focus { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; box-shadow: none; }
 
         .btn-primary {
             width: 100%; padding: 12px;
@@ -2695,16 +2695,16 @@ $is_logged_in = isset($_SESSION['user_id']);
                 <div class="form-row">
                     <div class="form-group">
                         <label><i class="fas fa-clock"></i> Check-in Time *</label>
-                        <input type="time" name="check_in_time" id="check_in_time" class="form-control" value="14:00" required onchange="updateCalendarInfo()">
+                        <input type="time" name="check_in_time" id="check_in_time" class="form-control" value="14:00" required oninput="syncCheckoutTime()" onchange="syncCheckoutTime(); updateCalendarInfo()">
                         <small class="time-helper">
                             <i class="fas fa-info-circle"></i> Standard check-in: 2:00 PM
                         </small>
                     </div>
                     <div class="form-group">
-                        <label><i class="fas fa-clock"></i> Check-out Time *</label>
-                        <input type="time" name="check_out_time" id="check_out_time" class="form-control" value="12:00" required onchange="updateCalendarInfo()">
+                        <label><i class="fas fa-lock"></i> Check-out Time <small style="color:#94a3b8;font-weight:400;">(automatic)</small></label>
+                        <input type="time" name="check_out_time" id="check_out_time" value="14:00" required readonly tabindex="-1" aria-readonly="true" class="form-control time-locked">
                         <small class="time-helper">
-                            <i class="fas fa-info-circle"></i> Standard check-out: 12:00 PM
+                            <i class="fas fa-lock"></i> Checkout time follows your check-in time.
                         </small>
                     </div>
                 </div>
@@ -3744,7 +3744,14 @@ function selectDate(dateStr) {
     updateCalendarInfo();
 }
 
+// Business rule: check-out TIME always follows check-in TIME (the date still follows the nights).
+function syncCheckoutTime() {
+    var i = document.getElementById('check_in_time'), o = document.getElementById('check_out_time');
+    if (i && o) o.value = i.value;
+}
+
 function updateCalendarInfo() {
+    syncCheckoutTime();
     const info = document.getElementById('calendarInfo');
     
     var checkInTimeEl = document.getElementById('check_in_time');
@@ -3823,7 +3830,7 @@ function bookHouse(houseId, price, houseName) {
     document.getElementById('check_in').value = '';
     document.getElementById('check_out').value = '';
     document.getElementById('check_in_time').value = '14:00';
-    document.getElementById('check_out_time').value = '12:00';
+    document.getElementById('check_out_time').value = '14:00';
     document.getElementById('guests').value = '';
     document.getElementById('display_days').textContent = '0';
     document.getElementById('display_nights').textContent = '0';
@@ -3872,6 +3879,7 @@ function requestBookingWithTerms() {
 function validateBookingFormBeforeTerms() {
     const checkIn = document.getElementById('check_in').value;
     const checkOut = document.getElementById('check_out').value;
+    syncCheckoutTime();
     const checkInTime = document.getElementById('check_in_time').value;
     const checkOutTime = document.getElementById('check_out_time').value;
 

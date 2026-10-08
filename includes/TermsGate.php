@@ -69,6 +69,40 @@ class TermsGate
     }
 
     /**
+     * Server-side gate for guest pages. A logged-in GUEST who has not accepted the
+     * CURRENT Terms & Privacy is sent to the homepage, where the acceptance modal opens,
+     * instead of using booking / profile / payment / rebook / cancel / feedback features.
+     *
+     * Never affects: admin, staff, anonymous visitors, login, OTP / new-device verification,
+     * forgot-password, logout (none of those call this).
+     *
+     * $isHome = true  -> homepage: a plain page view is allowed (that is where the modal shows);
+     *                    state-changing requests are refused, except the `accept_terms` POST,
+     *                    which index.php's existing handler records and answers first.
+     */
+    public static function enforceGuest(PDO $pdo, bool $isHome = false): void
+    {
+        if (empty($_SESSION['user_id']) || ($_SESSION['role'] ?? '') !== 'guest') {
+            return;
+        }
+        $gate = new self($pdo);
+        if ($gate->hasAccepted((int)$_SESSION['user_id'])) {
+            return;
+        }
+        $_SESSION['show_terms_modal'] = true;
+
+        if ($isHome) {
+            $isPost = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
+            if (!$isPost && !isset($_GET['delete_feedback'])) return;      // view the homepage -> modal
+            if ($isPost && isset($_POST['accept_terms'])) return;          // the acceptance itself
+        }
+        if (!headers_sent()) {
+            header('Location: index.php?terms_required=1');
+        }
+        exit();
+    }
+
+    /**
      * Get the terms + privacy content from site_content.
      * Provides sensible defaults if not yet set.
      */

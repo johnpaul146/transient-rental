@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 require_once 'includes/PaymentService.php';
 
 if (file_exists('includes/SystemLogger.php')) {
@@ -141,8 +143,7 @@ if (isset($_POST['add_house_to_package'])) {
         $house_id = (int)$_POST['house_id'];
         $check_in = $_POST['check_in'] ?? '';
         $check_out = $_POST['check_out'] ?? '';
-        $check_in_time  = $_POST['check_in_time']  ?? '14:00';
-        $check_out_time = $_POST['check_out_time'] ?? '12:00';
+        $check_in_time  = $_POST['check_in_time']  ?? '14:00';   // check-out time is NOT read: it follows check-in
         $guests = (int)($_POST['guests'] ?? 1);
         $guest_names_json = $_POST['guest_names_json'] ?? '[]';
 
@@ -150,8 +151,14 @@ if (isset($_POST['add_house_to_package'])) {
         if (empty($check_in)) throw new Exception("Check-in date is required.");
         if (empty($check_out)) throw new Exception("Check-out date is required.");
 
-        if (!preg_match('/^\d{2}:\d{2}$/', $check_in_time))  throw new Exception("Invalid check-in time format.");
-        if (!preg_match('/^\d{2}:\d{2}$/', $check_out_time)) throw new Exception("Invalid check-out time format.");
+        // Same rule everywhere: check-out TIME = check-in TIME (AvailabilityService::houseStayTimes)
+        try {
+            $stayTimes = AvailabilityService::houseStayTimes($check_in_time);
+        } catch (InvalidArgumentException $e) {
+            throw new Exception("Invalid check-in time format.");
+        }
+        $check_in_time  = substr($stayTimes['in'], 0, 5);
+        $check_out_time = substr($stayTimes['out'], 0, 5);
 
         if ($guests < 1) $guests = 1;
         if ($guests > 20) $guests = 20;
@@ -195,7 +202,7 @@ if (isset($_POST['add_house_to_package'])) {
         if ((int)($house['capacity'] ?? 0) > 0 && $guests > (int)$house['capacity']) throw new Exception("This house fits up to " . (int)$house['capacity'] . " guests. Please reduce the number of guests.");
 
         // Same availability rule as standalone bookings (AvailabilityService: nights [in, out), blocked dates)
-        $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out);
+        $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out, [], [], $stayTimes['in'], $stayTimes['out']);
         if ($house_conflict !== null) throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
 
         $total_price = $house['price_per_night'] * $nights;
@@ -388,15 +395,18 @@ if (isset($_POST['confirm_package_booking'])) {
             $h = $cart['house'];
 
             if ($h['check_in'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
-            if (AvailabilityService::houseConflict($pdo, $h['id'], $h['check_in'], $h['check_out']) !== null) {
+            // Re-apply the rule at submit time (also normalises a cart saved before this rule existed)
+            try { $stayTimes = AvailabilityService::houseStayTimes($h['check_in_time'] ?? '14:00'); }
+            catch (InvalidArgumentException $e) { throw new Exception("Invalid check-in time format."); }
+            if (AvailabilityService::houseConflict($pdo, $h['id'], $h['check_in'], $h['check_out'], [], [], $stayTimes['in'], $stayTimes['out']) !== null) {
                 throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
             }
 
             $ref = $package_ref . '-H';
 
             // ✅ NEW: Include check-in/check-out time
-            $check_in_time_db  = ($h['check_in_time']  ?? '14:00') . ':00';
-            $check_out_time_db = ($h['check_out_time'] ?? '12:00') . ':00';
+            $check_in_time_db  = $stayTimes['in'];
+            $check_out_time_db = $stayTimes['out'];   // = check-in time
 
             // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
             $stmt = $pdo->prepare("INSERT INTO house_bookings 
@@ -936,7 +946,7 @@ $cart_data_js = [
         'check_in' => $cart['house']['check_in'] ?? '',
         'check_in_time' => $cart['house']['check_in_time'] ?? '14:00',   // ✅ NEW
         'check_out' => $cart['house']['check_out'] ?? '',
-        'check_out_time' => $cart['house']['check_out_time'] ?? '12:00', // ✅ NEW
+        'check_out_time' => $cart['house']['check_in_time'] ?? '14:00',  // check-out time follows check-in time
         'guests' => (int)($cart['house']['guests'] ?? 0),
         'guest_names' => array_values(array_filter(array_map('trim', explode("\n", (string)($cart['house']['guest_names'] ?? '')))))
     ] : null,
@@ -979,6 +989,7 @@ $cart_data_js = [
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; overflow-x: hidden; }
 
         /* ✅ NEW: time-helper text */
+        .form-control.time-locked, .form-control.time-locked:focus { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; box-shadow: none; }
         .time-helper { display: block; color: #94a3b8; font-size: 11px; margin-top: 4px; font-weight: 400; }
         .time-helper i { color: #4DA6D9; }
 
@@ -2241,13 +2252,13 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="form-row">
                 <div class="form-group">
                     <label><i class="fas fa-clock"></i> Check-in Time *</label>
-                    <input type="time" name="check_in_time" id="h_check_in_time" class="form-control" value="14:00" required>
+                    <input type="time" name="check_in_time" id="h_check_in_time" class="form-control" value="14:00" required oninput="syncHouseCheckoutTime()" onchange="syncHouseCheckoutTime()">
                     <small class="time-helper"><i class="fas fa-info-circle"></i> Standard check-in: 2:00 PM</small>
                 </div>
                 <div class="form-group">
-                    <label><i class="fas fa-clock"></i> Check-out Time *</label>
-                    <input type="time" name="check_out_time" id="h_check_out_time" class="form-control" value="12:00" required>
-                    <small class="time-helper"><i class="fas fa-info-circle"></i> Standard check-out: 12:00 PM</small>
+                    <label><i class="fas fa-lock"></i> Check-out Time <small style="color:#94a3b8;font-weight:400;">(automatic)</small></label>
+                    <input type="time" name="check_out_time" id="h_check_out_time" class="form-control time-locked" value="14:00" required readonly tabindex="-1" aria-readonly="true">
+                    <small class="time-helper"><i class="fas fa-lock"></i> Checkout time follows your check-in time.</small>
                 </div>
             </div>
 
@@ -3387,7 +3398,7 @@ function editHouse() {
 
             // ✅ Restore times
             if (d.check_in_time)  document.getElementById('h_check_in_time').value  = d.check_in_time;
-            if (d.check_out_time) document.getElementById('h_check_out_time').value = d.check_out_time;
+            syncHouseCheckoutTime();   // check-out time follows check-in time
 
             document.getElementById('houseCalendarInfo').innerHTML =
                 '✅ Stay: <strong>' + formatDateDisplay(d.check_in) + '</strong> → <strong>' + formatDateDisplay(d.check_out) + '</strong>';
@@ -3705,7 +3716,7 @@ function selectHouse(el) {
 
     // ✅ Reset times to defaults
     document.getElementById('h_check_in_time').value = '14:00';
-    document.getElementById('h_check_out_time').value = '12:00';
+    document.getElementById('h_check_out_time').value = '14:00';
 
     document.getElementById('houseCalendarInfo').textContent = 'Click a date to pick your check-in. Then click your check-out.';
 
@@ -4305,6 +4316,12 @@ document.getElementById('tourForm').addEventListener('submit', function(e) {
 });
 
 // ✅ UPDATED: houseForm submit validates times too
+// Business rule: check-out TIME always follows check-in TIME (the date still follows the nights).
+function syncHouseCheckoutTime() {
+    var i = document.getElementById('h_check_in_time'), o = document.getElementById('h_check_out_time');
+    if (i && o) o.value = i.value;
+}
+
 document.getElementById('houseForm').addEventListener('submit', function(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -4314,6 +4331,7 @@ document.getElementById('houseForm').addEventListener('submit', function(e) {
     var checkOut = document.getElementById('h_check_out').value;
     if (!checkOut) { alert('Please select a check-out date from the calendar.'); return false; }
 
+    syncHouseCheckoutTime();
     var checkInTime = document.getElementById('h_check_in_time').value;
     var checkOutTime = document.getElementById('h_check_out_time').value;
     if (!checkInTime) { alert('Please select a check-in time.'); document.getElementById('h_check_in_time').focus(); return false; }

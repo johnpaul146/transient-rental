@@ -135,10 +135,63 @@ function validatePhoneNumberOptional($phone) {
 
 
 
+/** Country codes offered by the registration form (same list as the <select> options and edit-profile.php). */
+function registrationCountryCodes() {
+    return ['+63', '+1', '+44', '+61', '+81', '+82', '+86', '+65', '+60', '+62', '+66', '+84', '+91', '+971', '+966'];
+}
+
+/**
+ * Validate a phone number against its selected country code.
+ *   +63          -> the existing Philippine rule (exactly 10 digits, starts with 9)
+ *   other codes  -> international (E.164) check only: digits, no leading 0 (trunk prefix),
+ *                   7 .. (15 - country-code digits) digits. No per-country prefix rules.
+ * A code that is not in the offered list (forged POST) is rejected.
+ * Returns [normalized "+<code><digits>", error_or_null].
+ */
+function validatePhoneWithCode($suffix, $number, $label) {
+    if (!is_string($suffix) || !in_array(trim($suffix), registrationCountryCodes(), true)) {
+        return ['', 'Please select a valid country code'];
+    }
+    $suffix = trim($suffix);
+    $digits = normalizePhone(is_string($number) ? $number : '');
+    if ($digits === '') return ['', $label . ' is required'];
+    if ($suffix === '+63') {
+        $err = validatePhoneNumber($digits);
+        return [$err ? '' : $suffix . $digits, $err];
+    }
+    if ($digits[0] === '0') return ['', 'Enter the number without the leading 0'];
+    $max = 16 - strlen($suffix);                       // 15 digits in total, minus the country-code digits
+    if (strlen($digits) < 7)    return ['', 'Number is too short for ' . $suffix . ' (at least 7 digits)'];
+    if (strlen($digits) > $max) return ['', 'Number is too long for ' . $suffix . ' (at most ' . $max . ' digits)'];
+    return [$suffix . $digits, null];
+}
+
 function buildFullPhone($suffix, $number) {
     $clean_number = normalizePhone($number);
     if (empty($clean_number)) return '';
     return trim($suffix) . $clean_number;
+}
+
+/**
+ * Registration email: trimmed, any provider (not Gmail-only), must be a syntactically
+ * valid address with a dotted domain. Returns [clean_email, error_or_null].
+ */
+function validateRegistrationEmail($raw) {
+    $email = trim((string)$raw);
+    if ($email === '') return ['', 'Email is required'];
+    if (mb_strlen($email) > 100) return [$email, 'Email must not exceed 100 characters'];
+    $domain = (string)substr((string)strrchr($email, '@'), 1);
+    if (preg_match('/\s/u', $email) || !filter_var($email, FILTER_VALIDATE_EMAIL) || strpos($domain, '.') === false) {
+        return [$email, 'Please enter a valid email address (e.g., name@example.com)'];
+    }
+    return [$email, null];
+}
+
+/** Address: control characters/newlines become spaces, runs of whitespace collapse, ends trimmed. */
+function normalizeAddress($raw) {
+    $a = preg_replace('/[\x00-\x1F\x7F]+/', ' ', (string)$raw);
+    $a = preg_replace('/\s+/u', ' ', (string)$a);
+    return trim((string)$a);
 }
 
 function buildFullName($first, $middle, $last, $suffix) {
@@ -296,27 +349,18 @@ if(isset($_POST['register'])) {
         $clean_contact = normalizePhone($_POST['contact'] ?? '');
         $clean_emergency = normalizePhone($_POST['emergency_number'] ?? '');
 
-        $contact_suffix = trim($_POST['contact_suffix'] ?? '+63');
-        $emergency_suffix = trim($_POST['emergency_suffix'] ?? '+63');
-
-        $full_contact = buildFullPhone($contact_suffix, $clean_contact);
-        $full_emergency = buildFullPhone($emergency_suffix, $clean_emergency);
+        // Phones are validated against the selected country code (absent code = +63, as before)
+        list($full_contact, $contactError) = validatePhoneWithCode($_POST['contact_suffix'] ?? '+63', $_POST['contact'] ?? '', 'Contact number');
+        list($full_emergency, $emergencyError) = validatePhoneWithCode($_POST['emergency_suffix'] ?? '+63', $_POST['emergency_number'] ?? '', 'Emergency contact number');
 
         // Additional validation
         if(empty($first_name)) $errors['firstname'] = "First name is required";
         if(empty($last_name)) $errors['lastname'] = "Last name is required";
 
-        if(empty($_POST['contact'])) {
-            $errors['contact'] = "Contact number is required";
-        } else {
-            $contactError = validatePhoneNumber($_POST['contact']);
-            if ($contactError) $errors['contact'] = $contactError;
-        }
+        if ($contactError) $errors['contact'] = $contactError;
 
-        if(!empty($_POST['emergency_number'])) {
-            $emergencyError = validatePhoneNumberOptional($_POST['emergency_number']);
-            if ($emergencyError) $errors['emergency_number'] = $emergencyError;
-        }
+        // EMERGENCY CONTACT NUMBER — required; validated for its selected country code
+        if ($emergencyError) $errors['emergency_number'] = $emergencyError;
 
         // ID PHOTO — required (valid image file or camera capture)
         if (!hasValidIdPhoto()) $errors['id_photo'] = "Please upload your valid ID photo before continuing.";
@@ -328,9 +372,11 @@ if(isset($_POST['register'])) {
                 && preg_match('#^data:image/[a-zA-Z0-9.+\-]+;base64,.+#s', $_POST['profile_photo_base64']));
         if (!$has_profile_photo) $errors['profile_photo'] = "Please upload your profile photo before continuing.";
 
-        // EMERGENCY CONTACT NAME — letters, spaces and hyphens only (optional field)
-        $emergency_name_clean = trim(preg_replace('/\s+/u', ' ', (string)($_POST['emergency_name'] ?? '')));
-        if ($emergency_name_clean !== '') {
+        // EMERGENCY CONTACT NAME — required; letters, spaces and hyphens only
+        $emergency_name_clean = trim((string)preg_replace('/\s+/u', ' ', (string)($_POST['emergency_name'] ?? '')));
+        if ($emergency_name_clean === '') {
+            $errors['emergency_name'] = "Emergency contact name is required";
+        } else {
             if (mb_strlen($emergency_name_clean) > 100) {
                 $errors['emergency_name'] = "Emergency contact name must not exceed 100 characters";
             } elseif (!preg_match('/^(?=.*\p{L})[\p{L} \-]+$/u', $emergency_name_clean)) {
@@ -351,10 +397,18 @@ if(isset($_POST['register'])) {
             $errors['id_number'] = "ID number can only contain letters, numbers, and hyphens (no spaces)";
         }
 
-        if(empty($_POST['email'])) {
-            $errors['email'] = "Email is required";
-        } elseif(!filter_var($_POST['email'], FILTER_VALIDATE_EMAIL)) {
-            $errors['email'] = "Please enter a valid email address";
+        // EMAIL — trimmed, must be a valid address (any provider)
+        list($email_clean, $email_error) = validateRegistrationEmail($_POST['email'] ?? '');
+        if ($email_error) $errors['email'] = $email_error;
+
+        // ADDRESS — required; whitespace-only is blank
+        $address_clean = normalizeAddress($_POST['address'] ?? '');
+        if ($address_clean === '') {
+            $errors['address'] = "Address is required";
+        } elseif (!preg_match('/[\p{L}\p{N}]/u', $address_clean)) {
+            $errors['address'] = "Please enter a valid address";
+        } elseif (strlen($address_clean) > 65535) {            // guests.address is TEXT (65,535 bytes)
+            $errors['address'] = "Address is too long";
         }
         if(empty($_POST['id_type'])) $errors['id_type'] = "Please select an ID type";
 
@@ -385,7 +439,7 @@ if(isset($_POST['register'])) {
 
         if(empty($errors['email'])) {
             $check = $pdo->prepare("SELECT id FROM users WHERE email = ?");
-            $check->execute([$_POST['email']]);
+            $check->execute([$email_clean]);
             if($check->fetch()) $errors['email'] = "Email already registered!";
         }
 
@@ -397,7 +451,7 @@ if(isset($_POST['register'])) {
 
         // Insert user
         $stmt = $pdo->prepare("INSERT INTO users (username, password, email, fullname, role) VALUES (?, ?, ?, ?, 'guest')");
-        $stmt->execute([$_POST['username'], $hashed_password, $_POST['email'], $fullname]);
+        $stmt->execute([$_POST['username'], $hashed_password, $email_clean, $fullname]);
         $user_id = $pdo->lastInsertId();
 
         // Handle Profile Photo
@@ -474,8 +528,8 @@ if(isset($_POST['register'])) {
             $last_name   ?: null,
             $name_suffix ?: null,
             $full_contact,
-            $_POST['email'],
-            $_POST['address'],
+            $email_clean,
+            $address_clean,
             $_POST['id_type'],
             $id_number,
             $emergency_name_clean,
@@ -512,7 +566,7 @@ if(isset($_POST['register'])) {
                 $pdo,
                 'register',
                 'auth',
-                "New user registered: {$_POST['username']} ({$_POST['email']})",
+                "New user registered: {$_POST['username']} ({$email_clean})",
                 $user_id,
                 'user'
             );
@@ -1569,6 +1623,11 @@ i.fab {
         <div class="error-summary">
             <h4><i class="fas fa-exclamation-triangle"></i> Please fix the following:</h4>
             <p>The fields with red backgrounds need to be fixed.</p>
+            <ul style="list-style:none;margin:10px 0 0;padding:0;text-align:left;display:inline-block;font-size:13px;color:#991b1b;">
+                <?php foreach ($errors as $__f => $__m): ?>
+                    <li>&bull; <?php echo strip_tags(str_replace('<br>', ' ', (string)$__m)); ?></li>
+                <?php endforeach; ?>
+            </ul>
         </div>
     <?php endif; ?>
 
@@ -1754,7 +1813,7 @@ i.fab {
             
             <div class="form-group">
                 <label>Email <span class="required-field">*</span></label>
-                <input type="email" name="email" class="form-control <?php echo hasError('email'); ?>" value="<?php echo value('email'); ?>" placeholder="your@email.com" required>
+                <input type="email" name="email" class="form-control <?php echo hasError('email'); ?>" value="<?php echo value('email'); ?>" placeholder="your@email.com" maxlength="100" autocomplete="email" required>
                 <?php if(hasError('email')): ?>
                     <div class="error-field-label"><i class="fas fa-exclamation-circle"></i> <?php echo $errors['email']; ?></div>
                 <?php endif; ?>
@@ -1762,8 +1821,11 @@ i.fab {
         </div>
 
         <div class="form-group">
-            <label>Address</label>
-            <input type="text" name="address" class="form-control" value="<?php echo value('address'); ?>" placeholder="Your complete address">
+            <label>Address <span class="required-field">*</span></label>
+            <input type="text" name="address" class="form-control <?php echo hasError('address'); ?>" value="<?php echo value('address'); ?>" placeholder="Your complete address" autocomplete="street-address" required>
+            <?php if(hasError('address')): ?>
+                <div class="error-field-label"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($errors['address']); ?></div>
+            <?php endif; ?>
         </div>
 
         <!-- IDENTIFICATION -->
@@ -1853,13 +1915,13 @@ i.fab {
 
         <div class="form-row-2">
             <div class="form-group">
-                <label>Emergency Contact Name</label>
-                <input type="text" name="emergency_name" id="emergency_name_input" class="form-control <?php echo hasError('emergency_name'); ?>" value="<?php echo value('emergency_name'); ?>" placeholder="Person to contact in emergency" maxlength="100" autocomplete="off">
+                <label>Emergency Contact Name <span class="required-field">*</span></label>
+                <input type="text" name="emergency_name" id="emergency_name_input" data-msg-id="emergencyNameMsg" required class="form-control <?php echo hasError('emergency_name'); ?>" value="<?php echo value('emergency_name'); ?>" placeholder="Person to contact in emergency" maxlength="100" autocomplete="off">
                 <div class="error-field-label" id="emergencyNameMsg" style="<?php echo hasError('emergency_name') ? '' : 'display:none;'; ?>"><i class="fas fa-exclamation-circle"></i> <span><?php echo hasError('emergency_name') ? htmlspecialchars($errors['emergency_name']) : ''; ?></span></div>
             </div>
             
             <div class="form-group">
-                <label>Emergency Contact Number</label>
+                <label>Emergency Contact Number <span class="required-field">*</span></label>
                 <div class="phone-input-group">
                     <select name="emergency_suffix" class="phone-suffix-select" aria-label="Country code">
                         <option value="+63" <?php echo selected('emergency_suffix', '+63'); ?>>+63 🇵🇭</option>
@@ -1888,7 +1950,8 @@ i.fab {
                                placeholder="9123456789" 
                               maxlength="10"
                                inputmode="numeric"
-                               autocomplete="tel">
+                               autocomplete="tel"
+                               required>
                         <span class="digit-count" id="emergencyDigitCount">0/10</span>
                     </div>
                 </div>
@@ -1896,7 +1959,7 @@ i.fab {
                     <div class="error-field-label"><i class="fas fa-exclamation-circle"></i> <?php echo $errors['emergency_number']; ?></div>
                 <?php endif; ?>
                 <div class="field-info">
-                    <i class="fas fa-info-circle"></i> Optional — select country code then enter number
+                    <i class="fas fa-info-circle"></i> Required — select country code then enter number
                 </div>
             </div>
         </div>
@@ -2143,6 +2206,12 @@ function togglePasswordVisibility(inputId, button) {
     }
 }
 
+// +63 keeps the Philippine mobile rule (10 digits, starts with 9); other offered codes use E.164 limits
+function phoneLimits(code){
+    if (!code || code === '+63') return { ph: true, max: 10 };
+    return { ph: false, max: 16 - code.length };      // 15 digits in total minus the country-code digits
+}
+
 function setupPhoneInput(inputId, counterId) {
 
     const input = document.getElementById(inputId);
@@ -2150,44 +2219,39 @@ function setupPhoneInput(inputId, counterId) {
 
     if (!input || !counter) return;
 
+    const group = input.closest('.phone-input-group');
+    const select = group ? group.querySelector('select') : null;
+    const limits = function(){ return phoneLimits(select ? select.value : '+63'); };
+
 
     function update() {
 
+        const L = limits();
         let cleaned = input.value.replace(/[^0-9]/g,'');
 
-
-        // PH mobile rule
-        if(cleaned.length > 0 && cleaned[0] !== '9') {
-
-            cleaned = cleaned.substring(1);
+        if (L.ph) {
+            // PH mobile rule: first digit must be 9
+            if(cleaned.length > 0 && cleaned[0] !== '9') {
+                cleaned = cleaned.substring(1);
+            }
+        } else {
+            // other countries: no leading 0 (trunk prefix is not part of the international number)
+            cleaned = cleaned.replace(/^0+/, '');
         }
 
-
-        if(cleaned.length > 10){
-
-            cleaned = cleaned.slice(0,10);
+        if(cleaned.length > L.max){
+            cleaned = cleaned.slice(0, L.max);
         }
 
+        input.maxLength = L.max;
+        input.placeholder = L.ph ? '9123456789' : 'Mobile number';
 
         if(input.value !== cleaned){
-
             input.value = cleaned;
         }
 
-
-        counter.textContent = cleaned.length + '/10';
-
-
-        if(cleaned.length === 10){
-
-            counter.classList.add('complete');
-
-        } else {
-
-            counter.classList.remove('complete');
-
-        }
-
+        counter.textContent = cleaned.length + '/' + L.max;
+        counter.classList.toggle('complete', L.ph ? cleaned.length === 10 : cleaned.length >= 7);
     }
 
 
@@ -2198,30 +2262,25 @@ function setupPhoneInput(inputId, counterId) {
 
         const char = String.fromCharCode(e.which);
 
-
         if(!/[0-9]/.test(char)){
-
             e.preventDefault();
             return;
         }
 
+        const L = limits();
 
-        // first digit must be 9
-        if(this.value.length === 0 && char !== '9'){
-
+        // PH only: first digit must be 9
+        if(L.ph && this.value.length === 0 && char !== '9'){
             e.preventDefault();
-
         }
 
-
-        if(this.value.length >= 10){
-
+        if(this.value.length >= L.max){
             e.preventDefault();
-
         }
-
     });
 
+    // Country code changed: re-apply that country's limits to what is already typed
+    if (select) select.addEventListener('change', update);
 
     update();
 
@@ -2632,19 +2691,97 @@ function showStep(step){
 }
 
 
-// Emergency contact name: letters, spaces and hyphens only
-function checkEmergencyName(focus){
-    const input = document.getElementById('emergency_name_input');
-    const msg = document.getElementById('emergencyNameMsg');
-    if (!input || !msg) return true;
-    const v = input.value.trim();
-    const ok = v === '' || /^(?=.*\p{L})[\p{L} \-]+$/u.test(v.replace(/\s+/g, ' '));
-    input.classList.toggle('error', !ok);
-    msg.style.display = ok ? 'none' : '';
-    if (!ok) {
-        msg.querySelector('span').textContent = 'Emergency contact name can only contain letters, spaces, and hyphens.';
-        if (focus) input.focus();
+// =====================================================================
+// Inline field messages (no browser alert) + per-field rules.
+// The server re-validates everything; these checks only save a round trip.
+// =====================================================================
+function msgFor(field){
+    const pre = field.dataset.msgId ? document.getElementById(field.dataset.msgId) : null;
+    if (pre) return pre;
+    const id = 'jsmsg_' + (field.name || field.id);
+    let el = document.getElementById(id);
+    if (el) return el;
+    const grp = field.closest('.form-group');
+    el = grp ? grp.querySelector('.error-field-label:not([id])') : null;   // adopt a server-rendered message
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'error-field-label';
+        const anchor = field.closest('.phone-input-group') || field.closest('.name-input-wrapper') || field;
+        anchor.insertAdjacentElement('afterend', el);
     }
+    el.id = id;
+    el.setAttribute('role', 'alert');
+    el.innerHTML = '<i class="fas fa-exclamation-circle"></i> <span></span>';
+    return el;
+}
+function setFieldError(field, message){
+    const el = msgFor(field);
+    let span = el.querySelector('span');
+    if (!span) { el.innerHTML = '<i class="fas fa-exclamation-circle"></i> <span></span>'; span = el.querySelector('span'); }
+    field.classList.toggle('error', !!message);
+    field.setAttribute('aria-invalid', message ? 'true' : 'false');
+    if (message) { span.textContent = message; el.style.display = ''; }
+    else { el.style.display = 'none'; }
+    return !message;
+}
+function fieldLabel(field){
+    const l = field.closest('.form-group') && field.closest('.form-group').querySelector('label');
+    return l ? l.textContent.replace('*', '').trim() : 'This field';
+}
+
+const EMAIL_RE = /^[^\s@]+@([^\s@.]+\.)+[^\s@.]{2,}$/;
+function emailError(v){
+    v = (v || '').trim();
+    if (!v) return 'Email is required.';
+    if (v.length > 100 || !EMAIL_RE.test(v)) return 'Please enter a valid email address (e.g., name@example.com).';
+    return '';
+}
+function addressError(v){
+    v = (v || '').replace(/\s+/g, ' ').trim();
+    if (!v) return 'Address is required.';
+    if (!/[\p{L}\p{N}]/u.test(v)) return 'Please enter a valid address.';
+    return '';
+}
+function emergencyNameError(v, strict){
+    v = (v || '').replace(/\s+/g, ' ').trim();
+    if (!v) return strict ? 'Emergency contact name is required.' : '';
+    if (v.length > 100) return 'Emergency contact name must not exceed 100 characters.';
+    if (!/^(?=.*\p{L})[\p{L} \-]+$/u.test(v)) return 'Emergency contact name can only contain letters, spaces, and hyphens.';
+    return '';
+}
+function phoneCodeFor(field){
+    const g = field && field.closest ? field.closest('.phone-input-group') : null;
+    const sel = g ? g.querySelector('select') : null;
+    return sel ? sel.value : '+63';
+}
+function phoneError(v, label, strict, code){
+    const d = (v || '').replace(/\D/g, '');
+    if (!d) return strict ? label + ' is required.' : '';
+    if (!code || code === '+63') {
+        if (d.length !== 10) return 'Mobile number must be exactly 10 digits.';
+        if (d[0] !== '9') return 'Mobile number must start with 9.';
+        return '';
+    }
+    const max = phoneLimits(code).max;
+    if (d[0] === '0') return 'Enter the number without the leading 0.';
+    if (d.length < 7) return 'Number is too short for ' + code + ' (at least 7 digits).';
+    if (d.length > max) return 'Number is too long for ' + code + ' (at most ' + max + ' digits).';
+    return '';
+}
+const FIELD_RULES = {
+    contact: function(v, f){ return phoneError(v, 'Contact number', true, phoneCodeFor(f)); },
+    email: function(v){ return emailError(v); },
+    address: function(v){ return addressError(v); },
+    emergency_name: function(v){ return emergencyNameError(v, true); },
+    emergency_number: function(v, f){ return phoneError(v, 'Emergency contact number', true, phoneCodeFor(f)); }
+};
+
+// Emergency contact name: required; letters, spaces and hyphens only
+function checkEmergencyName(focus, strict){
+    const input = document.getElementById('emergency_name_input');
+    if (!input) return true;
+    const ok = setFieldError(input, emergencyNameError(input.value, !!strict));
+    if (!ok && focus) input.focus();
     return ok;
 }
 (function(){
@@ -2710,48 +2847,80 @@ function checkIdPhoto(){
 }
 document.getElementById('id_photo_input')?.addEventListener('change', function(){ setTimeout(checkIdPhoto, 0); });
 
-function validateStep(step){
-    if (step === 1) {
-        // Profile photo first, then ID photo; both messages are shown if both are missing
-        const profileOk = checkProfilePhoto();
-        const idOk = checkIdPhoto();
-        if (!profileOk || !idOk) {
-            const target = document.getElementById(!profileOk ? 'profilePreview' : 'idPreview');
-            if (target) { target.setAttribute('tabindex', '-1'); target.focus({preventScroll:true}); if (target.scrollIntoView) target.scrollIntoView({behavior:'smooth', block:'center'}); }
-            return false;
-        }
-    }
-
-    let panel=document.querySelector(
-        `.wizard-panel[data-step="${step}"]`
-    );
-
-    let required=panel.querySelectorAll(
-        'input[required], select[required]'
-    );
-
-
-    if (step === 2 && !checkEmergencyName(true)) {
-        return false;
-    }
-
-    for(let field of required){
-
-        if(!field.value.trim()){
-
-            field.focus();
-
-            alert(
-              "Please complete all required fields before continuing."
-            );
-
-            return false;
-        }
-    }
-
-
-    return true;
+function focusFirstInvalid(targets){
+    if (!targets.length) return;
+    targets.sort(function(x, y){ return (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1; });
+    const t = targets[0];
+    if (t.id === 'profilePreview' || t.id === 'idPreview') t.setAttribute('tabindex', '-1');
+    t.focus({preventScroll:true});
+    if (t.scrollIntoView) t.scrollIntoView({behavior:'smooth', block:'center'});
 }
+
+function validateStep(step){
+    const bad = [];
+
+    if (step === 1) {
+        // Photos: both messages are shown if both are missing
+        if (!checkProfilePhoto()) bad.push(document.getElementById('profilePreview'));
+        if (!checkIdPhoto())      bad.push(document.getElementById('idPreview'));
+    }
+
+    const panel = document.querySelector(`.wizard-panel[data-step="${step}"]`);
+    panel.querySelectorAll('input, select, textarea').forEach(function(field){
+        const type = (field.type || '').toLowerCase();
+        if (['file', 'hidden', 'checkbox', 'radio', 'button', 'submit'].indexOf(type) !== -1) return;
+        let msg = '';
+        const rule = FIELD_RULES[field.name];
+        if (rule) msg = rule(field.value, field);
+        else if (field.required && !field.value.trim()) msg = fieldLabel(field) + ' is required.';
+        else if (!field.required) return;                       // optional field: leave untouched
+        if (!setFieldError(field, msg)) bad.push(field);
+    });
+
+    focusFirstInvalid(bad);
+    return bad.length === 0;
+}
+
+// Clear / refresh a flagged field as soon as the user fixes it (never wipes what they typed)
+(function(){
+    const form = document.getElementById('registerForm');
+    if (!form) return;
+    function refresh(e){
+        const f = e.target;
+        if (!f || !f.name || !f.classList.contains('error')) return;
+        if (f.name === 'emergency_name') { checkEmergencyName(false, false); return; }
+        const rule = FIELD_RULES[f.name];
+        const msg = rule ? rule(f.value, f) : (f.value.trim() ? '' : fieldLabel(f) + ' is required.');
+        setFieldError(f, msg);
+    }
+    form.addEventListener('input', refresh);
+    form.addEventListener('change', refresh);
+    // Show the problem as soon as the user leaves one of the four checked fields
+    ['contact', 'email', 'address', 'emergency_name', 'emergency_number'].forEach(function(n){
+        const f = form.elements[n];
+        if (f) f.addEventListener('blur', function(){ setFieldError(f, FIELD_RULES[n](f.value, f)); });
+    });
+    // Changing the country code re-checks the number that is already typed (never clears it)
+    ['contact_suffix', 'emergency_suffix'].forEach(function(n){
+        const sel = form.elements[n];
+        const num = form.elements[n === 'contact_suffix' ? 'contact' : 'emergency_number'];
+        if (sel && num) sel.addEventListener('change', function(){
+            if (num.value || num.classList.contains('error')) setFieldError(num, FIELD_RULES[num.name](num.value, num));
+        });
+    });
+    // Safety net: never submit with an invalid step 1 / 2 (e.g. Enter key in a field)
+    form.addEventListener('submit', function(e){
+        for (const st of [1, 2]) {
+            if (!validateStep(st)) {
+                e.preventDefault();
+                currentStep = st;
+                showStep(st);
+                validateStep(st);        // panel is visible now, so the first invalid field can take focus
+                return;
+            }
+        }
+    });
+})();
 
 
 nextBtn.addEventListener('click',()=>{

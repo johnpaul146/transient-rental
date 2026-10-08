@@ -17,6 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && empty($_FILES) && 
 }
 
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
@@ -705,6 +707,9 @@ if(isset($_POST['cancel_booking'])) {
         }
         if ($booking['booking_status'] === 'cancelled') {
             throw new Exception("This booking is already cancelled.");
+        }
+        if (!empty($booking['payment_proof'])) {
+            throw new Exception("Cancellation is unavailable after payment proof submission. Please wait for verification.");
         }
 
         // Unpaid booking: normal cancellation (no money was received)
@@ -1404,6 +1409,9 @@ background-position: center top;
         .btn-sm:hover { transform: translateY(-2px); }
         .btn-pay { background: #10b981; color: white; }
         .btn-pay:hover { background: #059669; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }
+        .proof-lock-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 6px 10px; line-height: 1.3; }
+        .proof-lock-note i { color: #f59e0b; }
+        .proof-lock-note-mobile { display: flex; justify-content: center; text-align: center; width: 100%; padding: 10px 12px; font-size: 13px; }
         .btn-cancel-booking { background: #ef4444; color: white; }
         .btn-rebook-svc { background: #4DA6D9; color: white; }
         .btn-cancel-booking:hover { background: #dc2626; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
@@ -2366,9 +2374,13 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                     <?php else: ?>
                                                         <span class="badge badge-info">Proof Submitted</span>
                                                     <?php endif; ?>
+                                                    <?php if(empty($booking['payment_proof'])): ?>
                                                     <button class="btn-sm btn-cancel-booking" onclick="openCancelBookingModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                                         <i class="fas fa-times-circle"></i> Cancel
                                                     </button>
+                                                    <?php else: ?>
+                                                    <span class="proof-lock-note"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                                    <?php endif; ?>
                                                 </div>
                                             <?php endif; ?>
                                             
@@ -2502,10 +2514,14 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
+                                    <?php if(empty($booking['payment_proof'])): ?>
                                     <button type="button" class="btn-card-action btn-cancel-booking-mobile"
                                             onclick="openCancelBookingModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times-circle"></i> Cancel
                                     </button>
+                                    <?php else: ?>
+                                    <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                    <?php endif; ?>
                                 <?php elseif($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && $rb['is_eligible']): ?>
                                     <button type="button" class="btn-card-action btn-rebook-confirm-mobile"
                                             onclick="showRebookPolicyPopup(
@@ -2604,9 +2620,13 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                     <?php else: ?>
                                                         <span class="badge badge-info">Proof Submitted</span>
                                                     <?php endif; ?>
+                                                    <?php if(empty($booking['payment_proof'])): ?>
                                                     <button class="btn-sm btn-cancel-booking" onclick="openCancelBookingModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                                         <i class="fas fa-times-circle"></i> Cancel
                                                     </button>
+                                                    <?php else: ?>
+                                                    <span class="proof-lock-note"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                                    <?php endif; ?>
                                                 <?php endif; ?>
                                             </div>
                                             <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
@@ -2687,10 +2707,14 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
+                                    <?php if(empty($booking['payment_proof'])): ?>
                                     <button type="button" class="btn-card-action btn-cancel-booking-mobile"
                                             onclick="openCancelBookingModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times-circle"></i> Cancel
                                     </button>
+                                    <?php else: ?>
+                                    <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </div>
                         </div>
@@ -2778,9 +2802,13 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                     <?php else: ?>
                                                         <span class="badge badge-info">Proof Submitted</span>
                                                     <?php endif; ?>
+                                                    <?php if(empty($booking['payment_proof'])): ?>
                                                     <button class="btn-sm btn-cancel-booking" onclick="openCancelBookingModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                                         <i class="fas fa-times-circle"></i> Cancel
                                                     </button>
+                                                    <?php else: ?>
+                                                    <span class="proof-lock-note"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                                    <?php endif; ?>
                                                 <?php endif; ?>
                                             </div>
                                             <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
@@ -2855,10 +2883,14 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
+                                    <?php if(empty($booking['payment_proof'])): ?>
                                     <button type="button" class="btn-card-action btn-cancel-booking-mobile"
                                             onclick="openCancelBookingModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-times-circle"></i> Cancel
                                     </button>
+                                    <?php else: ?>
+                                    <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </div>
                         </div>
@@ -2925,9 +2957,13 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                     <?php else: ?>
                                                         <span class="badge badge-info">Proof Submitted</span>
                                                     <?php endif; ?>
+                                                    <?php if(empty($pkg['payment_proof'])): ?>
                                                     <button class="btn-sm btn-cancel-booking" onclick="openCancelBookingModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>')">
                                                         <i class="fas fa-times-circle"></i> Cancel
                                                     </button>
+                                                    <?php else: ?>
+                                                    <span class="proof-lock-note"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                                    <?php endif; ?>
                                                 </div>
                                             <?php endif; ?>
                                             <?php if($is_admin && $pkg['booking_status'] == 'confirmed' && PaymentService::isSecured($pkg)): ?>
@@ -3030,10 +3066,14 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             <i class="fas fa-credit-card"></i> Pay
                                         </button>
                                     <?php endif; ?>
+                                    <?php if(empty($pkg['payment_proof'])): ?>
                                     <button type="button" class="btn-card-action btn-cancel-booking-mobile"
                                             onclick="openCancelBookingModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>')">
                                         <i class="fas fa-times-circle"></i> Cancel
                                     </button>
+                                    <?php else: ?>
+                                    <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </div>
                         </div>

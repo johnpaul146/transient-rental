@@ -75,6 +75,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     .wk-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; } .wk-field { margin-bottom: 12px; min-width: 0; }
     .wk-field label { display: block; font-weight: 600; font-size: 13px; color: #1e293b; margin-bottom: 5px; } .wk-field label .req { color: #dc2626; } .wk-field small { color: #64748b; font-size: 12px; }
     .wk-field input, .wk-field select, .wk-field textarea { width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; background: #fafafa; box-sizing: border-box; }
+    .wk-field input.wk-locked { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; }
+    .wk-lock-note { display: block; margin-top: 4px; font-size: 11px; color: #94a3b8; }
     .wk-field input:focus, .wk-field select:focus, .wk-field textarea:focus { outline: none; border-color: #4DA6D9; background: #fff; }
     .wk-seg { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
     .wk-seg button { flex: 1; min-width: 140px; padding: 10px; border-radius: 10px; border: 2px solid #e2e8f0; background: #fff; font-weight: 700; color: #475569; cursor: pointer; }
@@ -172,8 +174,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                             <div class="wk-field"><label>Check-out <span class="req">*</span></label><input type="date" name="check_out" id="wkOut" min="<?php echo $wk_today; ?>"></div>
                         </div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Check-in time</label><input type="time" name="check_in_time" value="14:00"></div>
-                            <div class="wk-field"><label>Check-out time</label><input type="time" name="check_out_time" value="12:00"></div>
+                            <div class="wk-field"><label>Check-in time</label><input type="time" name="check_in_time" id="wkInTime" value="14:00"></div>
+                            <div class="wk-field"><label><i class="fas fa-lock"></i> Check-out time <small>(automatic)</small></label><input type="time" name="check_out_time" id="wkOutTime" value="14:00" readonly tabindex="-1" aria-readonly="true" class="wk-locked"><small class="wk-lock-note">Checkout time follows the check-in time.</small></div>
                         </div>
                         <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkHouseCap"></small></label><input type="number" name="guests" id="wkPax" min="1" value="1"></div>
                         <div class="wk-field"><label>Guest names <small>(optional · one per line · must match the number of guests)</small></label><textarea name="guest_names" rows="2"></textarea></div>
@@ -291,6 +293,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
 
     $('wkHouse').addEventListener('change', function () { var h = find(DATA.houses, this.value); $('wkHouseCap').textContent = h ? '(max ' + h.capacity + ')' : ''; if (h) $('wkPax').max = h.capacity; });
     $('wkTour').addEventListener('change', function () { var t = find(DATA.tours, this.value); $('wkTourCap').textContent = t ? '(max ' + t.max + ')' : ''; if (t) form.elements['tour_guests'].max = t.max; });
+    function wkSyncOut() { $('wkOutTime').value = $('wkInTime').value; }
+    $('wkInTime').addEventListener('input', wkSyncOut); $('wkInTime').addEventListener('change', wkSyncOut);
     $('wkIn').addEventListener('change', function () { if (this.value) { var o = $('wkOut'); o.min = this.value; if (o.value && o.value <= this.value) o.value = ''; } });
     $('wkFood').addEventListener('change', function () {
         var f = find(DATA.foods, this.value), w = $('wkSizeWrap'), s = $('wkSize');
@@ -446,7 +450,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
 
     function newNonce() { var a = new Uint8Array(12); (window.crypto || window.msCrypto).getRandomValues(a); return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
     function wkReset() {
-        form.reset(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
+        form.reset(); wkSyncOut(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
         $('wkNonce').value = newNonce(); $('wkSizeWrap').classList.add('wk-hide'); $('wkAddrWrap').classList.add('wk-hide'); $('wkGcashWrap').classList.add('wk-hide');
         q('#wkPay label').forEach(function (l, i) { l.classList.toggle('on', i === 0); });
         wkMode('new'); syncSections(); showStep(1);

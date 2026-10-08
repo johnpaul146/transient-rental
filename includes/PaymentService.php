@@ -294,7 +294,7 @@ class PaymentService {
             list($t, $r) = $c;
             if ($t === 'house') {
                 AvailabilityService::lockItem($pdo, 'house', $r['house_id']);
-                AvailabilityService::assertFree(AvailabilityService::houseConflict($pdo, $r['house_id'], $r['check_in_date'], $r['check_out_date'], [$r['id']], [$r['reference_number']]), 'House');
+                AvailabilityService::assertFree(AvailabilityService::houseConflict($pdo, $r['house_id'], $r['check_in_date'], $r['check_out_date'], [$r['id']], [$r['reference_number']], $r['check_in_time'] ?? '14:00:00', $r['check_out_time'] ?? '12:00:00'), 'House');
             } elseif ($t === 'tour') {
                 AvailabilityService::lockItem($pdo, 'tour', $r['tour_id']);
                 AvailabilityService::assertFree(AvailabilityService::tourConflict($pdo, $r['tour_id'], $r['booking_date'], [$r['id']], [$r['reference_number']]), 'Tour');

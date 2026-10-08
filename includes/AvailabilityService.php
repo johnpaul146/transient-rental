@@ -60,20 +60,67 @@ class AvailabilityService {
      * message. $excludeIds: house_bookings ids to ignore (the booking itself);
      * $ownRefs: references whose auto-blocked dates belong to this booking.
      */
-    public static function houseConflict(PDO $pdo, $houseId, $in, $out, array $excludeIds = [], array $ownRefs = []) {
+    public static function houseConflict(PDO $pdo, $houseId, $in, $out, array $excludeIds = [], array $ownRefs = [], $inTime = null, $outTime = null) {
         if (!$in || !$out || $out <= $in) return 'Check-out must be after check-in.';
         $ex = self::inList($excludeIds);
         $ph = implode(',', array_fill(0, count($ex), '?'));
         $holding = "'" . implode("','", self::HOLDING_STATUSES) . "'";
-        $st = $pdo->prepare("SELECT reference_number, check_in_date, check_out_date FROM house_bookings
-                              WHERE house_id = ? AND booking_status IN ($holding)
-                                AND check_in_date < ? AND check_out_date > ? AND id NOT IN ($ph)
-                              ORDER BY check_in_date LIMIT 1");
-        $st->execute(array_merge([(int)$houseId, $out, $in], $ex));
-        if ($b = $st->fetch(PDO::FETCH_ASSOC)) {
-            return 'Already reserved from ' . self::fmt($b['check_in_date']) . ' to ' . self::fmt($b['check_out_date']) . ' (booking ' . $b['reference_number'] . ').';
+        // Time-aware overlap when the caller knows the stay's times: [in+inTime, out+outTime) against each
+        // holding booking's own stored times (old rows keep whatever times they were saved with).
+        // Without times it stays the date-only rule (nights [in, out)).
+        $timed = ($inTime !== null && $outTime !== null);
+        if ($timed) {
+            // Candidates on the same dates (inclusive), then compare full date+time in PHP — avoids
+            // DB-specific DATE/TIME concatenation behaviour. Old rows keep whatever times they were saved with.
+            $inDt  = $in  . ' ' . self::normTime($inTime);
+            $outDt = $out . ' ' . self::normTime($outTime);
+            $st = $pdo->prepare("SELECT reference_number, check_in_date, check_in_time, check_out_date, check_out_time FROM house_bookings
+                                  WHERE house_id = ? AND booking_status IN ($holding)
+                                    AND check_in_date <= ? AND check_out_date >= ? AND id NOT IN ($ph)
+                                  ORDER BY check_in_date");
+            $st->execute(array_merge([(int)$houseId, $out, $in], $ex));
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $b) {
+                $bIn  = substr((string)$b['check_in_date'], 0, 10)  . ' ' . self::normTime(substr((string)($b['check_in_time']  ?: '14:00:00'), 0, 8));
+                $bOut = substr((string)$b['check_out_date'], 0, 10) . ' ' . self::normTime(substr((string)($b['check_out_time'] ?: '12:00:00'), 0, 8));
+                if ($bIn < $outDt && $bOut > $inDt) {
+                    $from = self::fmt($b['check_in_date'])  . ' ' . date('g:i A', strtotime($bIn));
+                    $to   = self::fmt($b['check_out_date']) . ' ' . date('g:i A', strtotime($bOut));
+                    return 'Already reserved from ' . $from . ' to ' . $to . ' (booking ' . $b['reference_number'] . ').';
+                }
+            }
+        } else {
+            $st = $pdo->prepare("SELECT reference_number, check_in_date, check_out_date FROM house_bookings
+                                  WHERE house_id = ? AND booking_status IN ($holding)
+                                    AND check_in_date < ? AND check_out_date > ? AND id NOT IN ($ph)
+                                  ORDER BY check_in_date LIMIT 1");
+            $st->execute(array_merge([(int)$houseId, $out, $in], $ex));
+            if ($b = $st->fetch(PDO::FETCH_ASSOC)) {
+                return 'Already reserved from ' . self::fmt($b['check_in_date']) . ' to ' . self::fmt($b['check_out_date']) . ' (booking ' . $b['reference_number'] . ').';
+            }
         }
         return self::blockedConflict($pdo, 'house', $houseId, $in, $out, $ownRefs, true);
+    }
+
+    /** 'HH:MM' or 'HH:MM:SS' -> 'HH:MM:SS' (no validation; see houseStayTimes). */
+    private static function normTime($t) {
+        $t = trim((string)$t);
+        return strlen($t) === 5 ? $t . ':00' : $t;
+    }
+
+    /**
+     * BUSINESS RULE (new house bookings): check-out TIME = check-in TIME. The check-out DATE still
+     * comes from the number of nights the guest picked. Single place the rule lives — standalone,
+     * package and walk-in all call this, so a forged check_out_time can never be saved.
+     * Returns ['in' => 'HH:MM:SS', 'out' => 'HH:MM:SS'] (identical). Throws InvalidArgumentException
+     * for a missing/malformed check-in time (the posted check-out time is ignored on purpose).
+     */
+    public static function houseStayTimes($checkInTime) {
+        $t = trim((string)$checkInTime);
+        if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/', $t)) {
+            throw new InvalidArgumentException('Invalid check-in time format.');
+        }
+        $t = self::normTime($t);
+        return ['in' => $t, 'out' => $t];
     }
 
     /** Tour (one boat per date). */

@@ -100,7 +100,7 @@ class RebookService {
             }
             AvailabilityService::lockItem($pdo, 'house', $b['house_id']);
             AvailabilityService::assertFree(
-                AvailabilityService::houseConflict($pdo, $b['house_id'], $b['check_in_date'], $b['check_out_date'], [$b['id']], [$b['reference_number']]),
+                AvailabilityService::houseConflict($pdo, $b['house_id'], $b['check_in_date'], $b['check_out_date'], [$b['id']], [$b['reference_number']], $b['check_in_time'] ?? '14:00:00', $b['check_out_time'] ?? '12:00:00'),
                 'House');
             $up = $pdo->prepare("UPDATE house_bookings
                                     SET booking_status = 'confirmed', rebook_confirmed_at = NOW(), previous_booking_status = NULL,
@@ -194,7 +194,7 @@ class RebookService {
         // Check every part at its new date (house before tour = same lock order as payment confirmation)
         if ($h = $parts['house']) {
             AvailabilityService::lockItem($pdo, 'house', $h['house_id']);
-            AvailabilityService::assertFree(AvailabilityService::houseConflict($pdo, $h['house_id'], self::shift($h['check_in_date'], $days), self::shift($h['check_out_date'], $days), [$h['id']], [$h['reference_number']]), 'House');
+            AvailabilityService::assertFree(AvailabilityService::houseConflict($pdo, $h['house_id'], self::shift($h['check_in_date'], $days), self::shift($h['check_out_date'], $days), [$h['id']], [$h['reference_number']], $h['check_in_time'] ?? '14:00:00', $h['check_out_time'] ?? '12:00:00'), 'House');
         }
         if ($t = $parts['tour']) {
             AvailabilityService::lockItem($pdo, 'tour', $t['tour_id']);

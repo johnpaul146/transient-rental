@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 
 // ✅ NEW: Load SystemLogger
 if (file_exists('includes/SystemLogger.php')) {

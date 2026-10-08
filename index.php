@@ -1,6 +1,8 @@
 <?php
 session_start();
 require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo, true); // Terms & Privacy must be accepted before guest features
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -795,6 +797,8 @@ $nav_active = 'home';
 </section>
 
 <?php include 'components/footer.php'; ?>
+
+<?php include 'includes/terms-modal.php'; /* Terms & Privacy acceptance (reuses TermsGate state) */ ?>
 
 <!-- ============================================================
      ALERTS

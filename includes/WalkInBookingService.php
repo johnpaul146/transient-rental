@@ -239,7 +239,13 @@ class WalkInBookingService {
         if (!$h) throw new InvalidArgumentException('Please choose a house.');
         if ($h['status'] !== 'available') throw new InvalidArgumentException("House '{$h['house_name']}' is not available for booking.");
         if ($pax > (int)$h['capacity']) throw new InvalidArgumentException("'{$h['house_name']}' fits up to {$h['capacity']} guest(s).");
-        if (($msg = AvailabilityService::houseConflict($pdo, $houseId, $checkIn, $checkOut)) !== null) {
+        // Check-out TIME follows check-in TIME (same shared rule as the guest pages); a posted check_out_time is ignored.
+        try {
+            $stay = AvailabilityService::houseStayTimes(trim((string)($in['check_in_time'] ?? '')) !== '' ? $in['check_in_time'] : '14:00');
+        } catch (InvalidArgumentException $e) {
+            throw new InvalidArgumentException('Invalid check-in time.');
+        }
+        if (($msg = AvailabilityService::houseConflict($pdo, $houseId, $checkIn, $checkOut, [], [], $stay['in'], $stay['out'])) !== null) {
             throw new InvalidArgumentException("House '{$h['house_name']}': $msg");
         }
 
@@ -255,8 +261,8 @@ class WalkInBookingService {
         }
         return ['type' => 'house', 'row' => $h, 'name' => $h['house_name'], 'price' => round((float)$h['price_per_night'] * $nights, 2),
                 'check_in' => $checkIn, 'check_out' => $checkOut, 'nights' => $nights, 'pax' => $pax,
-                'in_time' => self::cleanTime($in['check_in_time'] ?? '', '14:00', 'check-in'),
-                'out_time' => self::cleanTime($in['check_out_time'] ?? '', '12:00', 'check-out'),
+                'in_time' => $stay['in'],
+                'out_time' => $stay['out'],   // = check-in time
                 'names' => implode("\n", $names)];
     }
 
