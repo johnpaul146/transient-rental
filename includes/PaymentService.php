@@ -52,6 +52,44 @@ class PaymentService {
         return min(self::RESERVATION_FEE, $t);
     }
 
+    const FOOD_MAX_QUANTITY = 100;
+
+    /**
+     * ONE place that prices a food order: unit price (from the DATABASE row — size variation when the
+     * item has sizes, otherwise the item price) x quantity. Nothing the browser sends as a price is used.
+     *   $food      : food_items row (needs price, size_variations)
+     *   $sizeInput : posted size index (string/int) — required and must exist when the item has sizes
+     *   $qtyInput  : posted quantity — must be a whole number 1..FOOD_MAX_QUANTITY (no decimals, text, 0, negatives)
+     * Returns ['unit' => float, 'size' => string, 'size_index' => ?int, 'quantity' => int, 'total' => float].
+     * Throws InvalidArgumentException with a guest-safe message.
+     */
+    public static function foodLine(array $food, $sizeInput, $qtyInput = 1) {
+        $unit = $food['price'] ?? null;
+        $size = ''; $idx = null;
+        $vars = !empty($food['size_variations']) ? json_decode((string)$food['size_variations'], true) : null;
+        if (is_array($vars) && !empty($vars)) {
+            $raw = is_string($sizeInput) ? trim($sizeInput) : $sizeInput;
+            if (!is_scalar($raw) || $raw === '' || !preg_match('/^\d{1,3}$/', (string)$raw) || !isset($vars[(int)$raw]) || !is_array($vars[(int)$raw])) {
+                throw new InvalidArgumentException('Please choose a valid size.');
+            }
+            $idx  = (int)$raw;
+            $unit = $vars[$idx]['price'] ?? null;
+            $size = trim((string)($vars[$idx]['size'] ?? ''));
+        }
+        if (!is_numeric($unit) || (float)$unit < 0) throw new InvalidArgumentException('This food item has no valid price. Please contact us.');
+
+        $q = is_string($qtyInput) ? trim($qtyInput) : $qtyInput;
+        if (is_int($q)) $q = (string)$q;
+        if (!is_string($q) || !preg_match('/^[1-9]\d{0,3}$/', $q)) {
+            throw new InvalidArgumentException('Quantity must be a whole number of at least 1.');
+        }
+        $qty = (int)$q;
+        if ($qty > self::FOOD_MAX_QUANTITY) throw new InvalidArgumentException('Quantity cannot be more than ' . self::FOOD_MAX_QUANTITY . '. Please contact us for larger orders.');
+
+        $unit = round((float)$unit, 2);
+        return ['unit' => $unit, 'size' => $size, 'size_index' => $idx, 'quantity' => $qty, 'total' => round($unit * $qty, 2)];
+    }
+
     public static function peso($amount, $decimals = 2) {
         return '₱' . number_format((float)$amount, $decimals);
     }
@@ -506,6 +544,38 @@ class PaymentService {
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             throw $e;
+        }
+    }
+
+    /** Reasons an administrator can pick when cancelling a booking (validated on the server). */
+    const ADMIN_CANCEL_REASONS = [
+        'Guest requested cancellation', 'Accidental booking', 'Payment issue', 'Schedule conflict',
+        'Duplicate booking', 'Suspicious activity', 'Other',
+    ];
+
+    /**
+     * Who cancelled? Read from the existing audit log (system_logs, action 'cancel_booking') — no new column.
+     * Returns [bookingId => 'Full Name'] for the ids that have a log entry (newest entry wins).
+     * Automatic "Expired" cancellations have no entry and are labelled by the caller.
+     */
+    public static function cancellationActors(PDO $pdo, $type, array $ids) {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (!$ids || !in_array($type, ['house', 'tour', 'food', 'package'], true)) return [];
+        try {
+            $ph = implode(',', array_fill(0, count($ids), '?'));
+            $st = $pdo->prepare("SELECT target_id, fullname, username FROM system_logs
+                                  WHERE action = 'cancel_booking' AND target_type = ? AND target_id IN ($ph)
+                                  ORDER BY id DESC");
+            $st->execute(array_merge([$type . '_booking'], $ids));
+            $out = [];
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $tid = (int)$r['target_id'];
+                if (!isset($out[$tid])) $out[$tid] = trim((string)($r['fullname'] ?: $r['username'])) ?: 'Administrator';
+            }
+            return $out;
+        } catch (PDOException $e) {
+            error_log('[PaymentService] cancellationActors: ' . $e->getMessage());
+            return [];
         }
     }
 

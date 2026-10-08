@@ -76,6 +76,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     .wk-field label { display: block; font-weight: 600; font-size: 13px; color: #1e293b; margin-bottom: 5px; } .wk-field label .req { color: #dc2626; } .wk-field small { color: #64748b; font-size: 12px; }
     .wk-field input, .wk-field select, .wk-field textarea { width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; background: #fafafa; box-sizing: border-box; }
     .wk-field input.wk-locked { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; }
+    .wk-stay-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 9px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 10px; overflow-wrap: anywhere; } .wk-field small.wk-stay-warn, .wk-stay-warn { display: block; margin-top: 4px; font-size: 12px; color: #b91c1c !important; font-weight: 600; }
     .wk-lock-note { display: block; margin-top: 4px; font-size: 11px; color: #94a3b8; }
     .wk-field input:focus, .wk-field select:focus, .wk-field textarea:focus { outline: none; border-color: #4DA6D9; background: #fff; }
     .wk-seg { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -182,24 +183,28 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     </div>
 
                     <div class="wk-sec wk-hide" id="wkSecTour"><h4><i class="fas fa-ship"></i> Tour / Boat</h4>
+                        <div class="wk-stay-note wk-hide" data-for="tour"></div>
                         <div class="wk-field"><label>Boat / tour <span class="req">*</span></label><select name="tour_id" id="wkTour"></select></div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Tour date <span class="req">*</span></label><input type="date" name="tour_date" min="<?php echo $wk_today; ?>"></div>
-                            <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="tour_time" value="08:00"></div>
+                            <div class="wk-field"><label>Tour date <span class="req">*</span></label><input type="date" name="tour_date" id="wkTourDate" min="<?php echo $wk_today; ?>"></div>
+                            <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="tour_time" id="wkTourTime" value="08:00"></div>
                         </div>
                         <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkTourCap"></small></label><input type="number" name="tour_guests" min="1" value="1"></div>
                     </div>
 
                     <div class="wk-sec wk-hide" id="wkSecFood"><h4><i class="fas fa-utensils"></i> Food</h4>
+                        <div class="wk-stay-note wk-hide" data-for="food"></div>
                         <div class="wk-field"><label>Food package <span class="req">*</span></label><select name="food_id" id="wkFood"></select></div>
                         <div class="wk-field wk-hide" id="wkSizeWrap"><label>Size <span class="req">*</span></label><select name="size_variant" id="wkSize"></select></div>
+                        <div class="wk-field"><label>Quantity <span class="req">*</span></label><input type="number" name="food_quantity" id="wkQty" min="1" max="<?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>" step="1" value="1" inputmode="numeric"></div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Date <span class="req">*</span></label><input type="date" name="food_date" min="<?php echo $wk_today; ?>"></div>
-                            <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="food_time" value="12:00"></div>
+                            <div class="wk-field"><label>Date <span class="req">*</span></label><input type="date" name="food_date" id="wkFoodDate" min="<?php echo $wk_today; ?>"></div>
+                            <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="food_time" id="wkFoodTime" value="12:00"></div>
                         </div>
                         <div class="wk-row">
                             <div class="wk-field"><label>Pickup or delivery</label><select name="fulfillment" id="wkFulfil"><option value="pickup">Pickup</option><option value="delivery">Delivery</option></select></div>
-                            <div class="wk-field wk-hide" id="wkAddrWrap"><label>Delivery address <span class="req">*</span></label><input type="text" name="delivery_address" maxlength="500"></div>
+                            <div class="wk-field wk-hide" id="wkAddrWrap"><label>Delivery location</label><small class="wk-lock-note" style="font-size:12px;color:#475569;">Delivery goes to the guest's own confirmed house stay, during that stay only. Otherwise choose Pickup.</small></div>
+                            <div class="wk-field wk-hide" id="wkAddrAuto"><label>Delivery location</label><small class="wk-lock-note" style="font-size:12px;color:#475569;">Delivered to the booked house/unit (package with a house).</small></div>
                         </div>
                     </div>
                     <div class="wk-total"><span>Estimated total</span><span id="wkTotal">₱0.00</span></div>
@@ -268,8 +273,9 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         if (k === 'house') { var h = find(DATA.houses, val('house_id')); return h ? h.price * nights() : 0; }
         if (k === 'tour') { var t = find(DATA.tours, val('tour_id')); return t ? t.price : 0; }
         var f = find(DATA.foods, val('food_id')); if (!f) return 0;
-        if (f.sizes.length) { var sv = val('size_variant'); var s = f.sizes.filter(function (x) { return String(x.i) === sv; })[0]; return s ? s.price : 0; }
-        return f.price;
+        var qn = parseInt(val('food_quantity'), 10); if (!(qn >= 1)) qn = 0;
+        if (f.sizes.length) { var sv = val('size_variant'); var s = f.sizes.filter(function (x) { return String(x.i) === sv; })[0]; return s ? s.price * qn : 0; }
+        return f.price * qn;
     }
     function total() { return activeItems().reduce(function (s, k) { return s + priceFor(k); }, 0); }
     function refreshTotal() { $('wkTotal').textContent = peso(total()); }
@@ -285,14 +291,54 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         q('input[name="package_items[]"]').forEach(function (c) { c.disabled = S.type !== 'package'; });
         q('.wk-type').forEach(function (t) { t.classList.toggle('on', t.getAttribute('data-type') === S.type); });
         $('wkType').value = S.type;
+        if (window.wkSyncAddrRef) window.wkSyncAddrRef();
         refreshTotal();
     }
     q('.wk-type').forEach(function (t) { t.addEventListener('click', function () { S.type = t.getAttribute('data-type'); syncSections(); setErr(''); }); });
     q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', syncSections); });
     ['house_id', 'check_in', 'check_out', 'tour_id', 'food_id', 'size_variant'].forEach(function (n) { var el = form.elements[n]; if (el) el.addEventListener('change', refreshTotal); });
+    $('wkQty').addEventListener('input', refreshTotal); $('wkQty').addEventListener('change', refreshTotal);
 
     $('wkHouse').addEventListener('change', function () { var h = find(DATA.houses, this.value); $('wkHouseCap').textContent = h ? '(max ' + h.capacity + ')' : ''; if (h) $('wkPax').max = h.capacity; });
     $('wkTour').addEventListener('change', function () { var t = find(DATA.tours, this.value); $('wkTourCap').textContent = t ? '(max ' + t.max + ')' : ''; if (t) form.elements['tour_guests'].max = t.max; });
+    // ---------- house stay window (package with a house): guides staff before "Create Booking".
+    // Display/guidance only — WalkInBookingService + AvailabilityService::packageWindowError stay the final check.
+    function wkMonthLbl(d) { return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(d.slice(5, 7), 10) - 1] + ' ' + parseInt(d.slice(8, 10), 10) + ', ' + d.slice(0, 4); }
+    function wkTimeLbl(t) { var h = parseInt(t.slice(0, 2), 10), m = t.slice(3, 5); return (h % 12 || 12) + ':' + m + ' ' + (h >= 12 ? 'PM' : 'AM'); }
+    function wkWindow() {
+        if (S.type !== 'package' || activeItems().indexOf('house') === -1) return null;
+        var a = val('check_in'), b = val('check_out'), t = val('check_in_time');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(a) || !/^\d{4}-\d{2}-\d{2}$/.test(b) || b < a || !/^\d{2}:\d{2}/.test(t)) return null;
+        t = t.slice(0, 5);
+        return { a: a, b: b, t: t, start: a + ' ' + t, end: b + ' ' + t, label: wkMonthLbl(a) + ' ' + wkTimeLbl(t) + ' to ' + wkMonthLbl(b) + ' ' + wkTimeLbl(t) };
+    }
+    function wkWindowMsg(label, d, t) {
+        var w = wkWindow(); if (!w || !d || !t) return '';
+        var dt = d + ' ' + t.slice(0, 5);
+        return (dt < w.start || dt > w.end) ? label + ' must be during the house stay: ' + w.label + '.' : '';
+    }
+    function wkSyncWindow() {
+        var w = wkWindow();
+        q('.wk-stay-note').forEach(function (n) {
+            n.classList.toggle('wk-hide', !w);
+            if (w) n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Selected house stay:</strong> ' + w.label + '.<br>The ' + n.getAttribute('data-for') + ' schedule must be within this stay.';
+        });
+        [['wkTourDate', 'wkTourTime', 'Tour'], ['wkFoodDate', 'wkFoodTime', 'Food']].forEach(function (p) {
+            var d = $(p[0]), t = $(p[1]), warn = t.parentNode.querySelector('.wk-stay-warn');
+            if (w) { d.min = w.a > '<?php echo $wk_today; ?>' ? w.a : '<?php echo $wk_today; ?>'; d.max = w.b; }
+            else { d.min = '<?php echo $wk_today; ?>'; d.removeAttribute('max'); }
+            // first day: not before check-in time; last day: not after check-out time (same as check-in time)
+            t.removeAttribute('min'); t.removeAttribute('max');
+            if (w && d.value === w.a) t.min = w.t;
+            if (w && d.value === w.b) t.max = w.t;
+            var msg = wkWindowMsg(p[2], d.value, t.value);
+            if (msg && !warn) { warn = document.createElement('small'); warn.className = 'wk-stay-warn'; t.parentNode.appendChild(warn); }
+            if (warn) { warn.textContent = msg; warn.classList.toggle('wk-hide', !msg); }
+        });
+    }
+    ['check_in', 'check_out', 'check_in_time', 'tour_date', 'tour_time', 'food_date', 'food_time'].forEach(function (n) { var el = form.elements[n]; if (el) { el.addEventListener('change', wkSyncWindow); el.addEventListener('input', wkSyncWindow); } });
+    q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', wkSyncWindow); });
+    q('.wk-type').forEach(function (t) { t.addEventListener('click', wkSyncWindow); });
     function wkSyncOut() { $('wkOutTime').value = $('wkInTime').value; }
     $('wkInTime').addEventListener('input', wkSyncOut); $('wkInTime').addEventListener('change', wkSyncOut);
     $('wkIn').addEventListener('change', function () { if (this.value) { var o = $('wkOut'); o.min = this.value; if (o.value && o.value <= this.value) o.value = ''; } });
@@ -302,7 +348,15 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         else { s.innerHTML = ''; w.classList.add('wk-hide'); s.disabled = true; }
         refreshTotal();
     });
-    $('wkFulfil').addEventListener('change', function () { $('wkAddrWrap').classList.toggle('wk-hide', this.value !== 'delivery'); });
+    // Delivery: with a house in the package the booked house/unit is the location (the server fills it in)
+    function wkSyncAddr() {
+        var del = $('wkFulfil').value === 'delivery', hasHouse = activeItems().indexOf('house') !== -1;
+        $('wkAddrWrap').classList.toggle('wk-hide', !del || hasHouse);
+        $('wkAddrAuto').classList.toggle('wk-hide', !(del && hasHouse));
+    }
+    window.wkSyncAddrRef = wkSyncAddr;
+    $('wkFulfil').addEventListener('change', wkSyncAddr);
+    q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', wkSyncAddr); });
     q('input[name="payment_option"]').forEach(function (r) {
         r.addEventListener('change', function () {
             q('#wkPay label').forEach(function (l) { l.classList.toggle('on', l.querySelector('input').checked); });
@@ -385,13 +439,16 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     var t = find(DATA.tours, val('tour_id')); if (!t) return 'Choose a boat/tour.';
                     if (!val('tour_date')) return 'Select the tour date.'; if (val('tour_date') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
                     if (!val('tour_time')) return 'Select the tour time.';
+                    var wmT = wkWindowMsg('Tour', val('tour_date'), val('tour_time')); if (wmT) return wmT;
                     var tg = parseInt(val('tour_guests'), 10); if (!tg || tg < 1) return 'Enter the number of guests.'; if (tg > t.max) return t.name + ' allows up to ' + t.max + ' guests.';
                 } else {
                     var f = find(DATA.foods, val('food_id')); if (!f) return 'Choose a food package.';
                     if (f.sizes.length && val('size_variant') === '') return 'Choose a size.';
                     if (!val('food_date')) return 'Select the food date.'; if (val('food_date') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
                     if (!val('food_time')) return 'Select the food time.';
-                    if (val('fulfillment') === 'delivery' && !val('delivery_address')) return 'Delivery address is required for delivery.';
+                    var wmF = wkWindowMsg('Food', val('food_date'), val('food_time')); if (wmF) return wmF;
+                    if (!/^[1-9][0-9]{0,2}$/.test(val('food_quantity')) || parseInt(val('food_quantity'), 10) > <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>) return 'Food quantity must be a whole number from 1 to <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>.';
+                    if (val('fulfillment') === 'delivery' && S.type === 'package' && activeItems().indexOf('house') === -1) return 'Delivery requires a selected house because the order will be delivered to your booked unit. Choose Pickup or add the house.';
                 }
             }
             return '';
@@ -408,7 +465,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         activeItems().forEach(function (k) {
             if (k === 'house') { var h = find(DATA.houses, val('house_id')); rows.push(['House', esc(h.name) + ' · ' + val('check_in') + ' → ' + val('check_out') + ' (' + nights() + ' night' + (nights() > 1 ? 's' : '') + ')']); }
             if (k === 'tour') { var t = find(DATA.tours, val('tour_id')); rows.push(['Tour', esc(t.name) + ' · ' + val('tour_date') + ' ' + val('tour_time')]); }
-            if (k === 'food') { var f = find(DATA.foods, val('food_id')); rows.push(['Food', esc(f.name) + ' · ' + val('food_date') + ' ' + val('food_time')]); }
+            if (k === 'food') { var f = find(DATA.foods, val('food_id')); rows.push(['Food', esc(f.name) + ' × ' + esc(val('food_quantity')) + ' · ' + val('food_date') + ' ' + val('food_time')]); }
         });
         rows.push(['Booking type', S.type === 'package' ? 'Package (' + activeItems().length + ' items)' : S.type.charAt(0).toUpperCase() + S.type.slice(1)]);
         rows.push(['<strong>Total</strong>', '<strong>' + peso(total()) + '</strong>']);
@@ -451,9 +508,9 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     function newNonce() { var a = new Uint8Array(12); (window.crypto || window.msCrypto).getRandomValues(a); return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
     function wkReset() {
         form.reset(); wkSyncOut(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
-        $('wkNonce').value = newNonce(); $('wkSizeWrap').classList.add('wk-hide'); $('wkAddrWrap').classList.add('wk-hide'); $('wkGcashWrap').classList.add('wk-hide');
+        $('wkNonce').value = newNonce(); $('wkSizeWrap').classList.add('wk-hide'); $('wkAddrWrap').classList.add('wk-hide'); $('wkAddrAuto').classList.add('wk-hide'); $('wkGcashWrap').classList.add('wk-hide');
         q('#wkPay label').forEach(function (l, i) { l.classList.toggle('on', i === 0); });
-        wkMode('new'); syncSections(); showStep(1);
+        wkMode('new'); syncSections(); wkSyncWindow(); showStep(1);
     }
     window.wkOpen = function () { wkReset(); $('walkinModal').classList.add('show'); $('walkinModal').setAttribute('aria-hidden', 'false'); document.body.style.overflow = 'hidden'; };
     window.wkClose = function () {

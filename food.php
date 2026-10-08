@@ -147,7 +147,6 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
         $preferred_date = $_POST['preferred_date'] ?? '';
         $preferred_time = $_POST['preferred_time'] ?? '';
         $special_requests = trim($_POST['special_requests'] ?? '');
-        $size_variant = isset($_POST['size_variant']) ? (int)$_POST['size_variant'] : null;
 
         // ✅ Fulfillment method (delivery or pickup)
         $fulfillment_method = $_POST['fulfillment_method'] ?? 'pickup';
@@ -164,8 +163,9 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
             $contact_number_raw = substr($contact_number_raw, 1);
         }
 
-        // ✅ Delivery address (required only if delivery)
-        $delivery_address = trim($_POST['delivery_address'] ?? '');
+        // ✅ Delivery location is NEVER taken from the browser: for delivery it is the guest's own booked
+        //    house/unit, resolved from the database below. A posted delivery_address is ignored.
+        $delivery_address = null;
 
         // ---------- VALIDATION ----------
         $guest_name_error = validateGuestName($guest_name);
@@ -185,10 +185,6 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
 
         // ✅ Always +63 for PH
         $contact_number = '+63' . $contact_number_raw;
-
-        if ($fulfillment_method === 'delivery' && empty($delivery_address)) {
-            throw new Exception("Delivery address is required when choosing Delivery.");
-        }
 
         // ---------- FOOD ITEM ----------
         $food_stmt = $pdo->prepare("SELECT * FROM food_items WHERE id = ?");
@@ -211,19 +207,22 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
             throw new Exception("This date is BLOCKED — " . $btype . ": " . $reason . ". Please choose a different date.");
         }
 
-        $price = $food['price'];
-        $size_variant_text = '';
+        // ✅ PRICE = size price from the DATABASE x quantity (shared rule, PaymentService::foodLine).
+        //    Rejects a missing/unknown size and any quantity that is not a whole number >= 1.
+        //    No price or total from the browser is used.
+        $line = PaymentService::foodLine($food, $_POST['size_variant'] ?? null, $_POST['quantity'] ?? 1);
+        $size_variant_text = $line['size'];
+        $quantity = $line['quantity'];
+        $price = $line['unit'];
+        $total = $line['total'];
 
-        if (!empty($food['size_variations'])) {
-            $variations = json_decode($food['size_variations'], true);
-            if (is_array($variations) && isset($size_variant) && isset($variations[$size_variant])) {
-                $price = $variations[$size_variant]['price'];
-                $size_variant_text = $variations[$size_variant]['size'];
-            }
+        // ✅ DELIVERY only during the guest's own confirmed house stay (same window rule as packages),
+        //    delivered to that booked house/unit.
+        if ($fulfillment_method === 'delivery') {
+            $dest = AvailabilityService::foodDeliveryResolve($pdo, $guest_id, $preferred_date, $preferred_time, $_POST['delivery_stay_id'] ?? null);
+            $delivery_address = $dest['address'];
         }
 
-        $quantity = 1;
-        $total = $price;
         $reference = generateReferenceNumber();
 
         $stmt = $pdo->prepare("INSERT INTO food_bookings 
@@ -255,6 +254,7 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
         if (class_exists('SystemLogger')) {
             $log_desc = "Guest '{$guest_name}' reserved food '{$food['name']}' (Ref: {$reference}) — ₱" . number_format($total, 2);
             if (!empty($size_variant_text)) $log_desc .= " — Size: {$size_variant_text}";
+            $log_desc .= " — Qty: {$quantity} × ₱" . number_format($price, 2);
             $log_desc .= " — " . ucfirst($fulfillment_method);
 
             SystemLogger::log(
@@ -269,6 +269,8 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
                     'food_id' => $food_id,
                     'food_name' => $food['name'],
                     'size_variant' => $size_variant_text,
+                    'quantity' => $quantity,
+                    'unit_price' => $price,
                     'preferred_date' => $preferred_date,
                     'preferred_time' => $preferred_time,
                     'total' => $total,
@@ -285,7 +287,15 @@ if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
         $_SESSION['last_food_booking'] = [
             'reference' => $reference,
             'total' => $total,
-            'food_name' => $food['name']
+            'fee' => PaymentService::feeFor($total),
+            'food_name' => $food['name'],
+            'size' => $size_variant_text,
+            'quantity' => $quantity,
+            'unit' => $price,
+            'method' => $fulfillment_method,
+            'address' => $delivery_address,
+            'date' => $preferred_date,
+            'time' => $preferred_time
         ];
 
         header("Location: food.php?order_success=1");
@@ -398,6 +408,35 @@ if (isset($_SESSION['user_id'])) {
     $stmt = $pdo->prepare("SELECT id, full_name, contact_number FROM guests WHERE user_id = ?");
     $stmt->execute([$_SESSION['user_id']]);
     $guest = $stmt->fetch();
+}
+
+// Delivery is only offered with a confirmed house stay (rule lives in AvailabilityService::foodDeliveryResolve;
+// this only drives what the form shows — the server re-checks everything on submit).
+$food_delivery = ['stays' => [], 'pending' => 0];
+if ($guest) {
+    try { $food_delivery = AvailabilityService::foodDeliveryStays($pdo, $guest['id']); } catch (PDOException $e) { error_log('[food.php] delivery stays: ' . $e->getMessage()); }
+}
+$food_stays_js = [];
+foreach ($food_delivery['stays'] as $st_) {
+    $w_ = AvailabilityService::packageWindow(['check_in' => $st_['check_in'], 'check_in_time' => $st_['check_in_time'],
+                                              'check_out' => $st_['check_out'], 'check_out_time' => $st_['check_out_time']]);
+    if ($w_) $food_stays_js[] = ['id' => $st_['id'], 'house' => $st_['house_name'], 'start' => $w_['start'], 'end' => $w_['end'],
+                                 'start_label' => $w_['start_label'], 'end_label' => $w_['end_label']];
+}
+
+// GCash payment details (same source as houses.php: site_content 'gcash' via PaymentService; placeholders never shown)
+$gcash_cfg = PaymentService::gcashConfig($pdo);
+$gcash_configured = $gcash_cfg['configured'];
+$gcash_name = $gcash_cfg['account_name'];
+$gcash_number = $gcash_cfg['number'];
+$gcash_qr = basename((string)$gcash_cfg['qr_code']);
+$gcash_instructions = trim((string)$gcash_cfg['instructions']) !== '' ? $gcash_cfg['instructions'] : "1. Open GCash app\n2. Click 'Pay QR' or 'Scan QR'\n3. Scan the QR code above\n4. Enter the exact amount shown\n5. Complete the payment\n6. Take a screenshot of the transaction\n7. Upload screenshot as proof of payment";
+
+// Payment popup after a food reservation (shown once, right after the redirect)
+$food_popup = null;
+if (isset($_GET['order_success']) && !empty($_SESSION['last_food_booking']) && is_array($_SESSION['last_food_booking'])) {
+    $food_popup = $_SESSION['last_food_booking'];
+    unset($_SESSION['last_food_booking']);
 }
 
 // Check if user has feedback
@@ -885,6 +924,59 @@ $is_logged_in = isset($_SESSION['user_id']);
         .fulfillment-option input[type="radio"]:checked + .fulfillment-option-label { background: #e0f0fa; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.15); }
         .fulfillment-option input[type="radio"]:checked + .fulfillment-option-label i { color: #4DA6D9; }
         .fulfillment-option:hover .fulfillment-option-label { border-color: #4DA6D9; background: #f0f7fb; }
+        .fulfillment-option.is-disabled { cursor: not-allowed; }
+        .fulfillment-option.is-disabled .fulfillment-option-label { opacity: 0.5; background: #f1f5f9; }
+        .fulfillment-option.is-disabled:hover .fulfillment-option-label { border-color: #e2e8f0; background: #f1f5f9; }
+        .fulfillment-hint { display: block; margin-top: 8px; font-size: 12px; line-height: 1.45; color: #64748b; }
+        .delivery-box { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 12px; padding: 12px 14px; font-size: 13px; color: #0c4a6e; line-height: 1.5; overflow-wrap: anywhere; }
+        .delivery-box .delivery-warn { display: block; margin-top: 6px; color: #b91c1c; font-weight: 600; }
+
+        /* QUANTITY STEPPER */
+        .qty-stepper { display: flex; align-items: stretch; gap: 8px; max-width: 240px; }
+        .qty-stepper .qty-btn { flex: 0 0 44px; min-height: 44px; border: 2px solid #e2e8f0; background: #f8fafc; border-radius: 10px; font-size: 20px; font-weight: 700; line-height: 1; color: #0B2447; cursor: pointer; transition: all 0.2s; }
+        .qty-stepper .qty-btn:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .qty-stepper input { flex: 1; min-width: 0; text-align: center; font-weight: 700; font-size: 16px; }
+        .qty-error { display: none; margin-top: 4px; font-size: 12px; color: #dc2626; }
+        .qty-error.show { display: block; }
+
+        /* GCASH PAYMENT POPUP (same look as houses.php) */
+        .payment-popup-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
+        .payment-popup-overlay.show { display: flex; }
+        .payment-popup { background: white; border-radius: 24px; max-width: 500px; width: 95%; max-height: 90vh; overflow-y: auto; padding: 35px; animation: popupSlideIn 0.3s ease; box-shadow: 0 30px 80px rgba(0,0,0,0.3); }
+        @keyframes popupSlideIn { from { opacity: 0; transform: translateY(-30px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .payment-popup .popup-header { text-align: center; margin-bottom: 25px; padding-bottom: 20px; border-bottom: 2px solid #e8f0fe; }
+        .payment-popup .popup-header .success-icon { font-size: 60px; color: #10b981; margin-bottom: 10px; }
+        .payment-popup .popup-header h2 { color: #1e293b; font-weight: 700; margin: 0; }
+        .payment-popup .popup-header p { color: #64748b; margin: 5px 0 0; font-size: 14px; }
+        .payment-popup .payment-detail { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
+        .payment-popup .payment-detail:last-child { border-bottom: none; }
+        .payment-popup .payment-detail .label { color: #64748b; font-weight: 500; }
+        .payment-popup .payment-detail .value { font-weight: 600; color: #1e293b; text-align: right; overflow-wrap: anywhere; min-width: 0; }
+        .payment-popup .payment-detail .value.amount { color: #10b981; font-size: 20px; }
+        .payment-popup .qr-section { text-align: center; padding: 20px; background: #f8fafc; border-radius: 16px; margin: 15px 0; }
+        .payment-popup .qr-section img { max-width: 200px; width: 100%; height: auto; border-radius: 12px; }
+        .payment-popup .qr-section .no-qr { padding: 30px; background: #e2e8f0; border-radius: 12px; color: #94a3b8; }
+        .payment-popup .instructions { background: #fef3c7; padding: 15px; border-radius: 12px; font-size: 13px; color: #92400e; margin: 15px 0; }
+        .payment-popup .instructions strong { display: block; margin-bottom: 5px; }
+        .payment-popup .popup-actions { display: flex; gap: 10px; margin-top: 20px; }
+        .payment-popup .popup-actions button { flex: 1; padding: 12px; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; transition: all 0.3s; color: white; font-size: 14px; }
+        .payment-popup .popup-actions .btn-close-popup { background: #64748b; }
+        .payment-popup .popup-actions .btn-close-popup:hover { background: #475569; transform: translateY(-2px); }
+        .payment-popup .popup-actions .btn-pay-now { background: linear-gradient(135deg, #10b981, #059669); }
+        .payment-popup .popup-actions .btn-pay-now:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(16, 185, 129, 0.3); }
+        .payment-popup .ref-number { background: #e6f7e6; color: #10b981; padding: 8px 15px; border-radius: 8px; font-weight: 600; display: inline-block; font-size: 14px; overflow-wrap: anywhere; }
+        @media (max-width: 768px) { .payment-popup { padding: 20px; } }
+        @media (max-width: 480px) {
+            .payment-popup { padding: 16px; border-radius: 18px; }
+            .payment-popup .popup-header { margin-bottom: 16px; padding-bottom: 14px; }
+            .payment-popup .popup-header .success-icon { font-size: 46px; }
+            .payment-popup .popup-header h2 { font-size: 20px; }
+            .payment-popup .payment-detail { font-size: 14px; }
+            .payment-popup .payment-detail .value.amount { font-size: 18px; }
+            .payment-popup .qr-section { padding: 12px; }
+            .payment-popup .qr-section img { max-width: 170px; }
+            .payment-popup .popup-actions { flex-direction: column; }
+        }
 
         .btn-primary { width: 100%; padding: 12px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; transition: all 0.3s; box-shadow: 0 4px 15px rgba(244, 180, 0, 0.2); }
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244, 180, 0, 0.3); background: #e6a800; }
@@ -900,9 +992,13 @@ $is_logged_in = isset($_SESSION['user_id']);
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
         .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px; text-transform: uppercase; }
         .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; }
-        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay) { background: #eef2ff; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; font-weight: 700; box-shadow: 0 4px 12px rgba(77, 166, 217, 0.4); }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
+        .calendar-grid .day.outside-stay { color: #94a3b8 !important; background: #f1f5f9; text-decoration: line-through; cursor: not-allowed !important; opacity: .75; }
+        .calendar-grid .day.outside-stay:hover { background: #f1f5f9 !important; transform: none !important; }
+        .delivery-window { margin-top: 6px; padding: 8px 10px; background: #fff; border: 1px solid #bae6fd; border-radius: 8px; font-weight: 600; }
+        .delivery-window span { display: inline-block; }
         .calendar-grid .day.disabled { cursor: not-allowed; opacity: 0.5; }
         /* ✅ NEW: Blocked date styling */
         .calendar-grid .day.blocked {
@@ -1637,11 +1733,11 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php include 'components/navbar.php'; ?>
 
 <!-- ALERTS -->
-<?php if (isset($success) || isset($_GET['order_success'])): ?>
+<?php if (isset($success) || (isset($_GET['order_success']) && !$food_popup)): ?>
 <div class="alert-overlay">
     <div class="alert-box success">
         <i class="fas fa-check-circle"></i>
-        <?php echo isset($_GET['order_success']) ? "Food package reserved! Pay the ₱1,000 reservation fee (or the full price if lower) and upload the proof in your profile to secure it. The balance is paid when you receive your order." : $success; ?>
+        <?php echo isset($_GET['order_success']) ? "Food package reserved! Pay the reservation fee shown in your profile and upload the proof to secure it. The balance is paid when you receive your order." : $success; ?>
     </div>
 </div>
 <?php endif; ?>
@@ -1863,8 +1959,22 @@ $is_logged_in = isset($_SESSION['user_id']);
                 </div>
 
                 <div class="form-group">
-                    <label><i class="fas fa-tag"></i> Price</label>
+                    <label><i class="fas fa-tag"></i> Price (each)</label>
                     <input type="text" id="food_display_price" class="form-control" readonly style="background: #f1f5f9; font-weight: 600; color: #10b981;">
+                </div>
+
+                <div class="form-group">
+                    <label for="food_quantity"><i class="fas fa-hashtag"></i> Quantity <span style="color:#dc2626;">*</span></label>
+                    <div class="qty-stepper">
+                        <button type="button" class="qty-btn" id="foodQtyMinus" onclick="stepFoodQty(-1)" aria-label="Decrease quantity">&minus;</button>
+                        <input type="text" name="quantity" id="food_quantity" class="form-control" value="1" maxlength="3"
+                               inputmode="numeric" autocomplete="off" aria-describedby="foodQtyError" required>
+                        <button type="button" class="qty-btn" id="foodQtyPlus" onclick="stepFoodQty(1)" aria-label="Increase quantity">+</button>
+                    </div>
+                    <div class="qty-error" id="foodQtyError" role="alert"></div>
+                    <small style="color:#94a3b8;font-size:11px;">
+                        <i class="fas fa-info-circle"></i> Whole numbers only, from 1 to <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>
+                    </small>
                 </div>
 
                 <!-- ✅ GUEST NAME — Letters only -->
@@ -1928,20 +2038,40 @@ $is_logged_in = isset($_SESSION['user_id']);
                                 <small>Pick up at our location</small>
                             </span>
                         </label>
-                        <label class="fulfillment-option">
-                            <input type="radio" name="fulfillment_method" value="delivery" onchange="toggleDeliveryAddress()">
+                        <label class="fulfillment-option<?php echo $food_stays_js ? '' : ' is-disabled'; ?>">
+                            <input type="radio" name="fulfillment_method" value="delivery" onchange="toggleDeliveryAddress()" <?php echo $food_stays_js ? '' : 'disabled'; ?>>
                             <span class="fulfillment-option-label">
                                 <i class="fas fa-truck"></i>
                                 <strong>Delivery</strong>
-                                <small>Deliver to your address</small>
+                                <small>To your booked house</small>
                             </span>
                         </label>
                     </div>
+                    <small class="fulfillment-hint" id="deliveryAvailabilityNote">
+                        <i class="fas fa-info-circle"></i>
+                        <?php if ($food_stays_js): ?>
+                            Delivery goes to your booked house/unit and is only available during your stay. Pickup is always available.
+                        <?php elseif (!empty($food_delivery['pending'])): ?>
+                            Delivery is available only for guests with a confirmed house reservation. Yours is still waiting for confirmation, so please choose Pickup for now.
+                        <?php else: ?>
+                            Delivery is available only for guests with a confirmed house reservation. Please choose Pickup or book a house first.
+                        <?php endif; ?>
+                    </small>
                 </div>
 
                 <div class="form-group" id="deliveryAddressGroup" style="display:none;">
-                    <label><i class="fas fa-map-marker-alt"></i> Delivery Address <span style="color:#dc2626;">*</span></label>
-                    <textarea name="delivery_address" id="food_delivery_address" class="form-control" rows="2" placeholder="Complete delivery address (house no., street, barangay, city)"></textarea>
+                    <label><i class="fas fa-map-marker-alt"></i> Delivery Location</label>
+                    <?php if (count($food_stays_js) > 1): ?>
+                        <select name="delivery_stay_id" id="food_delivery_stay" class="form-select" onchange="foodSyncDelivery(true)" style="margin-bottom:8px;">
+                            <option value="">Choose delivery location…</option>
+                            <?php foreach ($food_stays_js as $stay_): ?>
+                                <option value="<?php echo (int)$stay_['id']; ?>"><?php echo htmlspecialchars($stay_['house'] . ' — ' . date('M j', strtotime($stay_['start'])) . ' to ' . date('M j', strtotime($stay_['end']))); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    <?php elseif (count($food_stays_js) === 1): ?>
+                        <input type="hidden" name="delivery_stay_id" id="food_delivery_stay" value="<?php echo (int)$food_stays_js[0]['id']; ?>">
+                    <?php endif; ?>
+                    <div class="delivery-box" id="foodDeliveryBox"></div>
                 </div>
 
                 <div class="form-group">
@@ -1968,7 +2098,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 
                 <div class="form-group">
                     <label><i class="fas fa-clock"></i> Preferred Time <span style="color:#dc2626;">*</span></label>
-                    <select name="preferred_time" id="food_preferred_time" class="form-select" required>
+                    <select name="preferred_time" id="food_preferred_time" class="form-select" onchange="refreshFoodDeliveryNote()" required>
                         <option value="">Select Time Slot</option>
                         <option value="06:00:00">🌅 6:00 AM — Breakfast</option>
                         <option value="07:00:00">☀️ 7:00 AM — Breakfast</option>
@@ -1998,9 +2128,9 @@ $is_logged_in = isset($_SESSION['user_id']);
                         <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> <strong>Total Amount:</strong></span>
                         <span><strong style="color: #10b981; font-size: 22px;">₱<span id="food_display_total">0.00</span></strong></span>
                     </div>
+                    <div class="summary-row"><span>Price × quantity</span><span id="food_display_qtyline">—</span></div>
                     <div class="summary-row"><span>Reservation fee (pay now)</span><span id="food_display_fee">₱0.00</span></div>
                     <div class="summary-row"><span>Balance on pickup / delivery</span><span id="food_display_balance">₱0.00</span></div>
-                    <input type="hidden" name="total_amount" id="food_total_amount">
                 </div>
 
                 <?php if (!isset($_SESSION['user_id'])): ?>
@@ -2133,6 +2263,93 @@ $is_logged_in = isset($_SESSION['user_id']);
         </div>
     </div>
 </div>
+
+<?php if ($food_popup): ?>
+<!-- GCASH PAYMENT POPUP (shown once, right after a food reservation) -->
+<div class="payment-popup-overlay show" id="foodPaymentPopup" role="dialog" aria-modal="true" aria-labelledby="foodPopupTitle">
+    <div class="payment-popup">
+        <div class="popup-header">
+            <div class="success-icon"><i class="fas fa-check-circle"></i></div>
+            <h2 id="foodPopupTitle">Food Reservation Received! 🎉</h2>
+            <p>Pay the reservation fee via GCash to secure your order</p>
+        </div>
+        <div class="popup-body">
+            <div style="text-align: center; margin-bottom: 15px;">
+                <span class="ref-number"><?php echo htmlspecialchars($food_popup['reference']); ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Food</span>
+                <span class="value"><?php echo htmlspecialchars($food_popup['food_name']); ?><?php echo !empty($food_popup['size']) ? ' — ' . htmlspecialchars($food_popup['size']) : ''; ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Quantity</span>
+                <span class="value"><?php echo (int)$food_popup['quantity']; ?> × <?php echo PaymentService::peso($food_popup['unit']); ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Date &amp; Time</span>
+                <span class="value"><?php echo htmlspecialchars(date('M j, Y', strtotime($food_popup['date'])) . ' • ' . date('g:i A', strtotime($food_popup['time']))); ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label"><?php echo $food_popup['method'] === 'delivery' ? 'Delivery to' : 'Fulfillment'; ?></span>
+                <span class="value"><?php echo $food_popup['method'] === 'delivery' ? htmlspecialchars((string)$food_popup['address']) : 'Pickup'; ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Total Price</span>
+                <span class="value"><?php echo PaymentService::peso($food_popup['total']); ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Reservation Fee (pay now)</span>
+                <span class="value amount"><?php echo PaymentService::peso($food_popup['fee']); ?></span>
+            </div>
+            <div class="payment-detail">
+                <span class="label">Balance on <?php echo $food_popup['method'] === 'delivery' ? 'Delivery' : 'Pickup'; ?></span>
+                <span class="value"><?php echo PaymentService::peso(max(0, (float)$food_popup['total'] - (float)$food_popup['fee'])); ?></span>
+            </div>
+            <p style="font-size:12px;color:#64748b;margin:6px 0 0;line-height:1.5;">
+                Pay only the reservation fee now to secure your order. It is part of your total price and is non-refundable;
+                the remaining balance is paid when you receive your order.
+            </p>
+
+            <div class="qr-section">
+                <?php if ($gcash_qr !== '' && file_exists("uploads/gcash/" . $gcash_qr)): ?>
+                    <img src="uploads/gcash/<?php echo htmlspecialchars($gcash_qr); ?>" alt="GCash QR Code">
+                <?php else: ?>
+                    <div class="no-qr">
+                        <i class="fas fa-qrcode" style="font-size: 48px; display: block; margin-bottom: 10px; color: #94a3b8;"></i>
+                        <p>QR Code will appear here</p>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <?php if ($gcash_configured): ?>
+            <div style="background: #f8fafc; padding: 12px; border-radius: 12px; margin: 10px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong><i class="fas fa-user"></i> Account Name:</strong> <?php echo htmlspecialchars($gcash_name); ?></p>
+                <p style="margin: 0; font-size: 14px;"><strong><i class="fas fa-mobile-alt"></i> GCash Number:</strong> <?php echo htmlspecialchars($gcash_number); ?></p>
+            </div>
+            <?php else: ?>
+            <div style="background: #fff7ed; border:1px solid #fed7aa; color:#9a3412; padding: 12px; border-radius: 12px; margin: 10px 0; font-size:13px;">
+                <strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong>
+                The GCash payment details have not been set up yet. Please contact us before sending any payment.
+            </div>
+            <?php endif; ?>
+
+            <div class="instructions">
+                <strong><i class="fas fa-info-circle"></i> How to Pay:</strong>
+                <p style="margin: 5px 0 0; white-space: pre-line;"><?php echo nl2br(htmlspecialchars($gcash_instructions)); ?></p>
+                <p style="margin: 10px 0 0;"><strong style="display:inline;"><i class="fas fa-upload"></i> After paying:</strong> go to <em>My Profile</em>, open this food reservation and upload your payment proof (screenshot + GCash reference).</p>
+            </div>
+        </div>
+        <div class="popup-actions">
+            <button type="button" class="btn-pay-now" onclick="window.location.href='profile.php'">
+                <i class="fas fa-upload"></i> Upload Proof
+            </button>
+            <button type="button" class="btn-close-popup" onclick="closeFoodPaymentPopup()">
+                <i class="fas fa-times"></i> Close
+            </button>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- FOOTER -->
 <?php include 'components/footer.php'; ?>
@@ -2598,6 +2815,7 @@ function hideModal(type) {
 }
 
 window.onclick = function(event) {
+    if (event.target.classList && event.target.classList.contains('payment-popup-overlay')) { closeFoodPaymentPopup(); return; }
     if (!event.target.classList.contains('modal')) return;
 
     if (event.target.id === 'termsModal') {
@@ -2661,6 +2879,8 @@ function renderFoodCalendar(month, year) {
 
         if (dateObj < today) {
             d.classList.add('past');
+        } else if (foodOutsideStay(dateStr)) {
+            d.classList.add('outside-stay');     // delivery order: only the chosen stay's dates can be picked
         } else {
             // ✅ NEW: Check if date is blocked
             var isBlocked = false;
@@ -2695,7 +2915,7 @@ function changeFoodMonth(delta) {
 }
 
 function selectFoodDate(el) {
-    if (el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('past') || el.classList.contains('disabled') || el.classList.contains('outside-stay')) return;
 
     // ✅ NEW: Handle blocked date click with reason
     if (el.classList.contains('blocked')) {
@@ -2726,6 +2946,8 @@ function selectFoodDate(el) {
     display.classList.add('show');
 
     document.getElementById('foodCalendarInfo').textContent = '✅ Date selected!';
+    foodApplyTimes();
+    refreshFoodDeliveryNote();
 }
 
 // ============================================================
@@ -2839,20 +3061,171 @@ function setupGuestNameInput() {
 // ============================================================
 // ✅ TOGGLE DELIVERY ADDRESS
 // ============================================================
+// Delivery goes to the guest's booked house/unit (decided by the server); the form only shows it.
+var FOOD_STAYS = <?php echo json_encode($food_stays_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+var FOOD_MAX_QTY = <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>;
+
 function toggleDeliveryAddress() {
     const method = document.querySelector('input[name="fulfillment_method"]:checked');
     const addressGroup = document.getElementById('deliveryAddressGroup');
-    const addressInput = document.getElementById('food_delivery_address');
-
     if (!method || !addressGroup) return;
+    addressGroup.style.display = (method.value === 'delivery') ? 'block' : 'none';
+    foodSyncDelivery(true);
+}
 
-    if (method.value === 'delivery') {
-        addressGroup.style.display = 'block';
-        addressInput.required = true;
-    } else {
-        addressGroup.style.display = 'none';
-        addressInput.required = false;
-        addressInput.value = '';
+function foodSelectedStay() {
+    var el = document.getElementById('food_delivery_stay');
+    if (!FOOD_STAYS.length) return null;
+    if (!el) return FOOD_STAYS[0];
+    for (var i = 0; i < FOOD_STAYS.length; i++) { if (String(FOOD_STAYS[i].id) === String(el.value)) return FOOD_STAYS[i]; }
+    return null;      // several stays and none chosen yet: never guess
+}
+
+// ---- Delivery calendar UX (display only: the server re-checks date, time and stay on submit) ----
+function foodIsDelivery() {
+    var m = document.querySelector('input[name="fulfillment_method"]:checked');
+    return !!m && m.value === 'delivery' && FOOD_STAYS.length > 0;
+}
+// true when this calendar date must not be pickable for the current delivery order
+function foodOutsideStay(dateStr) {
+    if (!foodIsDelivery()) return false;
+    var stay = foodSelectedStay();
+    if (!stay) return true;                                   // choose the house first
+    return dateStr < stay.start.substr(0, 10) || dateStr > stay.end.substr(0, 10);
+}
+// hide time slots that fall outside the stay on the chosen date (delivery only)
+function foodApplyTimes() {
+    var sel = document.getElementById('food_preferred_time');
+    if (!sel) return;
+    var stay = foodIsDelivery() ? foodSelectedStay() : null;
+    var d = document.getElementById('food_preferred_date').value;
+    Array.prototype.forEach.call(sel.options, function (o) {
+        if (!o.value) return;
+        var ok = !stay || !d || ((d + ' ' + o.value) >= stay.start && (d + ' ' + o.value) <= stay.end);
+        o.disabled = !ok; o.hidden = !ok;
+    });
+    if (sel.value && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
+}
+// re-draw the calendar for the current fulfillment method / chosen stay
+function foodSyncDelivery(jump) {
+    var dateEl = document.getElementById('food_preferred_date');
+    if (dateEl && dateEl.value && foodOutsideStay(dateEl.value)) {
+        dateEl.value = ''; foodSelectedDate = null;
+        var disp = document.getElementById('foodSelectedDateDisplay'); if (disp) disp.classList.remove('show');
+        var inf = document.getElementById('foodCalendarInfo'); if (inf) inf.textContent = 'Select a date for your food order';
+    }
+    var stay = foodIsDelivery() ? foodSelectedStay() : null;
+    if (jump && stay && !foodSelectedDate) {                   // open the calendar on the stay's first month
+        var p = stay.start.substr(0, 10).split('-');
+        foodCalYear = parseInt(p[0], 10); foodCalMonth = parseInt(p[1], 10) - 1;
+        var t = new Date(); if (foodCalYear < t.getFullYear() || (foodCalYear === t.getFullYear() && foodCalMonth < t.getMonth())) { foodCalYear = t.getFullYear(); foodCalMonth = t.getMonth(); }
+    }
+    if (document.getElementById('foodCalendarGrid')) renderFoodCalendar(foodCalMonth, foodCalYear);
+    var info = document.getElementById('foodCalendarInfo');
+    if (info && !foodSelectedDate) {
+        if (foodIsDelivery() && !stay) info.textContent = 'Choose your delivery location first.';
+        else if (stay) info.textContent = 'Pick a date inside your stay (' + stay.start_label + ' to ' + stay.end_label + ')';
+        else info.textContent = 'Select a date for your food order';
+    }
+    foodApplyTimes();
+    refreshFoodDeliveryNote();
+}
+
+// '' when fine (or not a delivery order); otherwise a message. The server repeats this check.
+function foodDeliveryWindowMessage() {
+    var method = document.querySelector('input[name="fulfillment_method"]:checked');
+    if (!method || method.value !== 'delivery') return '';
+    var stay = foodSelectedStay();
+    if (!stay && FOOD_STAYS.length > 1) return 'Please choose which house to deliver to.';
+    if (!stay) return 'Delivery is available only for guests with a confirmed house reservation. Please choose Pickup or book a house first.';
+    var d = document.getElementById('food_preferred_date').value;
+    var t = document.getElementById('food_preferred_time').value;
+    if (!d || !t) return '';
+    var dt = d + ' ' + (t.length === 5 ? t + ':00' : t);
+    if (dt < stay.start || dt > stay.end) {
+        return 'Delivery must be during your stay (' + stay.start_label + ' to ' + stay.end_label + ').';
+    }
+    return '';
+}
+
+function refreshFoodDeliveryNote() {
+    var box = document.getElementById('foodDeliveryBox');
+    if (!box) return;
+    var stay = foodSelectedStay();
+    box.textContent = '';
+    if (!stay) {
+        if (foodIsDelivery()) box.textContent = 'Choose your delivery location above. The calendar will then follow that stay.';
+        return;
+    }
+    var line1 = document.createElement('div');
+    line1.appendChild(document.createTextNode('Delivering to: '));
+    var b = document.createElement('strong'); b.textContent = stay.house; line1.appendChild(b);
+    var line2 = document.createElement('div'); line2.className = 'delivery-window';
+    var wl = document.createElement('span'); wl.textContent = 'Delivery Window: ';
+    var wv = document.createElement('span'); wv.textContent = stay.start_label + ' – ' + stay.end_label;
+    line2.appendChild(wl); line2.appendChild(wv);
+    var line3 = document.createElement('div'); line3.textContent = 'Choose a delivery date and time within this window.';
+    box.appendChild(line1); box.appendChild(line2); box.appendChild(line3);
+    var msg = foodDeliveryWindowMessage();
+    if (msg) { var w = document.createElement('span'); w.className = 'delivery-warn'; w.textContent = msg; box.appendChild(w); }
+}
+
+// ============================================================
+// QUANTITY (whole numbers 1..max only; the server re-validates)
+// ============================================================
+function foodQtyState() {
+    var v = (document.getElementById('food_quantity').value || '').trim();
+    if (!/^[1-9][0-9]*$/.test(v)) return {ok: false, msg: 'Quantity must be a whole number of at least 1.'};
+    var n = parseInt(v, 10);
+    if (n > FOOD_MAX_QTY) return {ok: false, msg: 'Quantity cannot be more than ' + FOOD_MAX_QTY + '.'};
+    return {ok: true, n: n};
+}
+
+function stepFoodQty(delta) {
+    var el = document.getElementById('food_quantity');
+    var q = foodQtyState();
+    var n = q.ok ? q.n : 1;
+    n = Math.min(FOOD_MAX_QTY, Math.max(1, n + delta));
+    el.value = String(n);
+    updateFoodTotal();
+}
+
+function setupFoodQuantityInput() {
+    var el = document.getElementById('food_quantity');
+    if (!el) return;
+    // Block anything that is not a digit while typing (no "-", ".", "e", letters).
+    el.addEventListener('beforeinput', function (e) {
+        if (e.data && !/^[0-9]+$/.test(e.data)) e.preventDefault();
+    });
+    el.addEventListener('paste', function (e) {
+        var txt = (e.clipboardData || window.clipboardData).getData('text').trim();
+        if (!/^[0-9]+$/.test(txt)) e.preventDefault();
+    });
+    el.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowUp') { e.preventDefault(); stepFoodQty(1); }
+        if (e.key === 'ArrowDown') { e.preventDefault(); stepFoodQty(-1); }
+    });
+    el.addEventListener('input', function () {
+        var v = el.value.replace(/[^0-9]/g, '');       // fallback for autofill / drag-drop
+        if (v.length > 1) v = v.replace(/^0+/, '') || '0';
+        if (v !== el.value) el.value = v;
+        updateFoodTotal();
+    });
+    el.addEventListener('blur', function () {
+        var q = foodQtyState();
+        if (!q.ok) { el.value = (parseInt(el.value, 10) > FOOD_MAX_QTY) ? String(FOOD_MAX_QTY) : '1'; }
+        updateFoodTotal();
+    });
+}
+
+function closeFoodPaymentPopup() {
+    var pop = document.getElementById('foodPaymentPopup');
+    if (pop) pop.classList.remove('show');
+    document.body.style.overflow = 'auto';
+    if (window.history.replaceState) {
+        var url = new URL(window.location.href);
+        url.searchParams.delete('order_success');
+        window.history.replaceState({}, '', url.pathname + (url.search ? url.search : ''));
     }
 }
 
@@ -2909,6 +3282,10 @@ function orderFood(foodId, foodName, price) {
         pickupRadio.checked = true;
         toggleDeliveryAddress();
     }
+    const stayPick = document.getElementById('food_delivery_stay');
+    if (stayPick && stayPick.tagName === 'SELECT') stayPick.selectedIndex = 0;
+
+    document.getElementById('food_quantity').value = '1';
 
     // ✅ NEW: Set current food ID & load blocked dates
     currentFoodIdForCalendar = foodId;
@@ -2929,11 +3306,16 @@ function orderFood(foodId, foodName, price) {
 
 function updateFoodTotal() {
     const priceText = document.getElementById('food_display_price').value;
-    const price = parseFloat(priceText.replace('₱', '')) || 0;
-    const total = price;
+    const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
+    // Display only — the server recalculates price x quantity from the database.
+    const q = foodQtyState();
+    const total = q.ok ? Math.round(price * q.n * 100) / 100 : 0;
+    const qtyErr = document.getElementById('foodQtyError');
+    if (qtyErr) { qtyErr.textContent = q.ok ? '' : q.msg; qtyErr.classList.toggle('show', !q.ok); }
 
-    document.getElementById('food_display_total').textContent = total.toFixed(2);
-    document.getElementById('food_total_amount').value = total;
+    document.getElementById('food_display_total').textContent = total.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const qtyLine = document.getElementById('food_display_qtyline');
+    if (qtyLine) qtyLine.textContent = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' × ' + (q.ok ? q.n : '—');
     const fee = Math.min(<?php echo json_encode(PaymentService::RESERVATION_FEE); ?>, total);
     const fmt = function (n) { return '₱' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
     const feeEl = document.getElementById('food_display_fee');
@@ -2958,6 +3340,8 @@ function updateFoodPrice() {
 document.addEventListener('DOMContentLoaded', function() {
     toggleDeliveryAddress();
     setupGuestNameInput();
+    setupFoodQuantityInput();
+    if (document.getElementById('foodPaymentPopup')) document.body.style.overflow = 'hidden';
 
     const form = document.getElementById('foodOrderForm');
     if (form) {
@@ -3008,16 +3392,11 @@ document.addEventListener('DOMContentLoaded', function() {
             var preferredTime = document.getElementById('food_preferred_time').value;
             if (!preferredTime) { e.preventDefault(); alert('Please select a preferred time.'); return false; }
 
-            var method = document.querySelector('input[name="fulfillment_method"]:checked');
-            if (method && method.value === 'delivery') {
-                var address = document.getElementById('food_delivery_address').value.trim();
-                if (!address) {
-                    e.preventDefault();
-                    alert('Please enter the delivery address.');
-                    document.getElementById('food_delivery_address').focus();
-                    return false;
-                }
-            }
+            var qty = foodQtyState();
+            if (!qty.ok) { e.preventDefault(); alert(qty.msg); document.getElementById('food_quantity').focus(); return false; }
+
+            var winMsg = foodDeliveryWindowMessage();
+            if (winMsg) { e.preventDefault(); alert(winMsg); return false; }
 
             return true;
         });
@@ -3106,6 +3485,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
 document.addEventListener('keydown', function(event) {
     if (event.key !== 'Escape') return;
+
+    var foodPop = document.getElementById('foodPaymentPopup');
+    if (foodPop && foodPop.classList.contains('show')) { closeFoodPaymentPopup(); return; }
 
     var termsModal = document.getElementById('termsModal');
     if (termsModal && termsModal.classList.contains('show') && termsModal.dataset.mustAccept === '1') {

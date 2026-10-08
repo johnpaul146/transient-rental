@@ -47,17 +47,13 @@ if (!function_exists('walkInChip')) {
 
 /**
  * May the current user cancel this booking row from the list?
- * Admin: always (the server decides the details). Staff: only a pending booking with
- * no payment proof and no money received (same rule the cancel handler enforces).
+ * ADMIN ONLY. Pending and confirmed bookings (paid or not) can be cancelled; cancelled and
+ * completed ones cannot. Staff never see the button (and the server refuses them too).
  */
 if (!function_exists('bookingCancelAllowed')) {
     function bookingCancelAllowed(array $row): bool {
-        if (($_SESSION['role'] ?? '') === 'admin') return true;
-        if (($row['booking_status'] ?? '') !== 'pending') return false;
-        if (!empty($row['payment_proof'])) return false;
-        if (in_array(strtolower((string)($row['payment_status'] ?? '')), ['paid', 'reservation_paid'], true)) return false;
-        $a = PaymentService::amounts($row);
-        return $a['paid'] <= 0;
+        if (($_SESSION['role'] ?? '') !== 'admin') return false;
+        return in_array((string)($row['booking_status'] ?? ''), ['pending', 'confirmed'], true);
     }
 }
 
@@ -81,7 +77,15 @@ foreach (['delete_booking', 'permanent_delete_booking', 'override_booking', 'ove
 }
 
 // Server-side guard: every booking operation requires booking-management permission.
-foreach (['confirm_rebook', 'reject_rebook', 'admin_cancel_booking', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
+// Cancelling a booking is ADMIN ONLY (staff get 403 even with a hand-made request).
+if (isset($_POST['admin_cancel_booking']) && !$is_admin) {
+    if (class_exists('SystemLogger') && isset($pdo)) {
+        SystemLogger::log($pdo, 'error', 'booking', 'Cancellation attempt denied: only an administrator can cancel bookings', null, null, null, null, 'warning');
+    }
+    denyBookingPermission('Only an administrator can cancel bookings.');
+}
+
+foreach (['confirm_rebook', 'reject_rebook', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
     if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
         denyBookingPermission();
     }
@@ -455,7 +459,7 @@ if(isset($_POST['reject_rebook']) && $can_manage_booking) {
 // ============================================================
 // ✅ Handle ADMIN CANCEL BOOKING
 // ============================================================
-if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
+if(isset($_POST['admin_cancel_booking']) && $is_admin) {
     try {
         $booking_type  = $_POST['booking_type'] ?? '';
         $booking_id    = (int)($_POST['booking_id'] ?? 0);
@@ -472,6 +476,7 @@ if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
         if (!isset($allowed_tables[$booking_type])) throw new Exception("Invalid booking type.");
         if ($booking_id <= 0) throw new Exception("Invalid booking ID.");
         if (empty($cancel_reason)) throw new Exception("Please select a reason for cancellation.");
+        if (!in_array($cancel_reason, PaymentService::ADMIN_CANCEL_REASONS, true)) throw new Exception("Please select a valid reason for cancellation.");
         if ($cancel_reason === 'Other' && empty($cancel_reason_other)) throw new Exception("Please specify the reason when selecting 'Other'.");
 
         $final_reason = ($cancel_reason === 'Other') ? $cancel_reason_other : $cancel_reason;
@@ -483,21 +488,6 @@ if(isset($_POST['admin_cancel_booking']) && $can_manage_booking) {
         $booking = $stmt->fetch();
         if (!$booking) throw new Exception("Booking not found.");
         if ($booking['booking_status'] === 'cancelled') throw new Exception("This booking is already cancelled.");
-
-        // STAFF may cancel only pending bookings with no payment proof and no money received.
-        // Proof-submitted, paid or confirmed bookings are cancelled by an administrator.
-        if (!$is_admin) {
-            $cancelAmounts = PaymentService::amounts($booking);
-            if (($booking['booking_status'] ?? '') !== 'pending'
-                || !empty($booking['payment_proof'])
-                || $cancelAmounts['paid'] > 0
-                || in_array(strtolower((string)($booking['payment_status'] ?? '')), ['paid', 'reservation_paid'], true)) {
-                if (class_exists('SystemLogger')) {
-                    SystemLogger::log($pdo, 'error', 'booking', "Staff cancellation denied for {$booking_type} booking {$booking['reference_number']} (proof submitted, paid or confirmed)", $booking_id, $booking_type, null, null, 'warning');
-                }
-                throw new Exception("Staff can cancel only pending bookings that have no payment proof or payment. Please ask an administrator to cancel this booking.");
-            }
-        }
 
         // Unpaid -> normal cancellation. Paid -> no refund: payment kept as rebooking credit.
         $cancelResult = PaymentService::cancelBooking($pdo, $booking_type, $booking_id, $final_reason);
@@ -862,6 +852,24 @@ try {
     error_log("PACKAGE QUERY ERROR: " . $e->getMessage());
     $package_bookings = [];
 }
+
+// Who cancelled (from the audit log) — shown in the booking details. Automatic expiries have no actor.
+$annotateCancelledBy = function (string $type, array $rows) use ($pdo): array {
+    $ids = [];
+    foreach ($rows as $r) { if (($r['booking_status'] ?? '') === 'cancelled') $ids[] = $r['id']; }
+    if (!$ids) return $rows;
+    $who = PaymentService::cancellationActors($pdo, $type, $ids);
+    foreach ($rows as $k => $r) {
+        if (($r['booking_status'] ?? '') !== 'cancelled') continue;
+        $rows[$k]['cancelled_by'] = $who[(int)$r['id']]
+            ?? (strpos((string)($r['cancellation_reason'] ?? ''), 'Expired:') === 0 ? 'System (automatic)' : '');
+    }
+    return $rows;
+};
+$house_bookings   = $annotateCancelledBy('house', $house_bookings);
+$tour_bookings    = $annotateCancelledBy('tour', $tour_bookings);
+$food_bookings    = $annotateCancelledBy('food', $food_bookings);
+$package_bookings = $annotateCancelledBy('package', $package_bookings);
 
 // ============================================================
 // ✅ REBOOK FILTER — FIXED: base sa rebooked_at/rebook_confirmed_at
@@ -2938,13 +2946,14 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
 <div class="modal" id="adminCancelModal">
     <div class="modal-content" style="max-width: 520px;">
         <div class="modal-header" style="border-bottom: 2px solid #fee2e2;">
-            <h3 style="color: #991b1b;"><i class="fas fa-ban" style="color: #ef4444;"></i> Cancel Booking?</h3>
+            <h3 style="color: #991b1b;"><i class="fas fa-ban" style="color: #ef4444;"></i> Cancel Booking</h3>
             <button class="close" onclick="closeAdminCancelModal()">&times;</button>
         </div>
         <form method="POST" id="adminCancelForm">
             <input type="hidden" name="admin_cancel_booking" value="1">
             <input type="hidden" name="booking_id" id="admin_cancel_booking_id">
             <input type="hidden" name="booking_type" id="admin_cancel_booking_type">
+            <p style="margin:0 0 14px; font-size:15px; font-weight:600; color:#1e293b;">Are you sure you want to cancel this booking?</p>
             <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; margin-bottom: 18px;">
                 <div style="display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px;">
                     <span style="color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase;">Reference</span>
@@ -2967,12 +2976,11 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 <select name="cancel_reason" id="admin_cancel_reason_select" required onchange="toggleAdminCancelOther()" style="width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 14px;">
                     <option value="">-- Select a reason --</option>
                     <option value="Guest requested cancellation">Guest requested cancellation</option>
-                    <option value="Booking dates no longer available">Booking dates no longer available</option>
+                    <option value="Accidental booking">Accidental booking</option>
+                    <option value="Payment issue">Payment issue</option>
+                    <option value="Schedule conflict">Schedule conflict</option>
                     <option value="Duplicate booking">Duplicate booking</option>
-                    <option value="Suspicious or fraudulent activity">Suspicious or fraudulent activity</option>
-                    <option value="Violation of terms">Violation of terms</option>
-                    <option value="Force majeure (weather, disaster, etc.)">Force majeure (weather, disaster, etc.)</option>
-                    <option value="Operational reasons">Operational reasons</option>
+                    <option value="Suspicious activity">Suspicious activity</option>
                     <option value="Other">Other (specify below)</option>
                 </select>
             </div>
@@ -2988,12 +2996,12 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 </label>
                 <textarea name="cancel_notes" id="admin_cancel_notes" rows="3" placeholder="Add more details..." maxlength="500" style="width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 14px; font-family: inherit; resize: vertical;"></textarea>
             </div>
-            <div style="display: flex; gap: 10px; margin-top: 20px;">
-                <button type="button" onclick="closeAdminCancelModal()" style="flex: 1; padding: 12px; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px;">
+                <button type="button" onclick="closeAdminCancelModal()" style="flex: 1; min-height: 46px; padding: 12px; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
                     <i class="fas fa-times"></i> Cancel
                 </button>
-                <button type="submit" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
-                    <i class="fas fa-ban"></i> Yes, Cancel Booking
+                <button type="submit" style="flex: 1; min-height: 46px; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
+                    <i class="fas fa-ban"></i> Confirm Cancellation
                 </button>
             </div>
         </form>
@@ -3515,6 +3523,24 @@ function formatGuestNamesDisplay(guest_names) {
 /* ============================================================
    VIEW BOOKING
    ============================================================ */
+// Cancellation info (reason / when / who) for the booking details — only for cancelled bookings
+function cancellationDetails(b) {
+    var out = [];
+    if (!b || b.booking_status !== 'cancelled') return out;
+    if (b.cancellation_reason) out.push({ label: 'Cancellation Reason', value: '<span style="white-space:pre-line;">' + escapeHtml(b.cancellation_reason) + '</span>' });
+    if (b.cancelled_at) {
+        var d = new Date(String(b.cancelled_at).replace(' ', 'T'));
+        out.push({ label: 'Cancelled At', value: isNaN(d.getTime()) ? escapeHtml(b.cancelled_at) : d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' at ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) });
+    }
+    if (b.cancelled_by) out.push({ label: 'Cancelled By', value: escapeHtml(b.cancelled_by) });
+    return out;
+}
+function cancellationRowsHtml(b, rowCls, labelCls, valueCls) {
+    return cancellationDetails(b).map(function (d) {
+        return '<div class="' + rowCls + '"><span class="' + labelCls + '"><i class="fas fa-ban"></i> ' + d.label + '</span><span class="' + valueCls + '">' + d.value + '</span></div>';
+    }).join('');
+}
+
 function viewBooking(type, booking) {
     try {
         var bookingData = typeof booking === 'string' ? JSON.parse(booking) : booking;
@@ -3650,6 +3676,7 @@ function viewBooking(type, booking) {
             else if (bookingData.booking_status === 'cancelled') statusBadge = '<span class="pkg-status-pill cancelled"><i class="fas fa-times-circle"></i> CANCELLED</span>';
             else statusBadge = '<span class="pkg-status-pill pending"><i class="fas fa-clock"></i> PENDING</span>';
             html += '<div class="pkg-row"><span class="pkg-label"><i class="fas fa-box"></i> Booking Status</span><span class="pkg-value">' + statusBadge + '</span></div>';
+            html += cancellationRowsHtml(bookingData, 'pkg-row', 'pkg-label', 'pkg-value');
 
             if (bookingData.created_at) {
                 var bookedDate = new Date(bookingData.created_at);
@@ -3748,6 +3775,7 @@ function viewBooking(type, booking) {
             else if (bookingData.booking_status === 'cancelled') statusBadge2 = '<span class="badge badge-danger"><i class="fas fa-times-circle"></i> Cancelled</span>';
             else statusBadge2 = '<span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>';
             details.push({ label: 'Booking Status', value: statusBadge2 });
+            cancellationDetails(bookingData).forEach(function (d) { details.push(d); });
 
             if (type === 'house' && bookingData.rebook_count && parseInt(bookingData.rebook_count) > 0) {
                 details.push({ label: 'Rebook Count', value: '<span class="badge badge-purple"><i class="fas fa-redo"></i> Rebook #' + escapeHtml(bookingData.rebook_count) + '/2</span>' });

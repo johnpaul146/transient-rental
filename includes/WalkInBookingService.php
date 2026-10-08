@@ -289,14 +289,18 @@ class WalkInBookingService {
                 'requests' => self::clip($in['tour_requests'] ?? ($in['special_requests'] ?? ''), 1000)];
     }
 
-    private static function planFood(PDO $pdo, array $in, array $guest) {
+    /**
+     * $inPackage: food is part of a walk-in package; $packageHouseName: that package's house (delivery goes there).
+     * Standalone food delivery follows the same rule as the guest food page: only to the guest's own confirmed
+     * house stay, only inside its window (AvailabilityService::foodDeliveryResolve).
+     */
+    private static function planFood(PDO $pdo, array $in, array $guest, $inPackage = false, $packageHouseName = null) {
         $foodId = (int)($in['food_id'] ?? 0);
         $date = self::cleanDate($in['food_date'] ?? '', 'food');
         $time = trim((string)($in['food_time'] ?? ''));
         if ($time === '') throw new InvalidArgumentException('Please select a food time.');
         $method = ($in['fulfillment'] ?? 'pickup') === 'delivery' ? 'delivery' : 'pickup';
-        $addr = self::clip($in['delivery_address'] ?? '', 500);
-        if ($method === 'delivery' && $addr === null) throw new InvalidArgumentException('Delivery address is required for delivery.');
+        $addr = null;   // a typed delivery address is never used: delivery goes to the booked house/unit
 
         AvailabilityService::lockItem($pdo, 'food', $foodId);
         $st = $pdo->prepare('SELECT id, name, price, is_available, size_variations FROM food_items WHERE id = ?');
@@ -308,19 +312,21 @@ class WalkInBookingService {
             throw new InvalidArgumentException("Food '{$f['name']}': $msg");
         }
 
-        $price = (float)$f['price'];
-        $sizeText = '';
-        if (!empty($f['size_variations'])) {
-            $vars = json_decode($f['size_variations'], true);
-            if (is_array($vars) && !empty($vars)) {
-                $idx = isset($in['size_variant']) && $in['size_variant'] !== '' ? (int)$in['size_variant'] : -1;
-                if (!isset($vars[$idx])) throw new InvalidArgumentException("Please choose a size for '{$f['name']}'.");
-                $price = (float)$vars[$idx]['price'];
-                $sizeText = (string)$vars[$idx]['size'];
+        // Price = size price from the database x quantity (shared rule, same as the guest food page).
+        $line = PaymentService::foodLine($f, $in['size_variant'] ?? null, $in['food_quantity'] ?? 1);
+        $time = self::cleanTime($time, '12:00', 'food');
+
+        if ($method === 'delivery') {
+            if ($inPackage) {
+                if ($packageHouseName === null || $packageHouseName === '') throw new InvalidArgumentException('Delivery requires a selected house because the order will be delivered to your booked unit. Add the house, or choose Pickup.');
+                $addr = (string)$packageHouseName;
+            } else {
+                $dest = AvailabilityService::foodDeliveryResolve($pdo, (int)$guest['id'], $date, $time, $in['delivery_stay_id'] ?? null);
+                $addr = $dest['address'];
             }
         }
-        return ['type' => 'food', 'row' => $f, 'name' => $f['name'], 'price' => round($price, 2), 'date' => $date,
-                'time' => self::cleanTime($time, '12:00', 'food'), 'size' => $sizeText, 'method' => $method,
+        return ['type' => 'food', 'row' => $f, 'name' => $f['name'], 'price' => $line['total'], 'unit' => $line['unit'], 'quantity' => $line['quantity'],
+                'date' => $date, 'time' => $time, 'size' => $line['size'], 'method' => $method,
                 'address' => $method === 'delivery' ? $addr : null, 'requests' => self::clip($in['food_requests'] ?? ($in['special_requests'] ?? ''), 1000)];
     }
 
@@ -351,8 +357,8 @@ class WalkInBookingService {
             (guest_id, guest_name, food_id, reference_number, quantity, size_variant, preferred_date, preferred_time,
              special_requests, contact_number, fulfillment_method, delivery_address, total_amount, reservation_fee_amount,
              gcash_reference, booking_date, payment_status, booking_status, booking_source, created_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', 'walk_in', NOW())")
-            ->execute([$guest['id'], $guest['name'], $p['row']['id'], $ref, $p['size'], $p['date'], $p['time'],
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', 'walk_in', NOW())")
+            ->execute([$guest['id'], $guest['name'], $p['row']['id'], $ref, $p['quantity'], $p['size'], $p['date'], $p['time'],
                        $p['requests'], $guest['contact'], $p['method'], $p['address'], $p['price'],
                        $withFee ? PaymentService::feeFor($p['price']) : 0, $gcashRef]);
         return (int)$pdo->lastInsertId();
@@ -369,7 +375,7 @@ class WalkInBookingService {
      *   booking_type house|tour|food|package   (package: package_items[] = house,tour,food)
      *   house: house_id, check_in, check_out, check_in_time, check_out_time, guests, guest_names
      *   tour:  tour_id, tour_date, tour_time, tour_guests, tour_requests
-     *   food:  food_id, food_date, food_time, size_variant, fulfillment, delivery_address, food_requests
+     *   food:  food_id, food_date, food_time, size_variant, food_quantity, fulfillment, delivery_stay_id (optional), food_requests
      *   payment_option pay_later|cash|gcash, gcash_reference
      *
      * Returns ['type','id','reference','total','guest_id','guest_name','guest_created','payment' => [...]]
@@ -406,8 +412,19 @@ class WalkInBookingService {
             if ($type === 'food')  $items['food']  = self::planFood($pdo, $in, $guest);
             if ($type === 'package') {
                 foreach ($chosen as $c) {
+                    // package food: delivery goes to the package's house/unit (none in the package = pickup only)
                     $items[$c] = ($c === 'house') ? self::planHouse($pdo, $in, $guest)
-                               : (($c === 'tour') ? self::planTour($pdo, $in, $guest) : self::planFood($pdo, $in, $guest));
+                               : (($c === 'tour') ? self::planTour($pdo, $in, $guest)
+                                                  : self::planFood($pdo, $in, $guest, true, isset($items['house']) ? $items['house']['name'] : null));
+                }
+                // The house stay is the package's schedule window (same shared rule as the online package builder)
+                if (isset($items['house'])) {
+                    $sched = [];
+                    if (isset($items['tour'])) $sched[] = ['label' => 'Tour', 'date' => $items['tour']['date'], 'time' => $items['tour']['time']];
+                    if (isset($items['food'])) $sched[] = ['label' => 'Food', 'date' => $items['food']['date'], 'time' => $items['food']['time']];
+                    $winErr = AvailabilityService::packageWindowError(
+                        ['check_in' => $items['house']['check_in'], 'check_in_time' => $items['house']['in_time'], 'check_out' => $items['house']['check_out']], $sched);
+                    if ($winErr !== null) throw new InvalidArgumentException($winErr);
                 }
             }
 

@@ -111,6 +111,18 @@ $has_food  = !empty($cart['food']);
 $has_tour  = !empty($cart['tour']);
 $has_any   = $has_house || $has_food || $has_tour;
 
+// Schedule rule (AvailabilityService::packageWindowError): with a house in the package, the tour and
+// food must fall inside the house stay. These two helpers only adapt cart rows; the rule lives in the service.
+function pkgCartScheduleItems(array $cart) {
+    $items = [];
+    if (!empty($cart['tour'])) $items[] = ['label' => 'Tour', 'date' => (string)($cart['tour']['booking_date'] ?? ''),   'time' => (string)($cart['tour']['preferred_time'] ?? '')];
+    if (!empty($cart['food'])) $items[] = ['label' => 'Food', 'date' => (string)($cart['food']['preferred_date'] ?? ''), 'time' => (string)($cart['food']['preferred_time'] ?? '')];
+    return $items;
+}
+// Window shown to the UI (null when there is no house in the cart)
+$pkg_window = $has_house ? AvailabilityService::packageWindow($cart['house']) : null;
+$pkg_house_name = $has_house ? (string)($cart['house']['name'] ?? '') : '';
+
 // ============================================================
 // REMOVE / CLEAR
 // ============================================================
@@ -118,6 +130,11 @@ if (isset($_GET['remove'])) {
     $type = $_GET['remove'];
     if (in_array($type, ['house', 'food', 'tour'])) {
         unset($_SESSION['package_cart'][$type]);
+        // Food delivery address was filled automatically from the house: without the house it must be re-entered
+        if ($type === 'house' && !empty($_SESSION['package_cart']['food']['delivery_auto'])) {
+            $_SESSION['package_cart']['food']['delivery_address'] = null;
+            $_SESSION['package_cart']['food']['delivery_auto'] = false;
+        }
         if (class_exists('SystemLogger')) {
             SystemLogger::log($pdo, 'update', 'booking', "Guest removed {$type} from package cart", null, 'package', null, ['removed_item' => $type], 'warning');
         }
@@ -205,7 +222,18 @@ if (isset($_POST['add_house_to_package'])) {
         $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out, [], [], $stayTimes['in'], $stayTimes['out']);
         if ($house_conflict !== null) throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
 
+        // Food/tour already in the cart must still fit the (new or changed) house stay
+        $newHouse = ['check_in' => $check_in, 'check_in_time' => $check_in_time, 'check_out' => $check_out];
+        $winErr = AvailabilityService::packageWindowError($newHouse, pkgCartScheduleItems($cart));
+        if ($winErr !== null) throw new Exception($winErr . " Remove or change that item first, or choose house dates that include it.");
+
         $total_price = $house['price_per_night'] * $nights;
+
+        // Delivery food follows the booked house/unit
+        if (!empty($_SESSION['package_cart']['food']) && ($_SESSION['package_cart']['food']['fulfillment_method'] ?? '') === 'delivery') {
+            $_SESSION['package_cart']['food']['delivery_address'] = $house['house_name'];
+            $_SESSION['package_cart']['food']['delivery_auto'] = true;
+        }
 
         $_SESSION['package_cart']['house'] = [
             'id'            => $house['id'],
@@ -239,10 +267,9 @@ if (isset($_POST['add_food_to_package'])) {
         $preferred_date = $_POST['preferred_date'] ?? '';
         $preferred_time = $_POST['preferred_time'] ?? '';
         $fulfillment_method = $_POST['fulfillment_method'] ?? 'pickup';
-        $delivery_address = trim($_POST['delivery_address'] ?? '');
+        $delivery_address = null;   // never taken from the browser: delivery goes to the package's booked house/unit
         $contact_number = trim($_POST['contact_number'] ?? '');
         $special_requests = trim($_POST['special_requests'] ?? '');
-        $size_variant = isset($_POST['size_variant']) ? (int)$_POST['size_variant'] : null;
 
         if (empty($food_id)) throw new Exception("Please select a food item.");
         if (empty($preferred_date)) throw new Exception("Preferred date is required.");
@@ -259,7 +286,17 @@ if (isset($_POST['add_food_to_package'])) {
         if (!preg_match('/^[0-9]{10}$/', $contact_number)) throw new Exception("PH mobile number must be exactly 10 digits (e.g., 9123456789).");
         $contact_full = '+63' . $contact_number;
 
-        if ($fulfillment_method === 'delivery' && empty($delivery_address)) throw new Exception("Delivery address is required when choosing Delivery.");
+        // Delivery is only available with a house stay: the package's house/unit is the delivery location
+        // (a typed address is ignored). A package without a house is pickup only.
+        $delivery_auto = false;
+        if ($fulfillment_method === 'delivery') {
+            if (!$has_house) throw new Exception("Delivery requires a selected house because the order will be delivered to your booked unit. Please add a house to your package, or choose Pickup.");
+            $delivery_address = (string)$cart['house']['name'];
+            $delivery_auto = true;
+        }
+
+        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, [['label' => 'Food', 'date' => $preferred_date, 'time' => $preferred_time]]);
+        if ($winErr !== null) throw new Exception($winErr);
 
         $stmt = $pdo->prepare("SELECT id, name, price, is_available, size_variations FROM food_items WHERE id = ?");
         $stmt->execute([$food_id]);
@@ -269,18 +306,13 @@ if (isset($_POST['add_food_to_package'])) {
         $food_conflict = AvailabilityService::foodConflict($pdo, $food_id, $preferred_date);
         if ($food_conflict !== null) throw new Exception("Not available on that date — " . $food_conflict . " Please choose a different date.");
 
-        $price = $food['price'];
-        $size_variant_text = '';
-        $size_variant_index = null;
-
-        if (!empty($food['size_variations'])) {
-            $variations = json_decode($food['size_variations'], true);
-            if (is_array($variations) && isset($size_variant) && isset($variations[$size_variant])) {
-                $price = $variations[$size_variant]['price'];
-                $size_variant_text = $variations[$size_variant]['size'];
-                $size_variant_index = $size_variant;
-            }
-        }
+        // Price comes from the database (size price when the item has sizes); an unknown size is rejected.
+        // Line total = size price from the database x quantity (whole number 1..100, validated server-side).
+        // A posted total/price is never read. A missing quantity field means 1.
+        $line = PaymentService::foodLine($food, $_POST['size_variant'] ?? null, $_POST['quantity'] ?? 1);
+        $price = $line['total'];
+        $size_variant_text = $line['size'];
+        $size_variant_index = $line['size_index'];
 
         $_SESSION['package_cart']['food'] = [
             'id'                  => $food['id'],
@@ -289,11 +321,14 @@ if (isset($_POST['add_food_to_package'])) {
             'preferred_time'      => $preferred_time,
             'fulfillment_method'  => $fulfillment_method,
             'delivery_address'    => $fulfillment_method === 'delivery' ? $delivery_address : null,
+            'delivery_auto'       => $fulfillment_method === 'delivery' && $delivery_auto,
             'contact_number'      => $contact_full,
             'special_requests'    => $special_requests,
             'size_variant'        => $size_variant_text,
             'size_variant_index'  => $size_variant_index,
-            'price'               => $price
+            'quantity'            => $line['quantity'],
+            'unit_price'          => $line['unit'],
+            'price'               => $price      // line total (unit price x quantity), like the other cart items
         ];
 
         header("Location: packages.php");
@@ -344,6 +379,9 @@ if (isset($_POST['add_tour_to_package'])) {
         $tour_conflict = AvailabilityService::tourConflict($pdo, $tour_id, $booking_date);
         if ($tour_conflict !== null) throw new Exception($tour_conflict . " Please select a different date.");
 
+        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, [['label' => 'Tour', 'date' => $booking_date, 'time' => $preferred_time]]);
+        if ($winErr !== null) throw new Exception($winErr);
+
         $_SESSION['package_cart']['tour'] = [
             'id'                => $tour['id'],
             'name'              => $tour['tour_name'],
@@ -372,7 +410,14 @@ $booking_error = null;
 
 if (isset($_POST['confirm_package_booking'])) {
     try {
+        // A package needs at least one item (house, tour or food). Checked on the server, before anything is written.
+        if (!$has_any) throw new Exception("Please add at least one item to your package before confirming.");
+
         $pdo->beginTransaction();
+
+        // Never trust the stored cart: re-apply the house-window rule to what is about to be booked
+        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, pkgCartScheduleItems($cart));
+        if ($winErr !== null) throw new Exception($winErr);
 
         $stmt = $pdo->prepare("SELECT id, full_name, contact_number FROM guests WHERE user_id = ?");
         $stmt->execute([$_SESSION['user_id']]);
@@ -430,17 +475,46 @@ if (isset($_POST['confirm_package_booking'])) {
             if ($f['preferred_date'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
             if (AvailabilityService::foodConflict($pdo, $f['id'], $f['preferred_date']) !== null) throw new Exception("'{$f['name']}' is no longer available on " . date('M d, Y', strtotime($f['preferred_date'])) . ".");
 
+            // Food line (price x quantity) is recalculated from the database, never taken from the stored cart.
+            // A cart saved before quantity existed has no 'quantity' key and keeps its single-item price.
+            $f['quantity'] = (int)($f['quantity'] ?? 1);
+            if (array_key_exists('quantity', $cart['food'])) {
+                $fr = $pdo->prepare("SELECT id, name, price, is_available, size_variations FROM food_items WHERE id = ?");
+                $fr->execute([$f['id']]);
+                $frow = $fr->fetch();
+                if (!$frow) throw new Exception("'{$f['name']}' is no longer available.");
+                try { $fl = PaymentService::foodLine($frow, $f['size_variant_index'] ?? null, $cart['food']['quantity']); }
+                catch (InvalidArgumentException $e) { throw new Exception($e->getMessage() . " Please edit the food item in your package."); }
+                $f['quantity'] = $fl['quantity'];
+                $f['price'] = $fl['total'];
+                $f['size_variant'] = $fl['size'];
+            }
+
             if (!empty($f['contact_number'])) $package_contact = $f['contact_number'];
             if (!empty($f['special_requests'])) $package_requests[] = "Food: " . $f['special_requests'];
+
+            // Delivery goes to the booked house/unit (re-read from the DB, not the cart); pickup is untouched
+            if (($f['fulfillment_method'] ?? '') === 'delivery') {
+                // No house in the package = no delivery, whatever address an older saved cart may still carry
+                $f['delivery_address'] = '';
+                if ($has_house) {
+                    $hn = $pdo->prepare("SELECT house_name FROM houses WHERE id = ?");
+                    $hn->execute([$cart['house']['id']]);
+                    $f['delivery_address'] = (string)$hn->fetchColumn();
+                }
+                if (trim((string)$f['delivery_address']) === '') {
+                    throw new Exception("Delivery requires a selected house because the order will be delivered to your booked unit. Please add a house, or edit the food item and choose Pickup.");
+                }
+            }
 
             $stmt = $pdo->prepare("INSERT INTO food_bookings 
                 (guest_id, guest_name, food_id, reference_number, quantity, size_variant,
                  preferred_date, preferred_time, special_requests,
                  contact_number, fulfillment_method, delivery_address,
                  total_amount, booking_date, payment_status, booking_status, created_at)
-                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', NOW())");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', NOW())");
             $stmt->execute([
-                $guest_id, $guest['full_name'], $f['id'], $ref,
+                $guest_id, $guest['full_name'], $f['id'], $ref, $f['quantity'],
                 $f['size_variant'] ?? null, $f['preferred_date'], $f['preferred_time'],
                 $f['special_requests'] ?? null, $f['contact_number'], $f['fulfillment_method'],
                 $f['fulfillment_method'] === 'delivery' ? ($f['delivery_address'] ?? null) : null,
@@ -959,7 +1033,8 @@ $cart_data_js = [
         'contact_number' => preg_replace('/^\+63/', '', (string)($cart['food']['contact_number'] ?? '')),
         'special_requests' => $cart['food']['special_requests'] ?? '',
         'size_variant_index' => $cart['food']['size_variant_index'] ?? null,
-        'size_variant' => $cart['food']['size_variant'] ?? ''
+        'size_variant' => $cart['food']['size_variant'] ?? '',
+        'quantity' => max(1, (int)($cart['food']['quantity'] ?? 1))
     ] : null,
     'tour' => $has_tour ? [
         'id' => (int)($cart['tour']['id'] ?? 0),
@@ -1269,6 +1344,8 @@ $cart_data_js = [
         .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
         .calendar-grid .day.disabled { cursor: not-allowed; opacity: 0.5; }
+        .pkg-window-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; overflow-wrap: anywhere; }
+        .pkg-window-note i { margin-right: 4px; }
         .calendar-legend { display: flex; gap: 20px; margin-top: 12px; justify-content: center; font-size: 12px; color: #64748b; flex-wrap: wrap; }
         .calendar-legend .dot { width: 14px; height: 14px; border-radius: 4px; display: inline-block; margin-right: 4px; vertical-align: middle; }
         .calendar-legend .dot.available { background: #d1fae5; border: 1px solid #10b981; }
@@ -1288,6 +1365,12 @@ $cart_data_js = [
             .calendar-info { font-size: 12px; padding: 6px; }
         }
 
+        .qty-stepper { display: flex; align-items: stretch; gap: 8px; max-width: 240px; }
+        .qty-stepper .qty-btn { flex: 0 0 44px; min-height: 44px; border: 2px solid #e2e8f0; background: #f8fafc; border-radius: 10px; font-size: 20px; font-weight: 700; line-height: 1; color: #0B2447; cursor: pointer; transition: all 0.2s; }
+        .qty-stepper .qty-btn:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .qty-stepper input { flex: 1; min-width: 0; text-align: center; font-weight: 700; font-size: 16px; }
+        .qty-error { display: none; margin-top: 4px; font-size: 12px; color: #dc2626; }
+        .qty-error.show { display: block; }
         .order-summary-box { background: linear-gradient(135deg, #f0f7fb 0%, #e8f4fc 100%); padding: 16px 20px; border-radius: 14px; margin: 18px 0; border: 2px dashed #4DA6D9; }
         .order-summary-box .summary-row { display: flex; justify-content: space-between; align-items: center; font-size: 15px; color: #1e293b; gap: 10px; }
         .order-summary-box .summary-row .total-amount { font-size: 22px; font-weight: 800; color: #10b981; }
@@ -1864,6 +1947,9 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <h2 id="pbT2"><i class="fas fa-umbrella-beach"></i> Add Tours &amp; Activities</h2>
             <p>Add an island adventure to your trip. This step is optional.</p>
         </div>
+        <?php if ($pkg_window): ?>
+        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your tour and food schedules must be within your house stay period.</div>
+        <?php endif; ?>
         <?php if (!$has_tour): ?>
         <div class="pb-empty">
             <div class="pb-empty-icon" style="background:linear-gradient(135deg,#10b981,#059669);"><i class="fas fa-umbrella-beach"></i></div>
@@ -1935,6 +2021,9 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <h2 id="pbT3"><i class="fas fa-utensils"></i> Add Food</h2>
             <p>Add a meal or food package for your stay. This step is optional.</p>
         </div>
+        <?php if ($pkg_window): ?>
+        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your tour and food schedules must be within your house stay period.</div>
+        <?php endif; ?>
         <?php if (!$has_food): ?>
         <div class="pb-empty">
             <div class="pb-empty-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706);"><i class="fas fa-utensils"></i></div>
@@ -1988,6 +2077,10 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                 <span><strong>Size:</strong> <?php echo htmlspecialchars($f['size_variant']); ?></span>
             </div>
             <?php endif; ?>
+            <?php $f_qty = max(1, (int)($f['quantity'] ?? 1)); ?>
+            <div class="item-detail"><i class="fas fa-hashtag"></i>
+                <span><strong>Quantity:</strong> <?php echo $f_qty; ?><?php if ($f_qty > 1): ?> × ₱<?php echo number_format((float)($f['price'] ?? 0) / $f_qty, 2); ?><?php endif; ?></span>
+            </div>
             <?php if (!empty($f['delivery_address'])): ?>
             <div class="item-detail"><i class="fas fa-map-marker-alt"></i>
                 <span><strong>Address:</strong> <?php echo htmlspecialchars($f['delivery_address']); ?></span>
@@ -2041,7 +2134,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="pb-review-row">
                 <div><span class="pb-review-type"><i class="fas fa-utensils"></i> Food</span>
                 <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
-                <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?> · <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?></small></div>
+                <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?> · <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> · Qty <?php echo (int)$f['quantity']; ?><?php endif; ?></small></div>
                 <span class="pb-review-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
                 <button type="button" class="pb-link" onclick="pbGo(3)">Change</button>
             </div>
@@ -2092,7 +2185,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
         <span class="pb-sum-label"><i class="fas fa-utensils"></i> Food</span>
         <?php if ($has_food): ?>
             <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
-            <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?></small>
+            <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> · Qty <?php echo (int)$f['quantity']; ?><?php endif; ?></small>
             <span class="pb-sum-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
         <?php else: ?><em>Not added yet</em><?php endif; ?>
     </div>
@@ -2404,6 +2497,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <button type="button" class="btn-back-list" onclick="backToFoodList()">
                 <i class="fas fa-arrow-left"></i> Back to list
             </button>
+            <div class="pkg-window-note" id="f_window_note" style="display:none;"></div>
 
             <div class="form-group">
                 <label><i class="fas fa-utensils"></i> Food Package</label>
@@ -2418,6 +2512,18 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="form-group">
                 <label><i class="fas fa-tag"></i> Price</label>
                 <input type="text" id="f_display_price" class="form-control price-display" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="f_quantity"><i class="fas fa-hashtag"></i> Quantity *</label>
+                <div class="qty-stepper">
+                    <button type="button" class="qty-btn" id="fQtyMinus" onclick="stepFoodQty(-1)" aria-label="Decrease quantity">&minus;</button>
+                    <input type="text" name="quantity" id="f_quantity" class="form-control" value="1" maxlength="3"
+                           inputmode="numeric" autocomplete="off" aria-describedby="f_qty_error" required>
+                    <button type="button" class="qty-btn" id="fQtyPlus" onclick="stepFoodQty(1)" aria-label="Increase quantity">+</button>
+                </div>
+                <div class="qty-error" id="f_qty_error" role="alert"></div>
+                <div class="helper-text"><i class="fas fa-info-circle"></i> 1 to <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>. Total = size price × quantity.</div>
             </div>
 
             <div class="form-group">
@@ -2457,20 +2563,29 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                             <small>Pick up at our location</small>
                         </span>
                     </label>
-                    <label class="fulfillment-option">
-                        <input type="radio" name="fulfillment_method" value="delivery" onchange="toggleDelivery()">
+                    <label class="fulfillment-option" <?php echo $has_house ? '' : 'style="opacity:.5;cursor:not-allowed;"'; ?>>
+                        <input type="radio" name="fulfillment_method" value="delivery" onchange="toggleDelivery()" <?php echo $has_house ? '' : 'disabled'; ?>>
                         <span class="fulfillment-option-label">
                             <i class="fas fa-truck"></i>
                             <strong>Delivery</strong>
-                            <small>Deliver to your address</small>
+                            <small>To your booked house</small>
                         </span>
                     </label>
                 </div>
+                <div class="helper-text" style="margin-top:8px;">
+                    <i class="fas fa-info-circle"></i>
+                    <?php echo $has_house ? 'Delivery goes to your booked house/unit during your stay. Pickup is always available.' : 'Delivery requires a selected house because the order will be delivered to your booked unit. Pickup is always available.'; ?>
+                </div>
+            </div>
+
+            <div class="form-group" id="f_delivery_auto" style="display:none;">
+                <label><i class="fas fa-map-marker-alt"></i> Delivery Location</label>
+                <div class="pkg-window-note" style="margin-bottom:0;"><i class="fas fa-home"></i> Delivered to your booked house: <strong id="f_delivery_auto_name"></strong></div>
             </div>
 
             <div class="form-group" id="f_delivery_group" style="display:none;">
-                <label><i class="fas fa-map-marker-alt"></i> Delivery Address *</label>
-                <textarea name="delivery_address" id="f_delivery_address" class="form-control" rows="2" placeholder="House no., street, barangay, city"></textarea>
+                <!-- Kept hidden on purpose: delivery location is never typed, it is the booked house/unit -->
+                <textarea name="delivery_address" id="f_delivery_address" class="form-control" rows="2" tabindex="-1" disabled></textarea>
             </div>
 
             <div class="form-group">
@@ -2525,6 +2640,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                     <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> <strong>Total Amount:</strong></span>
                     <span class="total-amount" id="f_price_display">₱0.00</span>
                 </div>
+                <div class="summary-row" style="margin-top:4px;"><small id="f_qtyline" style="color:#64748b;"></small></div>
             </div>
 
             <div class="warning-banner">
@@ -2632,6 +2748,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <button type="button" class="btn-back-list" onclick="backToTourList()">
                 <i class="fas fa-arrow-left"></i> Back to list
             </button>
+            <div class="pkg-window-note" id="t_window_note" style="display:none;"></div>
 
             <div class="form-group">
                 <label><i class="fas fa-ship"></i> Tour Package</label>
@@ -3171,6 +3288,31 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
 const HOUSE_BOOKED_DATES = <?php echo json_encode($house_booked_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const TOUR_BOOKED_DATES  = <?php echo json_encode($tour_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const FOOD_BOOKED_DATES  = <?php echo json_encode($food_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+// House stay window (null when the package has no house). The server enforces it; this only guides the pickers.
+const PKG_WINDOW = <?php echo json_encode($pkg_window, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const PKG_HOUSE_NAME = <?php echo json_encode($pkg_house_name, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+function pkgDateInWindow(dateStr) {
+    return !PKG_WINDOW || (dateStr >= PKG_WINDOW.start.slice(0, 10) && dateStr <= PKG_WINDOW.end.slice(0, 10));
+}
+// Disable the time slots that fall outside the house stay on the chosen date
+function pkgApplyTimes(selectId, dateStr) {
+    var sel = document.getElementById(selectId);
+    if (!sel || !PKG_WINDOW) return;
+    Array.prototype.forEach.call(sel.options, function (o) {
+        if (!o.value) return;
+        var ok = !dateStr || ((dateStr + ' ' + o.value) >= PKG_WINDOW.start && (dateStr + ' ' + o.value) <= PKG_WINDOW.end);
+        o.disabled = !ok; o.hidden = !ok;
+    });
+    if (sel.value && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
+}
+// Banner + start month of the calendar for a tour/food form
+function pkgShowWindowNote(noteId, label) {
+    var n = document.getElementById(noteId);
+    if (!n) return;
+    if (!PKG_WINDOW) { n.style.display = 'none'; return; }
+    n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> ' + PKG_WINDOW.start_label + ' to ' + PKG_WINDOW.end_label + '.<br>Your tour and food schedules must be within your house stay period.';
+    n.style.display = 'block';
+}
 const ITEMS_DETAIL = <?php echo json_encode($items_detail, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const CART_DATA = <?php echo json_encode($cart_data_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 
@@ -3426,9 +3568,10 @@ function editFood() {
                 var sizeSelect = document.getElementById('f_size_variant');
                 if (sizeSelect && sizeSelect.options.length > d.size_variant_index) {
                     sizeSelect.selectedIndex = d.size_variant_index;
-                    calcFoodTotal();
                 }
             }
+            document.getElementById('f_quantity').value = String(d.quantity || 1);
+            calcFoodTotal();
 
             foodSelectedDate = d.preferred_date;
             document.getElementById('f_preferred_date').value = d.preferred_date;
@@ -3440,6 +3583,7 @@ function editFood() {
                 infoEl.classList.add('success');
             }
 
+            pkgApplyTimes('f_preferred_time', d.preferred_date);
             document.getElementById('f_preferred_time').value = d.preferred_time;
 
             var phoneVal = (d.contact_number || '').replace(/^\+63/, '').replace(/^0/, '');
@@ -3448,12 +3592,12 @@ function editFood() {
 
             var radios = document.querySelectorAll('input[name="fulfillment_method"]');
             radios.forEach(function(r) {
-                r.checked = (r.value === d.fulfillment_method);
+                r.checked = (r.value === d.fulfillment_method) && !r.disabled;
             });
-            toggleDelivery();
-            if (d.fulfillment_method === 'delivery') {
-                document.getElementById('f_delivery_address').value = d.delivery_address || '';
+            if (!document.querySelector('input[name="fulfillment_method"]:checked')) {
+                document.querySelector('input[name="fulfillment_method"][value="pickup"]').checked = true;
             }
+            toggleDelivery();
 
             document.getElementById('f_special_requests').value = d.special_requests || '';
         }, 120);
@@ -3479,6 +3623,7 @@ function editTour() {
             var infoEl = document.getElementById('tourCalendarInfo');
             if (infoEl) infoEl.innerHTML = '✅ Date selected: <strong>' + formatDateDisplay(d.booking_date) + '</strong>';
 
+            pkgApplyTimes('t_preferred_time', d.booking_date);
             document.getElementById('t_preferred_time').value = d.preferred_time;
             document.getElementById('t_guest_name').value = d.guest_name;
 
@@ -4032,6 +4177,7 @@ function selectFood(el) {
 
     document.getElementById('f_food_id').value = selectedFood.id;
     document.getElementById('f_display_name').value = selectedFood.name;
+    document.getElementById('f_quantity').value = '1';
 
     var sizeGroup = document.getElementById('f_size_group');
     var sizeSelect = document.getElementById('f_size_variant');
@@ -4069,6 +4215,9 @@ function selectFood(el) {
     var today = new Date();
     foodCalMonth = today.getMonth();
     foodCalYear = today.getFullYear();
+    if (PKG_WINDOW) { var _w = PKG_WINDOW.start.split(/[- ]/); foodCalMonth = parseInt(_w[1], 10) - 1; foodCalYear = parseInt(_w[0], 10); }
+    pkgShowWindowNote('f_window_note', 'food');
+    pkgApplyTimes('f_preferred_time', '');
     renderFoodCalendar(foodCalMonth, foodCalYear);
     calcFoodTotal();
 }
@@ -4103,6 +4252,7 @@ function renderFoodCalendar(month, year) {
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
         if (dateObj < today) d.classList.add('past');
+        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
         if (foodCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
         if (foodSelectedDate === dateStr) d.classList.add('selected');
 
@@ -4128,6 +4278,7 @@ function selectFoodDate(el) {
         document.getElementById('f_preferred_date').value = '';
         document.getElementById('foodCalendarInfo').textContent = 'Select a date for your food order';
         document.getElementById('foodCalendarInfo').classList.remove('success');
+        pkgApplyTimes('f_preferred_time', '');
         return;
     }
 
@@ -4137,6 +4288,7 @@ function selectFoodDate(el) {
     document.getElementById('f_preferred_date').value = date;
     document.getElementById('foodCalendarInfo').innerHTML = '✅ Selected: <strong>' + formatDateDisplay(date) + '</strong>';
     document.getElementById('foodCalendarInfo').classList.add('success');
+    pkgApplyTimes('f_preferred_time', date);
 }
 
 function calcFoodTotal() {
@@ -4147,17 +4299,71 @@ function calcFoodTotal() {
         if (opt && opt.dataset.price) price = parseFloat(opt.dataset.price);
     }
     document.getElementById('f_display_price').value = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2});
-    document.getElementById('f_total_price').value = price;
-    document.getElementById('f_price_display').textContent = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2});
+    // Display only: the server recalculates size price x quantity from the database and ignores this value.
+    var q = foodQtyState();
+    var total = q.ok ? Math.round(price * q.n * 100) / 100 : 0;
+    document.getElementById('f_total_price').value = total;
+    document.getElementById('f_price_display').textContent = '₱' + total.toLocaleString('en-US', {minimumFractionDigits: 2});
+    var ql = document.getElementById('f_qtyline');
+    if (ql) ql.textContent = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2}) + ' × ' + (q.ok ? q.n : '—');
+    var qe = document.getElementById('f_qty_error');
+    if (qe) { qe.textContent = q.ok ? '' : q.msg; qe.classList.toggle('show', !q.ok); }
 }
+
+// Quantity: whole numbers 1..FOOD_MAX_QTY only (the server re-validates).
+var FOOD_MAX_QTY = <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>;
+function foodQtyState() {
+    var v = (document.getElementById('f_quantity').value || '').trim();
+    if (!/^[1-9][0-9]*$/.test(v)) return {ok: false, msg: 'Quantity must be a whole number of at least 1.'};
+    var n = parseInt(v, 10);
+    if (n > FOOD_MAX_QTY) return {ok: false, msg: 'Quantity cannot be more than ' + FOOD_MAX_QTY + '.'};
+    return {ok: true, n: n};
+}
+function stepFoodQty(delta) {
+    var q = foodQtyState();
+    var n = Math.min(FOOD_MAX_QTY, Math.max(1, (q.ok ? q.n : 1) + delta));
+    document.getElementById('f_quantity').value = String(n);
+    calcFoodTotal();
+}
+(function setupFoodQuantityInput() {
+    var el = document.getElementById('f_quantity');
+    if (!el) return;
+    el.addEventListener('beforeinput', function (e) { if (e.data && !/^[0-9]+$/.test(e.data)) e.preventDefault(); });
+    el.addEventListener('paste', function (e) {
+        var txt = (e.clipboardData || window.clipboardData).getData('text').trim();
+        if (!/^[0-9]+$/.test(txt)) e.preventDefault();
+    });
+    el.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowUp') { e.preventDefault(); stepFoodQty(1); }
+        if (e.key === 'ArrowDown') { e.preventDefault(); stepFoodQty(-1); }
+    });
+    el.addEventListener('input', function () {
+        var v = el.value.replace(/[^0-9]/g, '');
+        if (v.length > 1) v = v.replace(/^0+/, '') || '0';
+        if (v !== el.value) el.value = v;
+        calcFoodTotal();
+    });
+    el.addEventListener('blur', function () {
+        if (!foodQtyState().ok) el.value = (parseInt(el.value, 10) > FOOD_MAX_QTY) ? String(FOOD_MAX_QTY) : '1';
+        calcFoodTotal();
+    });
+})();
 
 function toggleDelivery() {
     var method = document.querySelector('input[name="fulfillment_method"]:checked');
     if (!method) return;
     var group = document.getElementById('f_delivery_group');
     var addr = document.getElementById('f_delivery_address');
-    if (method.value === 'delivery') { group.style.display = 'block'; addr.required = true; }
-    else { group.style.display = 'none'; addr.required = false; addr.value = ''; }
+    var auto = document.getElementById('f_delivery_auto');
+    if (method.value === 'delivery' && PKG_HOUSE_NAME) {
+        // house in the package: the booked house/unit is the delivery location, nothing to type
+        group.style.display = 'none'; addr.required = false; addr.value = '';
+        document.getElementById('f_delivery_auto_name').textContent = PKG_HOUSE_NAME;
+        if (auto) auto.style.display = 'block';
+        return;
+    }
+    if (auto) auto.style.display = 'none';
+    group.style.display = 'none'; addr.required = false; addr.value = '';
 }
 
 var tourCalMonth = new Date().getMonth();
@@ -4187,6 +4393,9 @@ function selectTour(el) {
     var today = new Date();
     tourCalMonth = today.getMonth();
     tourCalYear = today.getFullYear();
+    if (PKG_WINDOW) { var _w = PKG_WINDOW.start.split(/[- ]/); tourCalMonth = parseInt(_w[1], 10) - 1; tourCalYear = parseInt(_w[0], 10); }
+    pkgShowWindowNote('t_window_note', 'tour');
+    pkgApplyTimes('t_preferred_time', '');
     renderTourCalendar(tourCalMonth, tourCalYear);
 }
 
@@ -4220,6 +4429,7 @@ function renderTourCalendar(month, year) {
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
         if (dateObj < today) d.classList.add('past');
+        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
         if (tourCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
         if (tourSelectedDate === dateStr) d.classList.add('selected');
 
@@ -4244,6 +4454,7 @@ function selectTourDate(el) {
         tourSelectedDate = null; el.classList.remove('selected');
         document.getElementById('t_booking_date').value = '';
         document.getElementById('tourCalendarInfo').textContent = 'Select a date for your tour';
+        pkgApplyTimes('t_preferred_time', '');
         return;
     }
 
@@ -4252,6 +4463,7 @@ function selectTourDate(el) {
     tourSelectedDate = date; el.classList.add('selected');
     document.getElementById('t_booking_date').value = date;
     document.getElementById('tourCalendarInfo').innerHTML = '✅ Date selected: <strong>' + formatDateDisplay(date) + '</strong>';
+    pkgApplyTimes('t_preferred_time', date);
 }
 
 function updateTourSummary() {
@@ -4292,11 +4504,10 @@ document.getElementById('foodForm').addEventListener('submit', function(e) {
     if (!time) { e.preventDefault(); alert('Please select a preferred time slot.'); return false; }
     var contact = document.getElementById('f_contact').value;
     if (!/^[0-9]{10}$/.test(contact)) { e.preventDefault(); alert('PH mobile number must be exactly 10 digits (e.g., 9123456789).'); return false; }
+    var qty = foodQtyState();
+    if (!qty.ok) { e.preventDefault(); alert(qty.msg); document.getElementById('f_quantity').focus(); return false; }
     var method = document.querySelector('input[name="fulfillment_method"]:checked').value;
-    if (method === 'delivery') {
-        var addr = document.getElementById('f_delivery_address').value.trim();
-        if (!addr) { e.preventDefault(); alert('Delivery address is required when choosing Delivery.'); return false; }
-    }
+    if (method === 'delivery' && !PKG_HOUSE_NAME) { e.preventDefault(); alert('Delivery requires a selected house because the order will be delivered to your booked unit. Please choose Pickup.'); return false; }
     return true;
 });
 

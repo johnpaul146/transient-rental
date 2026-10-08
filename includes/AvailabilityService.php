@@ -123,6 +123,129 @@ class AvailabilityService {
         return ['in' => $t, 'out' => $t];
     }
 
+    // ------------------------------------------------------------------
+    // PACKAGE SCHEDULE WINDOW (new package bookings only)
+    // The house stay [check-in datetime, check-out datetime] is the package's schedule window:
+    // a tour or food item in the same package must fall inside it, both ends included.
+    // Packages without a house are not constrained. Single shared rule — packages.php (add + confirm)
+    // and WalkInBookingService both call packageWindowError().
+    // ------------------------------------------------------------------
+
+    /**
+     * The window for a package's house, or null if the house has no usable dates.
+     * $house: ['check_in' => 'Y-m-d', 'check_in_time' => 'HH:MM[:SS]', 'check_out' => 'Y-m-d'].
+     * Check-out TIME follows check-in TIME (houseStayTimes), exactly like the saved booking.
+     * Returns ['start' => 'Y-m-d H:i:s', 'end' => 'Y-m-d H:i:s', 'start_label' => ..., 'end_label' => ...].
+     */
+    public static function packageWindow(array $house) {
+        $in = (string)($house['check_in'] ?? ''); $out = (string)($house['check_out'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $in) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $out) || $out < $in) return null;
+        try { $t = self::houseStayTimes($house['check_in_time'] ?? '14:00'); } catch (InvalidArgumentException $e) { return null; }
+        // A SAVED booking may carry its own check-out time (older bookings kept 12:00 PM); the package builder
+        // does not send one, so new packages still follow the check-in time.
+        $outTime = $t['out'];
+        $savedOut = trim((string)($house['check_out_time'] ?? ''));
+        if ($savedOut !== '' && preg_match('/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?/', $savedOut)) $outTime = self::normTime(substr($savedOut, 0, 8));
+        $start = $in . ' ' . $t['in']; $end = $out . ' ' . $outTime;
+        return ['start' => $start, 'end' => $end,
+                'start_label' => date('M j, Y g:i A', strtotime($start)), 'end_label' => date('M j, Y g:i A', strtotime($end))];
+    }
+
+    /**
+     * null when every item is inside the house window (or there is no house), else a guest-safe message.
+     * $items: [['label' => 'Tour', 'date' => 'Y-m-d', 'time' => 'HH:MM[:SS]'], ...]
+     */
+    public static function packageWindowError($house, array $items) {
+        if (empty($house)) return null;                       // no house in the package: nothing to follow
+        $w = self::packageWindow($house);
+        if ($w === null) return 'The house stay dates are invalid. Please set your house check-in and check-out first.';
+        foreach ($items as $it) {
+            $label = (string)($it['label'] ?? 'Item');
+            $d = (string)($it['date'] ?? ''); $t = trim((string)($it['time'] ?? ''));
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) || !preg_match('/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/', $t)) {
+                return "$label date or time is invalid.";
+            }
+            $dt = $d . ' ' . self::normTime($t);
+            if ($dt < $w['start'] || $dt > $w['end']) {
+                return "$label must be during your house stay: " . $w['start_label'] . ' to ' . $w['end_label']
+                     . ' (you chose ' . date('M j, Y g:i A', strtotime($dt)) . ').';
+            }
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    // FOOD DELIVERY (standalone food orders and walk-in food)
+    // Delivery is only offered to a guest who has a CONFIRMED house stay, only inside that stay's window
+    // (same packageWindowError() rule as packages), and always goes to that booked house/unit.
+    // Pickup is never restricted.
+    // ------------------------------------------------------------------
+
+    /** House bookings whose status lets the guest receive food delivery. */
+    const FOOD_DELIVERY_STAY_STATUSES = ['confirmed'];
+
+    /**
+     * The guest's own confirmed house stays that have not ended yet, oldest first:
+     * [['id','house_name','reference','check_in','check_in_time','check_out','check_out_time'], ...].
+     * 'pending' = number of the guest's house bookings still waiting for confirmation (for a helpful message).
+     */
+    public static function foodDeliveryStays(PDO $pdo, $guestId) {
+        $in = "'" . implode("','", self::FOOD_DELIVERY_STAY_STATUSES) . "'";
+        $st = $pdo->prepare("SELECT hb.id, hb.reference_number, hb.check_in_date, hb.check_in_time, hb.check_out_date, hb.check_out_time, h.house_name
+                               FROM house_bookings hb JOIN houses h ON h.id = hb.house_id
+                              WHERE hb.guest_id = ? AND hb.booking_status IN ($in) AND hb.check_out_date >= CURDATE()
+                              ORDER BY hb.check_in_date, hb.id");
+        $st->execute([(int)$guestId]);
+        $stays = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $stays[] = ['id' => (int)$r['id'], 'house_name' => (string)$r['house_name'], 'reference' => (string)$r['reference_number'],
+                        'check_in' => substr((string)$r['check_in_date'], 0, 10), 'check_in_time' => substr((string)($r['check_in_time'] ?: '14:00:00'), 0, 8),
+                        'check_out' => substr((string)$r['check_out_date'], 0, 10), 'check_out_time' => substr((string)($r['check_out_time'] ?: '12:00:00'), 0, 8)];
+        }
+        $p = $pdo->prepare("SELECT COUNT(*) FROM house_bookings WHERE guest_id = ? AND booking_status = 'pending' AND check_out_date >= CURDATE()");
+        $p->execute([(int)$guestId]);
+        return ['stays' => $stays, 'pending' => (int)$p->fetchColumn()];
+    }
+
+    /**
+     * Decide whether food can be delivered on $date at $time for this guest.
+     * Returns ['stay_id' => int, 'address' => house/unit name (from the DATABASE, never from the browser)].
+     * Throws InvalidArgumentException (guest-safe message) when delivery is not allowed.
+     * $stayId (optional) = the booking the guest picked when they have several; ignored if it is not theirs.
+     */
+    public static function foodDeliveryResolve(PDO $pdo, $guestId, $date, $time, $stayId = null) {
+        $o = self::foodDeliveryStays($pdo, $guestId);
+        $stays = $o['stays'];
+        if (!$stays) {
+            throw new InvalidArgumentException($o['pending'] > 0
+                ? 'Delivery is available only for guests with a confirmed house reservation. Your house reservation is still waiting for confirmation, so please choose Pickup for now.'
+                : 'Delivery is available only for guests with a confirmed house reservation. Please choose Pickup or book a house first.');
+        }
+        $item = [['label' => 'Food delivery', 'date' => $date, 'time' => $time]];
+        $toWindow = function (array $s) { return ['check_in' => $s['check_in'], 'check_in_time' => $s['check_in_time'], 'check_out' => $s['check_out'], 'check_out_time' => $s['check_out_time']]; };
+
+        $pick = null;
+        $sid = (int)$stayId;
+        if ($sid > 0) {
+            foreach ($stays as $s) if ($s['id'] === $sid) $pick = $s;
+            if ($pick === null) throw new InvalidArgumentException('Please choose one of your house stays for delivery.');
+        } elseif (count($stays) === 1) {
+            $pick = $stays[0];
+        } else {
+            $match = [];
+            foreach ($stays as $s) if (self::packageWindowError($toWindow($s), $item) === null) $match[] = $s;
+            if (count($match) === 1) $pick = $match[0];
+            elseif (count($match) > 1) throw new InvalidArgumentException('You have more than one house stay at that time. Please choose which house to deliver to.');
+            else {
+                $parts = [];
+                foreach ($stays as $s) { $w = self::packageWindow($toWindow($s)); if ($w) $parts[] = $s['house_name'] . ': ' . $w['start_label'] . ' to ' . $w['end_label']; }
+                throw new InvalidArgumentException('Food delivery must be during one of your house stays (' . implode('; ', $parts) . ').');
+            }
+        }
+        if (($err = self::packageWindowError($toWindow($pick), $item)) !== null) throw new InvalidArgumentException($err);
+        return ['stay_id' => $pick['id'], 'address' => $pick['house_name']];
+    }
+
     /** Tour (one boat per date). */
     public static function tourConflict(PDO $pdo, $tourId, $date, array $excludeIds = [], array $ownRefs = []) {
         if (!$date) return 'Please choose a date.';
