@@ -28,13 +28,27 @@
         return [$bookings, $reviews, $failed, $food, $blocked];
     }
 
-    // Pending bookings (house + tour + food + package)
+    // Pending bookings (house + tour + food + package) — same definition as the "Pending" list in
+    // booking-management.php: a package counts once (its house/tour/food component rows are skipped),
+    // and a house rebook still waiting for confirmation counts as pending.
     foreach (['house_bookings', 'tour_bookings', 'food_bookings', 'package_bookings'] as $table) {
+        $own  = $table === 'package_bookings' ? '' : ' AND (package_id IS NULL OR package_id = 0)';
+        $pend = $table === 'house_bookings'
+            ? "(payment_status='pending' OR (booking_status='pending' AND (rebooked_at IS NOT NULL OR rebook_count > 0)))"
+            : "payment_status='pending'";
         try {
             $bookings += (int)$pdo->query(
-                "SELECT COUNT(*) FROM `$table` WHERE payment_status='pending' AND booking_status NOT IN ('cancelled','completed')"
+                "SELECT COUNT(*) FROM `$table` WHERE $pend AND booking_status NOT IN ('cancelled','completed')$own"
             )->fetchColumn();
-        } catch (Throwable $e) {}
+        } catch (Throwable $e) {
+            if ($table === 'house_bookings') {   // rebook columns missing on an old database: plain definition
+                try {
+                    $bookings += (int)$pdo->query(
+                        "SELECT COUNT(*) FROM `house_bookings` WHERE payment_status='pending' AND booking_status NOT IN ('cancelled','completed')$own"
+                    )->fetchColumn();
+                } catch (Throwable $e2) {}
+            }
+        }
     }
 
     // Pending reviews (auto-detect column)

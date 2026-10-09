@@ -13,6 +13,8 @@ if (file_exists('includes/SystemLogger.php')) {
 
 require_once 'includes/auth.php';
 requireAdminOrStaff();
+require_once 'includes/PaymentService.php';      // read-only helper (cancellationActors) used by the activity panel
+require_once 'includes/DashboardService.php';    // read-only dashboard queries (Phase 8.2 / 8.3)
 
 $is_admin = ($_SESSION['role'] == 'admin');
 $is_staff = ($_SESSION['role'] == 'staff');
@@ -72,15 +74,13 @@ try {
     $total_users = $pdo->query("SELECT COUNT(*) FROM users WHERE role = 'guest'")->fetchColumn();
 } catch(PDOException $e) {}
 
-$total_house_bookings = 0;
-$total_tour_bookings = 0;
-try {
-    $total_house_bookings = $pdo->query("SELECT COUNT(*) FROM house_bookings")->fetchColumn();
-} catch(PDOException $e) {}
-
-try {
-    $total_tour_bookings = $pdo->query("SELECT COUNT(*) FROM tour_bookings")->fetchColumn();
-} catch(PDOException $e) {}
+// Booking counts — same definitions as booking-management.php (packages count once, not per component)
+$dash_counts = DashboardService::bookingCounts($pdo);
+$total_house_bookings   = $dash_counts['by_type']['house'];
+$total_tour_bookings    = $dash_counts['by_type']['tour'];
+$total_food_bookings    = $dash_counts['by_type']['food'];
+$total_package_bookings = $dash_counts['by_type']['package'];
+$total_all_bookings     = $dash_counts['total'];
 
 $total_reviews = 0;
 $avg_rating = 0;
@@ -159,6 +159,7 @@ $ops = ['bookings_today' => 0, 'arrivals_today' => 0, 'departures_today' => 0, '
         'proofs_to_verify' => 0, 'awaiting_payment' => 0, 'block_requests' => 0];
 $ops_arrivals_today = [];
 $ops_arrivals_upcoming = [];
+$ops_window = [];
 $ops_recent_activity = [];
 try {
     $ops_today = date('Y-m-d');
@@ -178,27 +179,12 @@ try {
         $ops['awaiting_payment'] += (int)($r[1] ?? 0);
     }
 
-    $arrivalSql = "
-        SELECT 'House' AS type, b.reference_number AS ref, b.check_in_date AS d, h.house_name AS item, COALESCE(u.fullname, '') AS guest, b.booking_status AS st
-          FROM house_bookings b LEFT JOIN houses h ON h.id = b.house_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
-         WHERE b.check_in_date BETWEEN :f1 AND :t1 AND b.booking_status IN ('pending','confirmed')
-        UNION ALL
-        SELECT 'Tour', b.reference_number, b.booking_date, t.tour_name, COALESCE(u.fullname, b.guest_name, ''), b.booking_status
-          FROM tour_bookings b LEFT JOIN tours t ON t.id = b.tour_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
-         WHERE b.booking_date BETWEEN :f2 AND :t2 AND b.booking_status IN ('pending','confirmed')
-        UNION ALL
-        SELECT 'Food', b.reference_number, b.preferred_date, f.name, COALESCE(u.fullname, b.guest_name, ''), b.booking_status
-          FROM food_bookings b LEFT JOIN food_items f ON f.id = b.food_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
-         WHERE b.preferred_date BETWEEN :f3 AND :t3 AND b.booking_status IN ('pending','confirmed')
-        ORDER BY d ASC, ref ASC LIMIT 12";
-    $runArrivals = function ($from, $to) use ($pdo, $arrivalSql) {
-        $q = $pdo->prepare($arrivalSql);
-        $q->execute([':f1' => $from, ':t1' => $to, ':f2' => $from, ':t2' => $to, ':f3' => $from, ':t3' => $to]);
-        return $q->fetchAll(PDO::FETCH_ASSOC);
-    };
-    $ops_arrivals_today = $runArrivals($ops_today, $ops_today);
+    // Arrivals now include packages (one "Package" row on its first day; no duplicate component rows).
+    // One query for today..+7 days; today's list, the upcoming list and the unpaid-soon list are all cut from it.
+    $ops_window = DashboardService::starts($pdo, $ops_today, $ops_week_end);
+    $ops_arrivals_today = array_values(array_filter($ops_window, function ($r) use ($ops_today) { return $r['d'] === $ops_today; }));
     $ops['arrivals_today'] = count($ops_arrivals_today);
-    $ops_arrivals_upcoming = $runArrivals(date('Y-m-d', strtotime('+1 day')), $ops_week_end);
+    $ops_arrivals_upcoming = array_values(array_filter($ops_window, function ($r) use ($ops_today) { return $r['d'] > $ops_today; }));
     $ops['arrivals_week'] = count($ops_arrivals_upcoming);
 
     $q = $pdo->prepare("SELECT COUNT(*) FROM house_bookings WHERE check_out_date = ? AND booking_status = 'confirmed'");
@@ -209,12 +195,29 @@ try {
         $ops['block_requests'] = (int)$pdo->query("SELECT COUNT(*) FROM blocked_date_requests WHERE status = 'pending'")->fetchColumn();
     } catch (PDOException $e) {}
 
+    // Raw activity feed. Staff must not see payment amounts or reasons that booking log lines can carry.
+    $staffFeed = $is_staff ? ' AND ' . DashboardService::staffLogFeedFilter() : '';
     $q = $pdo->query("SELECT description, fullname, username, role, status, created_at FROM system_logs
-                      WHERE module IN ('booking','house','tour','food','activity','blocked_dates','review')
+                      WHERE module IN ('booking','house','tour','food','activity','blocked_dates','review')$staffFeed
                       ORDER BY created_at DESC, id DESC LIMIT 6");
     $ops_recent_activity = $q->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {
     error_log('admin-dashboard ops overview failed: ' . $e->getMessage());
+}
+
+// ============================================================
+// ACTION NEEDED + RECENT REBOOKS / CANCELLATIONS (Phase 8.3) — read-only, no amounts, no reasons
+// ============================================================
+$action_unpaid_soon = [];
+$action_rebooks = [];
+$action_cancels = [];
+try {
+    // Unpaid (nothing received yet) bookings that start within the next 7 days
+    $action_unpaid_soon = array_values(array_filter($ops_window, function ($r) { return $r['pay'] === 'pending'; }));
+    $action_rebooks = DashboardService::recentRebooks($pdo, 14, 5);
+    $action_cancels = DashboardService::recentCancellations($pdo, 14, 5);
+} catch (Throwable $e) {
+    error_log('admin-dashboard action panel failed: ' . $e->getMessage());
 }
 
 // Logout
@@ -601,6 +604,8 @@ function getBookingStatusLabel($payment_status) {
         .stat-label { color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; margin-top: 2px; }
         .stat-small { font-size: 11px; color: rgba(255,255,255,0.8); margin-top: 8px; display: flex; align-items: center; gap: 5px; }
         .stat-small.warning { color: #F4B400; }
+        .stat-small.stat-small-wrap { flex-wrap: wrap; gap: 4px 12px; }
+        .stat-small.stat-small-wrap span { display: inline-flex; align-items: center; gap: 4px; }
 
         @media (max-width: 768px) {
             .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
@@ -1117,12 +1122,13 @@ function getBookingStatusLabel($payment_status) {
 
                     <a href="booking-management.php" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-calendar-check"></i></div>
-                        <div class="stat-number"><?php echo $total_house_bookings + $total_tour_bookings; ?></div>
+                        <div class="stat-number"><?php echo (int)$total_all_bookings; ?></div>
                         <div class="stat-label">Total Bookings</div>
-                        <div class="stat-small">
-                            <i class="fas fa-home"></i> <?php echo $total_house_bookings; ?> houses
-                            <span style="margin: 0 4px;">|</span>
-                            <i class="fas fa-umbrella-beach"></i> <?php echo $total_tour_bookings; ?> tours
+                        <div class="stat-small stat-small-wrap">
+                            <span title="House bookings"><?php echo (int)$total_house_bookings; ?> houses</span>
+                            <span title="Tour bookings"><?php echo (int)$total_tour_bookings; ?> tours</span>
+                            <span title="Food orders"><?php echo (int)$total_food_bookings; ?> food</span>
+                            <span title="Package bookings"><?php echo (int)$total_package_bookings; ?> packages</span>
                         </div>
                     </a>
 
@@ -1139,33 +1145,17 @@ function getBookingStatusLabel($payment_status) {
 
                     <a href="booking-management.php?status=pending" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-clock"></i></div>
-                        <div class="stat-number"><?php echo $sidebar_pending_bookings; ?></div>
+                        <div class="stat-number"><?php echo (int)$dash_counts['pending']; ?></div>
                         <div class="stat-label">Pending Bookings</div>
                         <div class="stat-small warning"><i class="fas fa-exclamation-triangle"></i> Need attention</div>
                     </a>
 
-                          <?php if($is_admin): ?>
-                 <a href="booking-management.php?status=pending" class="stat-card">
-
-    <div class="stat-icon">
-        <i class="fas fa-clock"></i>
-    </div>
-
-    <div class="stat-number">
-        <?php echo $sidebar_pending_bookings; ?>
-    </div>
-
-    <div class="stat-label">
-        Pending Payment
-    </div>
-
-    <div class="stat-small warning">
-        <i class="fas fa-exclamation-circle"></i>
-        Need verification
-    </div>
-
-</a>
-                    <?php endif; ?>
+                    <a href="booking-management.php?status=paid" class="stat-card">
+                        <div class="stat-icon"><i class="fas fa-check-double"></i></div>
+                        <div class="stat-number"><?php echo (int)$dash_counts['paid']; ?></div>
+                        <div class="stat-label">Fee / Fully Paid</div>
+                        <div class="stat-small"><i class="fas fa-check-circle"></i> Active bookings</div>
+                    </a>
 
                     <a href="reviews-management.php" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-star"></i></div>
@@ -1208,6 +1198,14 @@ function getBookingStatusLabel($payment_status) {
             .ops-empty{color:#94a3b8;font-size:13px;padding:6px 0}
             .ops-task{text-decoration:none;color:inherit}
             .ops-task b{background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 10px;font-size:12px}
+            .ops-pill{border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;white-space:nowrap;background:#fef3c7;color:#92400e}
+            .ops-pill.blue{background:#e0f2fe;color:#075985}.ops-pill.green{background:#dcfce7;color:#166534}.ops-pill.vio{background:#ede9fe;color:#5b21b6}.ops-pill.red{background:#fee2e2;color:#991b1b}.ops-pill.zero{background:#f1f5f9;color:#64748b}
+            .ops-list li > a.ops-row{display:flex;gap:10px;justify-content:space-between;align-items:flex-start;width:100%;text-decoration:none;color:inherit}
+            .ops-list li.ops-li-link{padding:0}.ops-list li.ops-li-link > a.ops-row{padding:9px 0}
+            .ops-list li.ops-li-link:hover{background:#f8fafc}
+            .ops-sub-h{margin:14px 0 4px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.04em}
+            .ops-more{font-size:12px;color:#4DA6D9;text-decoration:none;display:inline-block;margin-top:6px}
+            .ops-list li > span:first-child{min-width:0;overflow-wrap:anywhere}
             @media (max-width:600px){.ops-grid{grid-template-columns:repeat(2,1fr)}}
         </style>
         <section class="ops-wrap" id="operationalOverview">
@@ -1227,10 +1225,11 @@ function getBookingStatusLabel($payment_status) {
                     <h3><i class="fas fa-plane-arrival"></i> Today's Arrivals</h3>
                     <?php if (empty($ops_arrivals_today)): ?><div class="ops-empty">No arrivals scheduled today.</div><?php else: ?>
                     <ul class="ops-list">
-                        <?php foreach ($ops_arrivals_today as $a): ?>
+                        <?php foreach (array_slice($ops_arrivals_today, 0, 8) as $a): ?>
                         <li><span><strong><?php echo htmlspecialchars($a['guest'] !== '' ? $a['guest'] : 'Guest'); ?></strong><span class="sub"><?php echo htmlspecialchars($a['type'] . ' · ' . ($a['item'] ?? '') . ' · ' . $a['ref']); ?></span></span><span class="when"><?php echo ucfirst(htmlspecialchars($a['st'])); ?></span></li>
                         <?php endforeach; ?>
                     </ul>
+                    <?php if (count($ops_arrivals_today) > 8): ?><a class="ops-more" href="booking-management.php">+<?php echo count($ops_arrivals_today) - 8; ?> more today — open Booking Management</a><?php endif; ?>
                     <?php endif; ?>
                     <h3 style="margin-top:16px;"><i class="fas fa-calendar-day"></i> Upcoming Arrivals</h3>
                     <?php if (empty($ops_arrivals_upcoming)): ?><div class="ops-empty">Nothing scheduled in the next 7 days.</div><?php else: ?>
@@ -1241,17 +1240,68 @@ function getBookingStatusLabel($payment_status) {
                     </ul>
                     <?php endif; ?>
                 </div>
-                <div class="ops-card">
-                    <h3><i class="fas fa-tasks"></i> Pending Tasks</h3>
+                <div class="ops-card" id="opsActionNeeded">
+                    <h3><i class="fas fa-bell"></i> Action Needed</h3>
+                    <?php
+                        $an_verify  = (int)$ops['proofs_to_verify'];
+                        $an_rebooks = (int)$dash_counts['pending_rebooks'];
+                        $an_unpaid  = count($action_unpaid_soon);
+                        $an_pill = function ($n, $cls) { return '<b class="ops-pill ' . ($n > 0 ? $cls : 'zero') . '">' . (int)$n . '</b>'; };
+                        $an_day = function ($d) {
+                            $t = date('Y-m-d');
+                            if ($d === $t) return 'Today';
+                            if ($d === date('Y-m-d', strtotime('+1 day'))) return 'Tomorrow';
+                            return date('M d', strtotime($d));
+                        };
+                        $an_tab = ['House' => 'house', 'Tour' => 'tour', 'Food' => 'food', 'Package' => 'package'];
+                    ?>
                     <ul class="ops-list">
-                        <li><a class="ops-task" href="booking-management.php?status=pending">Payment proofs waiting for verification</a><b class="ops-task" style="background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['proofs_to_verify']; ?></b></li>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=pending"><span>Payments to verify<span class="sub">Proof uploaded, waiting for review</span></span><?php echo $an_pill($an_verify, ''); ?></a></li>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=rebook&amp;tab=rebook"><span>Rebooks awaiting confirmation<span class="sub">House rebook requests</span></span><?php echo $an_pill($an_rebooks, 'vio'); ?></a></li>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=pending"><span>Unpaid bookings starting within 7 days<span class="sub">No payment received yet</span></span><?php echo $an_pill($an_unpaid, 'red'); ?></a></li>
+                    </ul>
+                    <?php if ($an_unpaid > 0): ?>
+                    <ul class="ops-list" style="margin-top:6px;">
+                        <?php foreach (array_slice($action_unpaid_soon, 0, 5) as $u): ?>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=pending&amp;tab=<?php echo $an_tab[$u['type']] ?? 'house'; ?>&amp;search=<?php echo urlencode($u['ref']); ?>"><span><strong><?php echo htmlspecialchars($u['guest'] !== '' ? $u['guest'] : 'Guest'); ?></strong><span class="sub"><?php echo htmlspecialchars($u['type'] . ' · ' . ($u['item'] ?? '') . ' · ' . $u['ref']); ?></span></span><span class="when"><?php echo htmlspecialchars($an_day($u['d'])); ?></span></a></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php if ($an_unpaid > 5): ?><a class="ops-more" href="booking-management.php?status=pending">+<?php echo $an_unpaid - 5; ?> more unpaid</a><?php endif; ?>
+                    <?php endif; ?>
+
+                    <h3 style="margin-top:18px;"><i class="fas fa-tasks"></i> Pending Tasks</h3>
+                    <ul class="ops-list">
                         <li><a class="ops-task" href="booking-management.php?status=pending">Bookings awaiting the guest's payment</a><b class="ops-task" style="background:#e0f2fe;color:#075985;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['awaiting_payment']; ?></b></li>
                         <li><a class="ops-task" href="reviews-management.php">Reviews to look at</a><b class="ops-task" style="background:#dcfce7;color:#166534;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$sidebar_pending_reviews; ?></b></li>
                         <?php if ($is_admin): ?>
                         <li><a class="ops-task" href="blocked-dates.php#blockRequests">Staff block requests to approve</a><b class="ops-task" style="background:#ede9fe;color:#5b21b6;border-radius:999px;padding:2px 10px;font-size:12px;"><?php echo (int)$ops['block_requests']; ?></b></li>
                         <?php endif; ?>
                     </ul>
-                    <h3 style="margin-top:16px;"><i class="fas fa-history"></i> Recent Activity</h3>
+                </div>
+                <div class="ops-card" id="opsRecentChanges">
+                    <h3><i class="fas fa-redo"></i> Recent Rebooks</h3>
+                    <?php if (empty($action_rebooks)): ?><div class="ops-empty">No rebooks in the last 14 days.</div><?php else: ?>
+                    <ul class="ops-list">
+                        <?php foreach ($action_rebooks as $rb): ?>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=all&amp;tab=<?php echo $an_tab[$rb['type']] ?? 'house'; ?>&amp;search=<?php echo urlencode($rb['ref']); ?>"><span><strong><?php echo htmlspecialchars($rb['guest'] !== '' ? $rb['guest'] : 'Guest'); ?></strong>
+                            <span class="sub"><?php echo htmlspecialchars($rb['type'] . ' · ' . $rb['ref']); ?><?php if ($rb['old'] && $rb['new']): ?> · <?php echo date('M d', strtotime($rb['old'])); ?> → <?php echo date('M d', strtotime($rb['new'])); ?><?php endif; ?></span>
+                            <span class="sub">by <?php echo htmlspecialchars($rb['by']); ?></span></span><span class="when"><?php echo date('M d, h:i A', strtotime($rb['at'])); ?></span></a></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php endif; ?>
+
+                    <h3 style="margin-top:18px;"><i class="fas fa-ban"></i> Recent Cancellations</h3>
+                    <?php if (empty($action_cancels)): ?><div class="ops-empty">No cancellations in the last 14 days.</div><?php else: ?>
+                    <ul class="ops-list">
+                        <?php foreach ($action_cancels as $cx): ?>
+                        <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=cancelled&amp;tab=history&amp;search=<?php echo urlencode($cx['ref']); ?>"><span><strong><?php echo htmlspecialchars($cx['guest'] !== '' ? $cx['guest'] : 'Guest'); ?></strong>
+                            <span class="sub"><?php echo htmlspecialchars($cx['type'] . ' · ' . $cx['ref']); ?></span>
+                            <?php if ($cx['by'] !== ''): ?><span class="sub">by <?php echo htmlspecialchars($cx['by']); ?></span><?php endif; ?></span><span class="when"><?php echo date('M d, h:i A', strtotime($cx['at'])); ?></span></a></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php endif; ?>
+
+                    <h3 style="margin-top:18px;"><i class="fas fa-history"></i> Recent Activity</h3>
                     <?php if (empty($ops_recent_activity)): ?><div class="ops-empty">No recent activity.</div><?php else: ?>
                     <ul class="ops-list">
                         <?php foreach ($ops_recent_activity as $act): ?>

@@ -284,6 +284,9 @@ function serviceRebookButton($type, array $row, $mobile) {
     $args = htmlspecialchars(json_encode([$type, (int)$row['id'], (string)$row['reference_number'], (string)$current,
         RebookService::remaining($row), RebookService::daysLeft($row), ($row['booking_status'] ?? '') === 'cancelled']), ENT_QUOTES, 'UTF-8');
     $cls = $mobile ? 'btn-card-action btn-rebook-svc-mobile' : 'btn-sm btn-rebook-svc';
+    if (in_array($type, ['package', 'tour', 'food'], true)) {
+        return '<a href="' . ['package' => 'package-rebook.php', 'tour' => 'tour-rebook.php', 'food' => 'food-rebook.php'][$type] . '?id=' . (int)$row['id'] . '" class="' . $cls . '"><i class="fas fa-redo"></i> Rebook</a>';
+    }
     return '<button type="button" class="' . $cls . '" onclick="openServiceRebookModal.apply(null, ' . $args . ')"><i class="fas fa-redo"></i> Rebook</button>';
 }
 
