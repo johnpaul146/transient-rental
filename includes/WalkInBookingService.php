@@ -221,6 +221,129 @@ class WalkInBookingService {
         throw new RuntimeException('Could not generate a unique reference number. Please try again.');
     }
 
+    // ------------------------------------------------------- availability (calendar guidance)
+    // READ-ONLY helpers for the walk-in modal's availability calendar. They contain NO availability rules of
+    // their own: every answer comes from AvailabilityService (houseConflict / tourConflict / foodConflict /
+    // packageWindow), the same calls create() makes. The calendar is guidance; create() still re-checks
+    // everything inside its transaction, so a date that was free when the calendar loaded can still be refused.
+
+    // No horizon and no maximum stay are imposed here: the booking rules set none, so the calendar sets none either.
+    // The only bounds are those of a valid YYYY-MM-DD date (year 9999), which also keeps malformed input out.
+    const AVAIL_LAST_DATE = '9999-12-31';
+
+    /** 'blocked' when the conflict is an owner/auto block, otherwise 'booked' (an existing reservation). */
+    private static function availKind($message) {
+        return strpos((string)$message, ' is blocked') !== false ? 'blocked' : 'booked';
+    }
+
+    /** The house/tour/food row must exist and be bookable (same status rules planHouse/planTour/planFood apply). */
+    private static function availItemCheck(PDO $pdo, $type, $id) {
+        $id = filter_var($id, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 2147483647]]);
+        if ($id === false) throw new InvalidArgumentException('Please choose an item first.');
+        $sql = ['house' => "SELECT 1 FROM houses WHERE id = ? AND status = 'available'",
+                'tour'  => "SELECT 1 FROM tours WHERE id = ? AND status = 'available'",
+                'food'  => "SELECT 1 FROM food_items WHERE id = ? AND is_available = 1"][$type] ?? null;
+        if ($sql === null) throw new InvalidArgumentException('Unknown booking type.');
+        $st = $pdo->prepare($sql);
+        $st->execute([$id]);
+        if (!$st->fetchColumn()) throw new InvalidArgumentException('That item is not available for booking.');
+        return (int)$id;
+    }
+
+    /**
+     * One month of availability for $type (house|tour|food) item $id.
+     * House  : a day is a valid CHECK-IN when the shortest stay starting there (1 night, at the given check-in time)
+     *          has no conflict — the exact houseConflict() call create() makes, so adjacent / same-time turnover
+     *          is allowed exactly as the backend allows it.
+     * Tour   : tourConflict() for that date. Food: foodConflict() (blocked dates only).
+     * $opt   : time (house check-in time), and for tour/food inside a package with a house: win_in, win_in_time,
+     *          win_out -> days outside the house stay are 'outside' (AvailabilityService::packageWindow).
+     * Returns ['type','id','ym','today','days' => [Y-m-d => 'past'|'booked'|'blocked'|'outside'] (free days are absent),
+     *          'window' => null | ['from','to','label']].
+     */
+    public static function availabilityMonth(PDO $pdo, $type, $id, $ym, array $opt = []) {
+        if (!in_array($type, ['house', 'tour', 'food'], true)) throw new InvalidArgumentException('Unknown booking type.');
+        if (!is_string($ym) || !preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) throw new InvalidArgumentException('Please choose a valid month.');
+        $first = DateTime::createFromFormat('!Y-m-d', $ym . '-01');
+        $thisMonth = new DateTime('first day of this month 00:00:00');
+        if (!$first || $first < $thisMonth) throw new InvalidArgumentException('That month is outside the calendar range.');
+        $id = self::availItemCheck($pdo, $type, $id);
+
+        $stay = null;
+        if ($type === 'house') {
+            $t = trim((string)($opt['time'] ?? ''));
+            try { $stay = AvailabilityService::houseStayTimes($t !== '' ? $t : '14:00'); }
+            catch (InvalidArgumentException $e) { throw new InvalidArgumentException('Invalid check-in time.'); }
+        }
+        $window = null;
+        if ($type !== 'house' && !empty($opt['win_in']) && !empty($opt['win_out'])) {
+            $w = AvailabilityService::packageWindow(['check_in' => (string)$opt['win_in'], 'check_in_time' => (string)($opt['win_in_time'] ?? '14:00'), 'check_out' => (string)$opt['win_out']]);
+            if ($w === null) throw new InvalidArgumentException('Please choose a valid house stay first.');
+            $window = ['from' => substr($w['start'], 0, 10), 'to' => substr($w['end'], 0, 10), 'label' => $w['start_label'] . ' to ' . $w['end_label']];
+        }
+
+        $today = new DateTime('today');
+        $days = [];
+        $n = (int)$first->format('t');
+        for ($i = 0; $i < $n; $i++) {
+            $d = (clone $first)->modify('+' . $i . ' days');
+            $ds = $d->format('Y-m-d');
+            if ($d < $today) { $days[$ds] = 'past'; continue; }
+            if ($ds >= self::AVAIL_LAST_DATE) { $days[$ds] = 'outside'; continue; }   // the last representable date cannot start a stay
+            if ($window && ($ds < $window['from'] || $ds > $window['to'])) { $days[$ds] = 'outside'; continue; }
+            if ($type === 'house') {
+                $next = (clone $d)->modify('+1 day')->format('Y-m-d');
+                $msg = AvailabilityService::houseConflict($pdo, $id, $ds, $next, [], [], $stay['in'], $stay['out']);
+            } elseif ($type === 'tour') {
+                $msg = AvailabilityService::tourConflict($pdo, $id, $ds);
+            } else {
+                $msg = AvailabilityService::foodConflict($pdo, $id, $ds);
+            }
+            if ($msg !== null) $days[$ds] = self::availKind($msg);
+        }
+        return ['type' => $type, 'id' => $id, 'ym' => $ym, 'today' => $today->format('Y-m-d'), 'days' => $days ?: new stdClass, 'window' => $window];
+    }
+
+    /**
+     * For a chosen check-in: the LATEST check-out date that keeps the whole stay conflict-free (same houseConflict()
+     * call as create(), same times). A longer stay only ever adds conflicts, so a gallop + binary search over the number
+     * of nights finds it in a handful of checks (max_out = null when nothing limits the stay). Returns ['ok' => true, 'check_in', 'max_out', 'max_nights'] or
+     * ['ok' => false, 'kind' => 'booked'|'blocked'|'past', 'message' => ...] when that check-in itself is not possible.
+     */
+    public static function houseStayRange(PDO $pdo, $houseId, $checkIn, $inTime) {
+        $houseId = self::availItemCheck($pdo, 'house', $houseId);
+        $checkIn = trim((string)$checkIn);
+        if (($e = AvailabilityService::futureDateError($checkIn)) !== null) return ['ok' => false, 'kind' => 'past', 'message' => $e];
+        $t = trim((string)$inTime);
+        try { $stay = AvailabilityService::houseStayTimes($t !== '' ? $t : '14:00'); }
+        catch (InvalidArgumentException $e) { throw new InvalidArgumentException('Invalid check-in time.'); }
+        $start = new DateTime($checkIn);
+        $conflict = function ($nights) use ($pdo, $houseId, $start, $checkIn, $stay) {
+            $out = (clone $start)->modify('+' . (int)$nights . ' days')->format('Y-m-d');
+            return AvailabilityService::houseConflict($pdo, $houseId, $checkIn, $out, [], [], $stay['in'], $stay['out']);
+        };
+        if (($m = $conflict(1)) !== null) {
+            return ['ok' => false, 'kind' => self::availKind($m), 'message' => 'That date is unavailable for this unit.'];
+        }
+        // Longest conflict-free stay. A longer stay only ever adds conflicts, so: gallop (1, 2, 4, 8 ... nights) to
+        // find the first length that conflicts, then binary-search inside that gap. No fixed cap on the stay: if even a
+        // stay running to the last representable date is free, the answer is "no limit" (max_out = null).
+        $limit = (int)$start->diff(new DateTime(self::AVAIL_LAST_DATE))->days;     // nights up to 9999-12-31
+        $lo = 1; $hi = null; $k = 2;
+        while ($lo < $limit) {
+            if ($k > $limit) $k = $limit;
+            if ($conflict($k) !== null) { $hi = $k - 1; break; }
+            $lo = $k;
+            $k *= 2;
+        }
+        if ($hi === null) return ['ok' => true, 'check_in' => $checkIn, 'max_out' => null, 'max_nights' => null];
+        while ($lo < $hi) {
+            $mid = intdiv($lo + $hi + 1, 2);
+            if ($conflict($mid) === null) $lo = $mid; else $hi = $mid - 1;
+        }
+        return ['ok' => true, 'check_in' => $checkIn, 'max_out' => (clone $start)->modify('+' . $lo . ' days')->format('Y-m-d'), 'max_nights' => $lo];
+    }
+
     // --------------------------------------------------------- item builders
     // Each builder validates one item and returns a plan array; nothing is written yet.
 

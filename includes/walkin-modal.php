@@ -98,8 +98,35 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     .wk-summary { border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; font-size: 14px; } .wk-summary div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; } .wk-summary span:first-child { color: #64748b; }
     .wk-err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 10px; padding: 10px 12px; font-size: 13px; margin-bottom: 12px; display: none; } .wk-err.show { display: block; }
     .wk-done { text-align: center; padding: 18px 6px; } .wk-done .big { font-size: 44px; color: #10b981; } .wk-done .ref { font-size: 20px; font-weight: 800; color: #0B2447; margin: 8px 0; letter-spacing: .5px; }
+    /* availability calendar (walk-in) — the server (AvailabilityService) decides every state; this only draws it */
+    .wk-datebtn { width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; background: #fafafa; box-sizing: border-box; text-align: left; cursor: pointer; color: #1e293b; font-family: inherit; display: flex; align-items: center; gap: 8px; min-height: 42px; }
+    .wk-datebtn::before { content: "\f073"; font-family: "Font Awesome 5 Free", "Font Awesome 6 Free", FontAwesome; font-weight: 900; color: #4DA6D9; }
+    .wk-datebtn.empty { color: #64748b; } .wk-datebtn:focus-visible { outline: 2px solid #4DA6D9; outline-offset: 1px; }
+    .wk-cal { border: 1px solid #dbe4f0; border-radius: 12px; padding: 10px; margin: 0 0 12px; background: #fff; max-width: 100%; box-sizing: border-box; overflow: hidden; }
+    .wk-cal-hint { font-size: 13px; color: #475569; padding: 6px 4px; line-height: 1.5; }
+    .wk-cal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .wk-cal-title { font-size: 14px; color: #0B2447; text-align: center; flex: 1; }
+    .wk-cal-nav { width: 36px; height: 36px; border-radius: 50%; border: 1px solid #dbe4f0; background: #f8fbff; color: #0B2447; font-size: 18px; line-height: 1; cursor: pointer; flex-shrink: 0; padding: 0; }
+    .wk-cal-nav:disabled { opacity: .35; cursor: not-allowed; }
+    .wk-cal-dow, .wk-cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+    .wk-cal-dow span { text-align: center; font-size: 11px; font-weight: 700; color: #64748b; padding: 2px 0; }
+    .wk-d { position: relative; height: 40px; min-width: 0; border: 1px solid #bbf7d0; background: #f0fdf4; color: #14532d; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; padding: 0; font-family: inherit; }
+    .wk-d.pad { visibility: hidden; border: 0; background: none; cursor: default; }
+    .wk-d.booked { background: #fee2e2; border-color: #fecaca; color: #991b1b; cursor: not-allowed; text-decoration: line-through; }
+    .wk-d.blocked { background: #e2e8f0; border-color: #cbd5e1; color: #475569; cursor: not-allowed; background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(100,116,139,.22) 4px 6px); }
+    .wk-d.past, .wk-d.outside, .wk-d.over { background: #f8fafc; border-color: #eef2f7; color: #b6c0cd; cursor: not-allowed; }
+    .wk-d.range { background: #dbeafe; border-color: #bfdbfe; color: #1e3a8a; }
+    .wk-d.sel { background: #0B3D91; border-color: #0B3D91; color: #fff; text-decoration: none; }
+    .wk-d.today { box-shadow: inset 0 0 0 2px #f59e0b; }
+    .wk-d:focus-visible { outline: 2px solid #4DA6D9; outline-offset: 1px; z-index: 1; }
+    .wk-cal-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 10px; font-size: 12px; color: #475569; }
+    .wk-cal-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .wk-cal-legend i { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #cbd5e1; display: inline-block; flex-shrink: 0; }
+    .wk-cal-legend .l-free { background: #f0fdf4; border-color: #bbf7d0; } .wk-cal-legend .l-booked { background: #fee2e2; border-color: #fecaca; } .wk-cal-legend .l-blocked { background: #e2e8f0; background-image: repeating-linear-gradient(45deg, transparent 0 3px, rgba(100,116,139,.3) 3px 5px); } .wk-cal-legend .l-sel { background: #0B3D91; border-color: #0B3D91; } .wk-cal-legend .l-today { background: #fff; box-shadow: inset 0 0 0 2px #f59e0b; }
+    .wk-cal-msg { margin-top: 8px; font-size: 12.5px; font-weight: 600; color: #b91c1c; min-height: 0; overflow-wrap: anywhere; } .wk-cal-msg.info { color: #1e40af; } .wk-cal-msg:empty { display: none; }
+    .wk-cal.loading .wk-cal-grid { opacity: .55; }
     .wk-hide { display: none !important; }
-    @media (max-width: 600px) { .wk-row { grid-template-columns: 1fr; } .wk-types { grid-template-columns: repeat(2, 1fr); } #walkinModal .modal-content { width: 100%; max-height: 100vh; height: 100vh; border-radius: 0; } .wk-head, .wk-body, .wk-foot { padding-left: 14px; padding-right: 14px; } .wk-steps { padding: 10px 14px 0; } .wk-btn { flex: 1; } }
+    @media (max-width: 600px) { .wk-d { height: 42px; } .wk-row { grid-template-columns: 1fr; } .wk-types { grid-template-columns: repeat(2, 1fr); } #walkinModal .modal-content { width: 100%; max-height: 100vh; height: 100vh; border-radius: 0; } .wk-head, .wk-body, .wk-foot { padding-left: 14px; padding-right: 14px; } .wk-steps { padding: 10px 14px 0; } .wk-btn { flex: 1; } }
 </style>
 
 <div class="modal" id="walkinModal" aria-hidden="true">
@@ -171,9 +198,10 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     <div class="wk-sec wk-hide" id="wkSecHouse"><h4><i class="fas fa-home"></i> House</h4>
                         <div class="wk-field"><label>House <span class="req">*</span></label><select name="house_id" id="wkHouse"></select></div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Check-in <span class="req">*</span></label><input type="date" name="check_in" id="wkIn" min="<?php echo $wk_today; ?>"></div>
-                            <div class="wk-field"><label>Check-out <span class="req">*</span></label><input type="date" name="check_out" id="wkOut" min="<?php echo $wk_today; ?>"></div>
+                            <div class="wk-field"><label>Check-in <span class="req">*</span></label><input type="hidden" name="check_in" id="wkIn" value=""><button type="button" class="wk-datebtn" id="wkInBtn" data-empty="Select check-in date"></button></div>
+                            <div class="wk-field"><label>Check-out <span class="req">*</span></label><input type="hidden" name="check_out" id="wkOut" value=""><button type="button" class="wk-datebtn" id="wkOutBtn" data-empty="Select check-out date"></button></div>
                         </div>
+                        <div class="wk-cal" id="wkCalHouse" data-cal="house"></div>
                         <div class="wk-row">
                             <div class="wk-field"><label>Check-in time</label><input type="time" name="check_in_time" id="wkInTime" value="14:00"></div>
                             <div class="wk-field"><label><i class="fas fa-lock"></i> Check-out time <small>(automatic)</small></label><input type="time" name="check_out_time" id="wkOutTime" value="14:00" readonly tabindex="-1" aria-readonly="true" class="wk-locked"><small class="wk-lock-note">Checkout time follows the check-in time.</small></div>
@@ -186,9 +214,10 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                         <div class="wk-stay-note wk-hide" data-for="tour"></div>
                         <div class="wk-field"><label>Boat / tour <span class="req">*</span></label><select name="tour_id" id="wkTour"></select></div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Tour date <span class="req">*</span></label><input type="date" name="tour_date" id="wkTourDate" min="<?php echo $wk_today; ?>"></div>
+                            <div class="wk-field"><label>Tour date <span class="req">*</span></label><input type="hidden" name="tour_date" id="wkTourDate" value=""><button type="button" class="wk-datebtn" id="wkTourDateBtn" data-empty="Select tour date"></button></div>
                             <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="tour_time" id="wkTourTime" value="08:00"></div>
                         </div>
+                        <div class="wk-cal" id="wkCalTour" data-cal="tour"></div>
                         <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkTourCap"></small></label><input type="number" name="tour_guests" min="1" value="1"></div>
                     </div>
 
@@ -198,9 +227,10 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                         <div class="wk-field wk-hide" id="wkSizeWrap"><label>Size <span class="req">*</span></label><select name="size_variant" id="wkSize"></select></div>
                         <div class="wk-field"><label>Quantity <span class="req">*</span></label><input type="number" name="food_quantity" id="wkQty" min="1" max="<?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>" step="1" value="1" inputmode="numeric"></div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Date <span class="req">*</span></label><input type="date" name="food_date" id="wkFoodDate" min="<?php echo $wk_today; ?>"></div>
+                            <div class="wk-field"><label>Date <span class="req">*</span></label><input type="hidden" name="food_date" id="wkFoodDate" value=""><button type="button" class="wk-datebtn" id="wkFoodDateBtn" data-empty="Select date"></button></div>
                             <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="food_time" id="wkFoodTime" value="12:00"></div>
                         </div>
+                        <div class="wk-cal" id="wkCalFood" data-cal="food"></div>
                         <div class="wk-row">
                             <div class="wk-field"><label>Pickup or delivery</label><select name="fulfillment" id="wkFulfil"><option value="pickup">Pickup</option><option value="delivery">Delivery</option></select></div>
                             <div class="wk-field wk-hide" id="wkAddrWrap"><label>Delivery location</label><small class="wk-lock-note" style="font-size:12px;color:#475569;">Delivery goes to the guest's own confirmed house stay, during that stay only. Otherwise choose Pickup.</small></div>
@@ -364,6 +394,239 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         });
     });
 
+    // ---------- availability calendars (House stay · Tour/Boat · Food)
+    // GUIDANCE ONLY. Every state (booked / blocked / outside the house stay) comes from
+    // booking-management.php?walkin_availability=1, which asks AvailabilityService — the same calls create()
+    // makes. No availability rule lives here, and create() still re-checks everything inside its transaction.
+    var WK_TODAY = '<?php echo $wk_today; ?>';
+    var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    function ymAdd(ym, n) { var y = parseInt(ym.slice(0, 4), 10), m = parseInt(ym.slice(5, 7), 10) - 1 + n; y += Math.floor(m / 12); m = ((m % 12) + 12) % 12; return y + '-' + ('0' + (m + 1)).slice(-2); }
+    var YM_NOW = WK_TODAY.slice(0, 7), YM_MAX = '9999-12';   // no booking horizon: only the last representable month ends the calendar
+    function setHidden(el, v) { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }
+    var MSG_LOAD_FAIL = 'Availability could not be loaded. You can still pick a date; the system checks again when you create the booking.';
+
+    function makeCal(cfg) {
+        var box = cfg.box, st = { ym: '', view: null, cache: {}, req: 0, rangeReq: 0, data: null, loading: false, maxOut: '', rkey: '', pend: 0, keepYm: '' };
+        var dow = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(function (d) { return '<span>' + d + '</span>'; }).join('');
+        box.innerHTML = '<div class="wk-cal-hint wk-hide"></div><div class="wk-cal-main">' +
+            '<div class="wk-cal-head"><button type="button" class="wk-cal-nav" data-nav="-1" aria-label="Previous month">&lsaquo;</button><strong class="wk-cal-title"></strong><button type="button" class="wk-cal-nav" data-nav="1" aria-label="Next month">&rsaquo;</button></div>' +
+            '<div class="wk-cal-dow" aria-hidden="true">' + dow + '</div><div class="wk-cal-grid"></div>' +
+            '<div class="wk-cal-legend"><span><i class="l-free"></i>Available</span><span><i class="l-booked"></i>Unavailable</span><span><i class="l-blocked"></i>Blocked</span><span><i class="l-sel"></i>Selected</span><span><i class="l-today"></i>Today</span></div></div>' +
+            '<div class="wk-cal-msg" role="status" aria-live="polite"></div>';
+        var hint = box.querySelector('.wk-cal-hint'), main = box.querySelector('.wk-cal-main'), title = box.querySelector('.wk-cal-title'),
+            grid = box.querySelector('.wk-cal-grid'), msg = box.querySelector('.wk-cal-msg'), prev = box.querySelector('[data-nav="-1"]'), next = box.querySelector('[data-nav="1"]');
+
+        function say(t, info) { msg.textContent = t || ''; msg.classList.toggle('info', !!info); }
+        function getJson(url) { return fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); }); }
+        function stateOf(ds) { if (ds < WK_TODAY) return 'past'; return (st.data && st.data.days && st.data.days[ds]) || ''; }
+        function startYm() {
+            var c = cfg.ctx(), v = cfg.field.value, ym = v ? v.slice(0, 7) : (c.from ? c.from.slice(0, 7) : (st.keepYm || YM_NOW));   // chosen date > house-stay start > the month already being browsed
+            return ym < YM_NOW ? YM_NOW : (ym > YM_MAX ? YM_MAX : ym);
+        }
+
+        function cls(ds, code, s) {
+            if (cfg.range) {
+                if (ds === s.a || ds === s.b) return 'sel';
+                if (s.a && s.b && ds > s.a && ds < s.b) return 'range';
+                if (s.a && !s.b && ds > s.a && code !== 'past') {            // choosing the check-out: only the stay limit matters
+                    if (st.maxOut && ds > st.maxOut) return 'over';
+                    return '';
+                }
+            } else if (ds === s.a) return 'sel';
+            return code;
+        }
+        function render() {
+            var c = cfg.ctx();
+            hint.classList.toggle('wk-hide', !c.hint); main.classList.toggle('wk-hide', !!c.hint);
+            if (c.hint) { hint.textContent = c.hint; return; }
+            if (!st.ym) st.ym = startYm();
+            var ym = st.ym, y = parseInt(ym.slice(0, 4), 10), m = parseInt(ym.slice(5, 7), 10);
+            title.textContent = MONTHS[m - 1] + ' ' + y;
+            prev.disabled = ym <= YM_NOW; next.disabled = ym >= YM_MAX;
+            box.classList.toggle('loading', st.loading);
+            var s = cfg.range ? { a: cfg.field.value, b: cfg.out.value } : { a: cfg.field.value };
+            var first = new Date(y, m - 1, 1).getDay(), n = new Date(y, m, 0).getDate(), h = '';
+            for (var i = 0; i < first; i++) h += '<span class="wk-d pad" aria-hidden="true"></span>';
+            for (var d = 1; d <= n; d++) {
+                var ds = ym + '-' + ('0' + d).slice(-2), code = stateOf(ds), k = cls(ds, code, s);
+                var dis = (k === 'past' || k === 'booked' || k === 'blocked' || k === 'outside' || k === 'over');
+                var lbl = wkMonthLbl(ds) + ' — ' + (k === 'sel' ? 'selected' : k === 'range' ? 'in your stay' : k === 'booked' ? 'unavailable' : k === 'blocked' ? 'blocked' : k === 'past' ? 'past date' : k === 'outside' ? 'outside the house stay' : k === 'over' ? 'beyond the available stay' : 'available');
+                h += '<button type="button" class="wk-d ' + k + (ds === WK_TODAY ? ' today' : '') + '" data-d="' + ds + '" aria-disabled="' + (dis ? 'true' : 'false') + '" aria-label="' + lbl + '"' + (k === 'sel' ? ' aria-pressed="true"' : '') + '>' + d + '</button>';
+            }
+            grid.innerHTML = h;
+        }
+
+        function afterLoad() {
+            if (cfg.range || !st.data) return;
+            var v = cfg.field.value;
+            if (v && v.slice(0, 7) === st.data.ym && st.data.days[v]) {      // the chosen date is no longer selectable (resource/window changed, or booked meanwhile)
+                var code = st.data.days[v];
+                setHidden(cfg.field, '');
+                say('Your selected ' + cfg.noun + ' date is no longer available (' + (code === 'outside' ? 'it is outside the house stay' : code === 'past' ? 'it has passed' : code === 'blocked' ? 'blocked' : 'already booked') + '). Please choose another date.');
+                render();
+            }
+        }
+        function load(force) {
+            var c = cfg.ctx();
+            if (c.hint) { st.data = null; st.loading = false; render(); return; }
+            if (!st.ym) st.ym = startYm();
+            var key = c.key + '|' + st.ym, hit = st.cache[key];
+            if (!force && hit && Date.now() - hit.t < 60000) { st.data = hit.data; st.loading = false; render(); afterLoad(); return; }
+            var my = ++st.req; st.loading = true; st.data = null; render();
+            function fail(e) { if (my !== st.req) return; st.loading = false; st.data = null; say(e || MSG_LOAD_FAIL); render(); }
+            getJson('booking-management.php?walkin_availability=1&' + c.qs + '&ym=' + encodeURIComponent(st.ym))
+                .then(function (j) {
+                    if (my !== st.req) return;                               // a newer request superseded this one
+                    if (!j || !j.ok) { fail(j && j.error ? j.error : null); return; }
+                    st.loading = false; st.data = j; st.cache[key] = { t: Date.now(), data: j };
+                    render(); afterLoad();
+                })
+                .catch(function () { fail(null); });
+        }
+
+        // ---- House: longest valid stay for a chosen check-in (server: houseConflict binary search)
+        function rangeCall(ci) {
+            var t = (val('check_in_time') || '14:00').slice(0, 5);
+            return getJson('booking-management.php?walkin_availability=1&mode=range&id=' + encodeURIComponent(val('house_id')) + '&check_in=' + encodeURIComponent(ci) + '&time=' + encodeURIComponent(t))
+                .catch(function () { say(MSG_LOAD_FAIL); return { ok: true, max_out: '' }; });
+        }
+        function startStay(ds) {
+            var my = ++st.rangeReq; st.pend++; say('Checking availability…', true);
+            rangeCall(ds).then(function (j) {
+                st.pend = Math.max(0, st.pend - 1);
+                if (my !== st.rangeReq) return;
+                if (!j || !j.ok) { say((j && j.message) || cfg.deny('booked')); return; }
+                if (cfg.out.value) setHidden(cfg.out, '');
+                st.maxOut = j.max_out || ''; st.rkey = cfg.ctx().key + '|' + ds;
+                setHidden(cfg.field, ds);
+                say(st.maxOut ? 'Now choose a check-out date (latest: ' + wkMonthLbl(st.maxOut) + ').' : 'Now choose a check-out date.', true);
+                render();
+            });
+        }
+        function revalidate(force) {
+            var a = cfg.field.value, b = cfg.out.value, c = cfg.ctx();
+            if (!a || c.hint) { st.maxOut = ''; return; }
+            var rk = c.key + '|' + a;
+            if (!force && rk === st.rkey) return;
+            var my = ++st.rangeReq;
+            rangeCall(a).then(function (j) {
+                if (my !== st.rangeReq) return;
+                st.rkey = rk;
+                if (!j || !j.ok) {
+                    if (b) setHidden(cfg.out, '');
+                    setHidden(cfg.field, ''); st.maxOut = ''; st.rkey = '';
+                    say('The selected check-in date is no longer available for this unit and time. Please choose another date.');
+                } else {
+                    st.maxOut = j.max_out || '';
+                    if (b && st.maxOut && b > st.maxOut) { setHidden(cfg.out, ''); say('Your selected stay overlaps an unavailable period. Choose a new check-out date.'); }
+                }
+                render();
+            });
+        }
+
+        function pick(ds) {
+            if (st.loading || st.pend > 0) { say('Checking availability…', true); return; }      // ignore clicks while a lookup is in flight
+            var code = stateOf(ds);
+            if (!cfg.range) {
+                if (code) { say(cfg.deny(code)); return; }
+                say(''); setHidden(cfg.field, ds); return;
+            }
+            var a = cfg.field.value, b = cfg.out.value;
+            if (a && !b && ds > a) {                                          // second click: check-out
+                if (st.maxOut && ds > st.maxOut) { say('Your selected stay overlaps an unavailable period.'); return; }
+                say(''); setHidden(cfg.out, ds); return;
+            }
+            if (code) { say(cfg.deny(code)); return; }                          // otherwise: a (new) check-in
+            startStay(ds);
+        }
+        grid.addEventListener('click', function (e) { var b = e.target.closest('.wk-d[data-d]'); if (b) pick(b.getAttribute('data-d')); });
+        box.addEventListener('click', function (e) {
+            var nv = e.target.closest('[data-nav]'); if (!nv || nv.disabled) return;
+            var n = ymAdd(st.ym, parseInt(nv.getAttribute('data-nav'), 10));
+            if (n < YM_NOW || n > YM_MAX) return;
+            st.ym = n; say(''); load(true);          // paging months always asks the server again
+        });
+
+        return {
+            // re-read context (resource / time / house window); reload only what changed
+            sync: function (force) {
+                var c = cfg.ctx();
+                if (c.noRes) { if (cfg.field.value) setHidden(cfg.field, ''); if (cfg.out && cfg.out.value) setHidden(cfg.out, ''); st.maxOut = ''; st.rkey = ''; }
+                if (c.view !== st.view) { st.view = c.view; st.keepYm = st.ym; st.ym = ''; st.maxOut = ''; st.rkey = ''; say(''); }
+                if (force) { st.cache = {}; st.rkey = ''; }
+                load(false);
+                if (cfg.range) revalidate(!!force);
+            },
+            render: render,
+            say: say,
+            focus: function () { try { box.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (x) { box.scrollIntoView(); } },
+            reset: function () { st.req++; st.rangeReq++; st.pend = 0; st.cache = {}; st.data = null; st.ym = ''; st.view = null; st.keepYm = ''; st.maxOut = ''; st.rkey = ''; st.loading = false; say(''); render(); }
+        };
+    }
+
+    function stayCtx(kind, noun) {
+        var id = val(kind + '_id');
+        if (!id) return { noRes: true, view: 'none', key: 'none', hint: 'Choose a ' + noun + ' first to see its available dates.' };
+        var w = wkWindow();
+        if (S.type === 'package' && activeItems().indexOf('house') !== -1 && !w) return { view: kind + id + '|nowin', key: kind + id + '|nowin', hint: 'Select the house stay first. The ' + kind + ' date must fall within it.' };
+        var wq = w ? '&win_in=' + encodeURIComponent(w.a) + '&win_time=' + encodeURIComponent(w.t) + '&win_out=' + encodeURIComponent(w.b) : '';
+        var v = kind + id + '|' + (w ? w.a + w.b + w.t : '');
+        return { view: v, key: v, qs: 'type=' + kind + '&id=' + encodeURIComponent(id) + wq, from: w ? (w.a > WK_TODAY ? w.a : WK_TODAY) : '' };
+    }
+    function outsideMsg() { var w = wkWindow(); return w ? 'That date is outside the house stay (' + w.label + ').' : 'That date is outside the house stay.'; }
+    var cals = {
+        house: makeCal({ box: $('wkCalHouse'), field: $('wkIn'), out: $('wkOut'), range: true, noun: 'check-in',
+            ctx: function () {
+                var id = val('house_id');
+                if (!id) return { noRes: true, view: 'none', key: 'none', hint: 'Choose a house first to see its available dates.' };
+                var t = (val('check_in_time') || '14:00').slice(0, 5);
+                return { view: 'house' + id, key: 'house' + id + '|' + t, qs: 'type=house&id=' + encodeURIComponent(id) + '&time=' + encodeURIComponent(t) };
+            },
+            deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : 'That date is unavailable for this unit.'; } }),
+        tour: makeCal({ box: $('wkCalTour'), field: $('wkTourDate'), range: false, noun: 'tour',
+            ctx: function () { return stayCtx('tour', 'boat'); },
+            deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : c === 'outside' ? outsideMsg() : c === 'blocked' ? 'This date is blocked for this boat.' : 'This boat is already booked on this date.'; } }),
+        food: makeCal({ box: $('wkCalFood'), field: $('wkFoodDate'), range: false, noun: 'food',
+            ctx: function () { return stayCtx('food', 'food package'); },
+            deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : c === 'outside' ? outsideMsg() : 'That date is unavailable for this food item.'; } })
+    };
+    function syncBtns() {
+        [['wkIn', 'wkInBtn'], ['wkOut', 'wkOutBtn'], ['wkTourDate', 'wkTourDateBtn'], ['wkFoodDate', 'wkFoodDateBtn']].forEach(function (p) {
+            var v = $(p[0]).value, b = $(p[1]);
+            b.textContent = v ? wkMonthLbl(v) : b.getAttribute('data-empty'); b.classList.toggle('empty', !v);
+        });
+    }
+    function calsRefresh(force) {
+        var items = activeItems();
+        ['house', 'tour', 'food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(force); });
+    }
+    function windowCalsRefresh() { var items = activeItems(); ['tour', 'food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(false); }); }
+    $('wkHouse').addEventListener('change', function () { cals.house.sync(false); windowCalsRefresh(); });
+    $('wkTour').addEventListener('change', function () { cals.tour.sync(false); });
+    $('wkFood').addEventListener('change', function () { cals.food.sync(false); });
+    var wkTimeTimer = null;
+    function onInTime() { clearTimeout(wkTimeTimer); wkTimeTimer = setTimeout(function () { if (activeItems().indexOf('house') !== -1) cals.house.sync(false); windowCalsRefresh(); }, 300); }
+    $('wkInTime').addEventListener('input', onInTime); $('wkInTime').addEventListener('change', onInTime);
+    ['wkIn', 'wkOut'].forEach(function (id) { $(id).addEventListener('change', function () { syncBtns(); cals.house.render(); windowCalsRefresh(); }); });
+    $('wkTourDate').addEventListener('change', function () { syncBtns(); cals.tour.render(); });
+    $('wkFoodDate').addEventListener('change', function () { syncBtns(); cals.food.render(); });
+    q('.wk-type').forEach(function (t) { t.addEventListener('click', function () { calsRefresh(false); }); });
+    q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', function () { calsRefresh(false); }); });
+    $('wkInBtn').addEventListener('click', function () {
+        if (val('check_out')) setHidden($('wkOut'), '');
+        if (val('check_in')) setHidden($('wkIn'), '');                    // start over: the next click is a new check-in
+        cals.house.say(val('house_id') ? 'Choose an available check-in date.' : '', true); cals.house.focus();
+    });
+    $('wkOutBtn').addEventListener('click', function () {
+        if (!val('check_in')) { cals.house.say('Choose an available check-in date.', true); cals.house.focus(); return; }
+        if (val('check_out')) setHidden($('wkOut'), '');
+        cals.house.say('Choose a check-out date.', true); cals.house.focus();
+    });
+    $('wkTourDateBtn').addEventListener('click', function () { cals.tour.focus(); });
+    $('wkFoodDateBtn').addEventListener('click', function () { cals.food.focus(); });
+    function calsReset() { ['wkIn', 'wkOut', 'wkTourDate', 'wkFoodDate'].forEach(function (id) { $(id).value = ''; }); ['house', 'tour', 'food'].forEach(function (k) { cals[k].reset(); }); syncBtns(); }
+    syncBtns();
+
     // ---------- guest step
     window.wkMode = function (m) {
         S.mode = m; $('wkGuestMode').value = m;
@@ -410,6 +673,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         back.textContent = n === 1 ? 'Cancel' : 'Back';
         next.textContent = n === 3 ? 'Create Booking' : 'Next'; next.className = 'wk-btn ' + (n === 3 ? 'ok' : 'primary'); next.disabled = false;
         setErr('');
+        if (n === 2) calsRefresh(true);          // fresh data every time the booking step is shown
     }
     function validPhone(v) { var d = String(v).replace(/[^0-9]/g, ''); if (d.indexOf('63') === 0 && d.length === 12) d = d.slice(2); if (d.charAt(0) === '0') d = d.slice(1); return /^9[0-9]{9}$/.test(d); }
     function validate(n) {
@@ -501,13 +765,13 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                 $('wkDoneMsg').innerHTML = esc(j.guest) + ' · ' + peso(j.total) + '<br>' + esc(j.payment_message || '');
                 S.done = true; showStep('done');
             })
-            .catch(function (err) { setErr(err.message || 'Something went wrong.'); btn.disabled = false; btn.textContent = 'Create Booking'; })
+            .catch(function (err) { setErr(err.message || 'Something went wrong.'); btn.disabled = false; btn.textContent = 'Create Booking'; calsRefresh(true); })
             .then(function () { S.busy = false; });
     }
 
     function newNonce() { var a = new Uint8Array(12); (window.crypto || window.msCrypto).getRandomValues(a); return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
     function wkReset() {
-        form.reset(); wkSyncOut(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
+        form.reset(); calsReset(); wkSyncOut(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
         $('wkNonce').value = newNonce(); $('wkSizeWrap').classList.add('wk-hide'); $('wkAddrWrap').classList.add('wk-hide'); $('wkAddrAuto').classList.add('wk-hide'); $('wkGcashWrap').classList.add('wk-hide');
         q('#wkPay label').forEach(function (l, i) { l.classList.toggle('on', i === 0); });
         wkMode('new'); syncSections(); wkSyncWindow(); showStep(1);

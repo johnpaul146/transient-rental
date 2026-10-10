@@ -374,6 +374,29 @@ if (isset($_GET['walkin_guest_search']) && $can_manage_booking) {
     exit();
 }
 
+// Walk-in availability calendar (admin + staff only, read-only JSON). The answers come from AvailabilityService via
+// WalkInBookingService; the booking itself is still re-checked server-side when it is created.
+if (isset($_GET['walkin_availability'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    if (!$can_manage_booking) { http_response_code(403); echo json_encode(['ok' => false, 'error' => 'You do not have permission to perform this action.']); exit(); }
+    $wkGet = function (string $k): string { return isset($_GET[$k]) && is_string($_GET[$k]) ? trim($_GET[$k]) : ''; };
+    try {
+        if ($wkGet('mode') === 'range') {
+            echo json_encode(WalkInBookingService::houseStayRange($pdo, $wkGet('id'), $wkGet('check_in'), $wkGet('time')));
+        } else {
+            $wkOpt = ['time' => $wkGet('time'), 'win_in' => $wkGet('win_in'), 'win_in_time' => $wkGet('win_time'), 'win_out' => $wkGet('win_out')];
+            echo json_encode(['ok' => true] + WalkInBookingService::availabilityMonth($pdo, $wkGet('type'), $wkGet('id'), $wkGet('ym'), $wkOpt));
+        }
+    } catch (InvalidArgumentException $e) {
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    } catch (Throwable $e) {
+        error_log('walkin availability failed: ' . $e->getMessage());
+        echo json_encode(['ok' => false, 'error' => 'Availability could not be loaded.']);
+    }
+    exit();
+}
+
 if (isset($_POST['create_walkin_booking']) && $can_manage_booking) {
     header('Content-Type: application/json; charset=utf-8');
     try {

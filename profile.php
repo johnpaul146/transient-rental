@@ -1382,8 +1382,8 @@ background-position: center top;
         .btn-edit-feedback { background: #f59e0b; color: #0B2447; }
         .btn-edit-feedback:hover { background: #d97706; }
 
-        .btn-rebook-link { background: #f59e0b; color: #0B2447; padding: 5px 14px; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; line-height: 1.4; min-height: 28px; }
-        .btn-rebook-link:hover { background: #d97706; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3); color: #0B2447; text-decoration: none; }
+        .btn-rebook-link { background: #4DA6D9; color: white; padding: 5px 14px; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; line-height: 1.4; min-height: 28px; }
+        .btn-rebook-link:hover { background: #3a8bbf; transform: translateY(-2px); color: white; text-decoration: none; }
         .btn-rebook-link:disabled, .btn-rebook-link.disabled { background: #cbd5e1; color: #94a3b8; cursor: not-allowed; pointer-events: none; transform: none; box-shadow: none; }
 
         .btn-cancel-rebook { background: #f59e0b; color: #0B2447; padding: 5px 12px; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; min-height: 28px; }
@@ -1420,7 +1420,7 @@ background-position: center top;
         .booking-card-mobile .btn-more { background: linear-gradient(135deg, #4DA6D9, #3a8bbf); color: white; box-shadow: 0 4px 12px rgba(77, 166, 217, 0.25); }
         .booking-card-mobile .btn-confirm-mobile { background: #10b981; color: white; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25); }
         .booking-card-mobile .btn-reject-mobile { background: #ef4444; color: white; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25); }
-        .booking-card-mobile .btn-rebook-confirm-mobile { background: linear-gradient(135deg, #8b5cf6, #a78bfa); color: white; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.25); }
+        .booking-card-mobile .btn-rebook-confirm-mobile { background: linear-gradient(135deg, #4DA6D9, #2b8bc4); color: white; }
         .booking-card-mobile .btn-pay-mobile { background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25); }
         .booking-card-mobile .btn-cancel-booking-mobile { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25); }
         .booking-card-mobile .btn-rebook-svc-mobile { background: linear-gradient(135deg, #4DA6D9, #2b8bc4); color: white; }

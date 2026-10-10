@@ -417,6 +417,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 </div>
 
 <?php if ($blockReason === null && $ORIGINAL_NIGHTS >= 1): ?>
+<?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
 <script>
 (function () {
     var BOOKING_ID = <?php echo (int)$booking_id; ?>;
@@ -424,6 +425,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var NIGHTS = <?php echo (int)$ORIGINAL_NIGHTS; ?>;
+    var CUR_IN = <?php echo json_encode(pr_dt($booking['check_in_date'], $times['in'])); ?>, CUR_OUT = <?php echo json_encode(pr_dt($booking['check_out_date'], $times['out'])); ?>;   // for the confirmation step only
     var grid = document.getElementById('calGrid'), title = document.getElementById('calTitle');
     var note = document.getElementById('calNote'), prev = document.getElementById('preview');
     var btn = document.getElementById('submitBtn'), hidden = document.getElementById('newDate'), pax = document.getElementById('guests');
@@ -497,7 +499,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     document.getElementById('calPrev').addEventListener('click', function () { m--; if (m < 0) { m = 11; y--; } load(); });
     document.getElementById('calNext').addEventListener('click', function () { m++; if (m > 11) { m = 0; y++; } load(); });
     document.getElementById('rebookForm').addEventListener('submit', function (e) {
-        if (!hidden.value || btn.disabled) { e.preventDefault(); return; }
+        if (!hidden.value || btn.disabled || !plan) { e.preventDefault(); return; }
+        if (!RebookConfirm.gate(e, [
+            { label: 'Check-in', from: CUR_IN, to: fd(plan.in) + (plan.in_time ? ' · ' + ft(plan.in_time) : '') },
+            { label: 'Check-out', from: CUR_OUT, to: fd(plan.out) + (plan.out_time ? ' · ' + ft(plan.out_time) : '') }
+        ])) return;                                   // first click opens the confirmation; the confirmed submit continues below
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';   // one click = one request
     });
     load();

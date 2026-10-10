@@ -291,10 +291,16 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 </div>
 
 <?php if ($blockReason === null && $startDate): ?>
+<?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
 <script>
 (function () {
     var PKG_ID = <?php echo (int)$pkg_id; ?>;
     var CURRENT = <?php echo json_encode($startDate); ?>;
+    var CUR = <?php echo json_encode([
+        'house' => $h ? pr_dt($h['check_in_date'], $h['check_in_time'] ?: '14:00:00') . ' to ' . pr_dt($h['check_out_date'], $h['check_out_time'] ?: '12:00:00') : null,
+        'tour'  => $t ? pr_dt($t['booking_date'], $t['preferred_time'] ?: null) : null,
+        'food'  => $f ? pr_dt($f['preferred_date'], $f['preferred_time'] ?: null) : null,
+    ]); ?>, lastPlan = null;   // confirmation step only
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var grid = document.getElementById('calGrid'), title = document.getElementById('calTitle');
@@ -333,6 +339,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             .catch(function () { note.textContent = 'Could not load availability. Please refresh.'; });
     }
     function showPlan(plan) {
+        lastPlan = plan;
         var h = '<h3><i class="fas fa-calendar-check"></i> New schedule</h3>';
         if (plan.house) h += '<div class="row"><i class="fas fa-home"></i> House: ' + fd(plan.house.in) + ' ' + ft(plan.house.in_time) + ' to ' + fd(plan.house.out) + ' ' + ft(plan.house.out_time) + '</div>';
         if (plan.tour) h += '<div class="row"><i class="fas fa-ship"></i> Tour: ' + fd(plan.tour.date) + (plan.tour.time ? ' · ' + ft(plan.tour.time) : '') + '</div>';
@@ -346,7 +353,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             note.textContent = ds < TODAY ? 'That date has passed.' : (ds > MAXD ? 'Please choose a date within the next 12 months.' : ((info && info.message) || 'Not available.'));
             return;
         }
-        selected = ds; hidden.value = ds; btn.disabled = true; note.textContent = 'Checking ' + fd(ds) + '…'; prev.style.display = 'none';
+        selected = ds; lastPlan = null; hidden.value = ds; btn.disabled = true; note.textContent = 'Checking ' + fd(ds) + '…'; prev.style.display = 'none';
         draw(cache[ym]);
         fetch('package-rebook.php?id=' + PKG_ID + '&ajax=preview&date=' + ds, { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
@@ -359,7 +366,14 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     });
     document.getElementById('calPrev').addEventListener('click', function () { m--; if (m < 0) { m = 11; y--; } load(); });
     document.getElementById('calNext').addEventListener('click', function () { m++; if (m > 11) { m = 0; y++; } load(); });
-    document.getElementById('rebookForm').addEventListener('submit', function (e) { if (!hidden.value) e.preventDefault(); });
+    document.getElementById('rebookForm').addEventListener('submit', function (e) {
+        if (!hidden.value || !lastPlan) { e.preventDefault(); return; }
+        var p = lastPlan, rows = [];
+        if (p.house) rows.push({ label: 'House', from: CUR.house || '', to: fd(p.house.in) + ' · ' + ft(p.house.in_time) + ' to ' + fd(p.house.out) + ' · ' + ft(p.house.out_time) });
+        if (p.tour) rows.push({ label: 'Tour', from: CUR.tour || '', to: fd(p.tour.date) + (p.tour.time ? ' · ' + ft(p.tour.time) : '') });
+        if (p.food) rows.push({ label: 'Food', from: CUR.food || '', to: fd(p.food.date) + (p.food.time ? ' · ' + ft(p.food.time) : '') });
+        RebookConfirm.gate(e, rows);
+    });
     load();
 })();
 </script>
