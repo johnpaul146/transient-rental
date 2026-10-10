@@ -503,59 +503,23 @@ if (!file_exists('uploads/payments/')) {
 // ============================================================
 
 // ---- REBOOK BOOKING ----
+// Legacy POST route. The guest dashboard is rebook.php; this route now runs the same
+// server-side rules (RebookService::requestHouseRebook): only check_in and guests are read,
+// checkout/total/times are always derived from the original booking.
 if(isset($_POST['rebook_booking'])) {
     try {
         $booking_id = (int)($_POST['booking_id'] ?? 0);
         $check_in = (string)($_POST['check_in'] ?? '');
-        $check_out = (string)($_POST['check_out'] ?? '');
         $guests = (int)($_POST['guests'] ?? 0);
 
-        $stmt = $pdo->prepare("SELECT b.*, h.capacity FROM house_bookings b JOIN houses h ON h.id = b.house_id WHERE b.id = ?");
-        $stmt->execute([$booking_id]);
-        $original_booking = $stmt->fetch();
-        if(!$original_booking) throw new Exception("Booking not found");
-        if($guests < 1) throw new Exception("Please enter the number of guests.");
-        if(!empty($original_booking['capacity']) && $guests > (int)$original_booking['capacity']) {
-            throw new Exception("This house accommodates up to " . (int)$original_booking['capacity'] . " guests.");
-        }
+        // State-changing route: the profile page CSRF token is required (checked before anything is read or written).
+        if (!hash_equals($profile_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page and try again.");
+        $gst = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
+        $gst->execute([$_SESSION['user_id']]);
+        $guest_row_id = (int)$gst->fetchColumn();
+        if ($guest_row_id <= 0) throw new Exception("Guest profile not found.");
 
-        $message = '';
-        if(!canRebook($pdo, $booking_id, $_SESSION['user_id'], $message)) throw new Exception($message);
-
-        $check_in_date = new DateTime($check_in);
-        $check_out_date = new DateTime($check_out);
-        $today = new DateTime(); $today->setTime(0, 0, 0);
-
-        if($check_in_date < $today) throw new Exception("Check-in date cannot be in the past.");
-        if($check_out_date <= $check_in_date) throw new Exception("Check-out must be after check-in.");
-
-        $booked_dates = getBookedDates($pdo, $original_booking['house_id'], $booking_id);
-        foreach($booked_dates as $booked) {
-            $booked_in = new DateTime($booked['check_in_date']);
-            $booked_out = new DateTime($booked['check_out_date']);
-            if($check_in_date < $booked_out && $check_out_date > $booked_in) throw new Exception("Selected dates are not available.");
-        }
-
-        $nights = $check_out_date->diff($check_in_date)->days;
-        $orig_nights = (new DateTime($original_booking['check_out_date']))->diff(new DateTime($original_booking['check_in_date']))->days;
-        // House price is per NIGHT (not per guest): keep the booked nightly rate.
-        $price_per_night = $orig_nights > 0 ? $original_booking['total_amount'] / $orig_nights : $original_booking['total_amount'];
-        $total = round($price_per_night * $nights, 2);
-
-        // The payment already received stays on this booking (carried forward); no new reservation fee.
-        $stmt = $pdo->prepare("UPDATE house_bookings SET 
-            previous_check_in_date = ?, previous_check_out_date = ?,
-            previous_number_of_guests = ?, previous_total_amount = ?, previous_booking_status = ?,
-            check_in_date = ?, check_out_date = ?, number_of_guests = ?, total_amount = ?,
-            booking_status = 'pending',
-            rebook_count = COALESCE(rebook_count, 0) + 1,
-            rebooked_at = NOW(), rebook_confirmed_at = NULL
-            WHERE id = ? AND guest_id = ?");
-        $stmt->execute([
-            $original_booking['check_in_date'], $original_booking['check_out_date'],
-            $original_booking['number_of_guests'], $original_booking['total_amount'], $original_booking['booking_status'],
-            $check_in, $check_out, $guests, $total, $booking_id, $original_booking['guest_id']
-        ]);
+        $res = RebookService::requestHouseRebook($pdo, $booking_id, $guest_row_id, $check_in, $guests);
 
         try { EmailNotifications::sendRebookAlert($booking_id, $pdo); } catch (Throwable $mailEx) {}
 
@@ -564,20 +528,11 @@ if(isset($_POST['rebook_booking'])) {
                 $pdo,
                 'rebook',
                 'booking',
-                "Guest rebooked house booking '{$original_booking['reference_number']}' — new dates: {$check_in} to {$check_out} ({$nights} nights)",
+                "Guest requested a rebook for house booking '{$res['reference']}' — new dates: {$res['new_in']} to {$res['new_out']} ({$res['nights']} nights)",
                 (int)$booking_id,
                 'house_booking',
-                [
-                    'old_check_in'  => $original_booking['check_in_date'],
-                    'old_check_out' => $original_booking['check_out_date'],
-                    'old_total'     => $original_booking['total_amount']
-                ],
-                [
-                    'new_check_in'  => $check_in,
-                    'new_check_out' => $check_out,
-                    'new_total'     => $total,
-                    'new_guests'    => $guests
-                ]
+                ['old_check_in' => $res['old_in'], 'old_check_out' => $res['old_out'], 'old_total' => $res['old_total']],
+                ['new_check_in' => $res['new_in'], 'new_check_out' => $res['new_out'], 'new_total' => $res['total'], 'new_guests' => $res['guests']]
             );
         }
 
@@ -1493,22 +1448,6 @@ background-position: center top;
         .badge-danger { background: #fee2e2; color: #ef4444; }
 
         /* REBOOK POLICY POPUP */
-        .rebook-policy-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px; overflow-y: auto; }
-        .rebook-policy-overlay.show { display: flex; }
-        .rebook-policy-popup { background: white; border-radius: 24px; max-width: 500px; width: 100%; max-height: 90vh; overflow-y: auto; padding: 35px 30px; box-shadow: 0 30px 80px rgba(0,0,0,0.3); text-align: center; }
-        .rebook-policy-popup .popup-icon { font-size: 60px; color: #f59e0b; margin-bottom: 15px; }
-        .rebook-policy-popup h3 { font-size: 22px; font-weight: 700; color: #1e293b; margin-bottom: 10px; }
-        .rebook-policy-popup p { color: #64748b; font-size: 14px; line-height: 1.7; margin-bottom: 20px; }
-        .rebook-policy-popup .policy-list { text-align: left; background: #f8fafc; padding: 15px 20px; border-radius: 12px; margin: 15px 0; }
-        .rebook-policy-popup .policy-list li { color: #475569; font-size: 13px; padding: 5px 0; list-style: none; }
-        .rebook-policy-popup .policy-list li i { margin-right: 8px; }
-        .rebook-policy-popup .policy-list li i.check { color: #10b981; }
-        .rebook-policy-popup .policy-list li i.info { color: #3b82f6; }
-        .rebook-policy-popup .btn-proceed { padding: 12px 25px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 15px; flex: 1; min-width: 140px; }
-        .rebook-policy-popup .btn-proceed:hover { transform: translateY(-2px); }
-        .rebook-policy-popup .btn-cancel-popup { padding: 12px 25px; background: #64748b; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 15px; flex: 1; min-width: 140px; }
-        .rebook-policy-popup .btn-cancel-popup:hover { background: #475569; }
-        .rebook-policy-popup .popup-actions { display: flex; justify-content: center; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
 
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); z-index: 9999; align-items: center; justify-content: center; padding: 20px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
         .modal.show { display: flex; }
@@ -1745,9 +1684,6 @@ background-position: center top;
             #termsAcceptForm { padding: 12px 16px 14px; }
             .terms-checkbox-label { font-size: 12px; padding: 10px 12px; }
             .terms-accept-btn { font-size: 13px; padding: 12px; }
-            .rebook-policy-popup { padding: 25px 20px; }
-            .rebook-policy-popup .popup-icon { font-size: 48px; }
-            .rebook-policy-popup h3 { font-size: 19px; }
         }
         @media (max-width: 480px) {
             body { font-size: 13px; }
@@ -2018,7 +1954,7 @@ Manage your reservations, payments, and vacation plans in one place.
     <?php if(isset($_GET['rebooked']) && $_GET['rebooked'] === 'service'): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebooked! Your new date is confirmed. The amount already paid is carried forward — no new reservation fee.</span></div>
     <?php elseif(isset($_GET['rebooked'])): ?>
-    <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebook submitted! Waiting for admin confirmation.</span></div>
+    <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebook request submitted! Your new dates stay pending until staff confirms them. If the request is not approved, your original dates are restored. The amount already paid is carried forward.</span></div>
     <?php endif; ?>
     <?php if(isset($_GET['rebook_cancelled'])): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Pending rebook cancelled! Your original booking has been restored.</span></div>
@@ -2390,15 +2326,9 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             <?php if($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && !$pending_rebook): ?>
                                                 <?php if($rb['is_eligible']): ?>
                                                     <div class="action-row">
-                                                        <button class="btn-rebook-link" onclick="showRebookPolicyPopup(
-                                                            '<?php echo $booking['id']; ?>',
-                                                            '<?php echo htmlspecialchars($booking['house_name']); ?>',
-                                                            '<?php echo htmlspecialchars($booking['reference_number']); ?>',
-                                                            <?php echo $rb['remaining_rebooks']; ?>,
-                                                            <?php echo $rb['days_remaining']; ?>
-                                                        )">
+                                                        <a href="rebook.php?booking_id=<?php echo (int)$booking['id']; ?>" class="btn-rebook-link">
                                                             <i class="fas fa-redo"></i> Rebook
-                                                        </button>
+                                                        </a>
                                                     </div>
                                                 <?php else: ?>
                                                     <div class="action-row">
@@ -2526,16 +2456,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                     <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
                                     <?php endif; ?>
                                 <?php elseif($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && $rb['is_eligible']): ?>
-                                    <button type="button" class="btn-card-action btn-rebook-confirm-mobile"
-                                            onclick="showRebookPolicyPopup(
-                                                '<?php echo $booking['id']; ?>',
-                                                '<?php echo htmlspecialchars($booking['house_name']); ?>',
-                                                '<?php echo htmlspecialchars($booking['reference_number']); ?>',
-                                                <?php echo $rb['remaining_rebooks']; ?>,
-                                                <?php echo $rb['days_remaining']; ?>
-                                            )">
-                                        <i class="fas fa-redo"></i> Rebook
-                                    </button>
+                                    <a href="rebook.php?booking_id=<?php echo (int)$booking['id']; ?>" class="btn-card-action btn-rebook-confirm-mobile"><i class="fas fa-redo"></i> Rebook</a>
                                 <?php elseif($booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking) && !$rb['is_eligible']): ?>
                                     <button type="button" class="btn-card-action" disabled
                                             style="background:#cbd5e1; color:#94a3b8; cursor:not-allowed;"
@@ -3308,15 +3229,9 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             </div>
                                             <?php if($booking['booking_status'] === 'cancelled' && PaymentService::amounts($booking)['paid'] > 0 && $rb['is_eligible']): ?>
                                                 <div class="action-row">
-                                                    <button class="btn-rebook-link" onclick="showRebookPolicyPopup(
-                                                        '<?php echo $booking['id']; ?>',
-                                                        '<?php echo htmlspecialchars($booking['house_name']); ?>',
-                                                        '<?php echo htmlspecialchars($booking['reference_number']); ?>',
-                                                        <?php echo $rb['remaining_rebooks']; ?>,
-                                                        <?php echo $rb['days_remaining']; ?>
-                                                    )">
+                                                    <a href="rebook.php?booking_id=<?php echo (int)$booking['id']; ?>" class="btn-rebook-link">
                                                         <i class="fas fa-redo"></i> Rebook
-                                                    </button>
+                                                    </a>
                                                 </div>
                                             <?php endif; ?>
                                             <div class="action-row" style="margin-top:6px;">
@@ -3818,50 +3733,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
             <span id="viewBookingReference">N/A</span>
         </div>
         <div id="viewBookingContent"></div>
-    </div>
-</div>
-
-<!-- REBOOK POLICY POPUP -->
-<div class="rebook-policy-overlay" id="rebookPolicyPopup">
-    <div class="rebook-policy-popup">
-        <div class="popup-icon"><i class="fas fa-info-circle"></i></div>
-        <h3>📋 Rebook Policy</h3>
-        <p>Please read the rebooking policy carefully before proceeding:</p>
-        <div class="policy-list">
-            <li><i class="fas fa-check-circle check"></i> <strong>Maximum of 2 rebooks</strong> per booking</li>
-            <li><i class="fas fa-clock info"></i> <strong>Within 7 days</strong> from booking date</li>
-            <li><i class="fas fa-check-circle check"></i> House, Tour, Food and Package bookings that are <strong>confirmed or cancelled with money received</strong> can be rebooked — completed bookings cannot</li>
-            <li><i class="fas fa-info-circle info"></i> The <strong>amount already paid is carried forward</strong> — no second ₱1,000 reservation fee, no refund</li>
-            <li><i class="fas fa-clock info"></i> Status will be <strong>pending</strong> until admin confirms</li>
-        </div>
-
-        <div style="background:#f1f5f9; padding:14px 16px; border-radius:12px; margin:15px 0;">
-            <div style="display:flex; justify-content:space-between; font-size:13px; color:#475569; margin-bottom:8px;">
-                <span><i class="fas fa-redo"></i> Rebooks Used</span>
-                <span><strong id="popupRebookCount">0</strong> / 2</span>
-            </div>
-            <div style="height:8px; background:#e2e8f0; border-radius:10px; overflow:hidden;">
-                <div id="popupRebookBar" style="height:100%; width:0%; background:linear-gradient(90deg,#f59e0b,#fbbf24); transition:width 0.3s;"></div>
-            </div>
-        </div>
-
-        <div style="background:#eff6ff; padding:12px 16px; border-radius:12px; margin:15px 0;">
-            <div style="display:flex; justify-content:space-between; font-size:13px; color:#1e40af;">
-                <span><i class="fas fa-clock"></i> Days Remaining to Rebook</span>
-                <span><strong id="popupDaysRemaining">0</strong> days</span>
-            </div>
-        </div>
-
-        <div style="background:#f8fafc;padding:15px;border-radius:12px;margin:15px 0;">
-            <p style="margin:0;font-size:14px;color:#1e293b;">
-                <strong>Booking:</strong> <span id="popupHouseName"></span><br>
-                <strong>Reference:</strong> <span id="popupReference"></span>
-            </p>
-        </div>
-        <div class="popup-actions">
-            <button class="btn-proceed" onclick="proceedToRebook()"><i class="fas fa-redo"></i> Proceed to Rebook</button>
-            <button class="btn-cancel-popup" onclick="closeRebookPolicyPopup()"><i class="fas fa-times"></i> Cancel</button>
-        </div>
     </div>
 </div>
 
@@ -4847,41 +4718,6 @@ function closeViewBookingModal() {
 }
 
 // ============================================================
-// REBOOK POLICY POPUP
-// ============================================================
-var rebookBookingId = null;
-
-function showRebookPolicyPopup(bookingId, houseName, reference, remainingRebooks, daysRemaining) {
-    rebookBookingId = bookingId;
-    document.getElementById('popupHouseName').textContent = houseName;
-    document.getElementById('popupReference').textContent = reference;
-
-    const used = 2 - remainingRebooks;
-    document.getElementById('popupRebookCount').textContent = used;
-    document.getElementById('popupDaysRemaining').textContent = daysRemaining;
-
-    const bar = document.getElementById('popupRebookBar');
-    if (bar) bar.style.width = (used / 2 * 100) + '%';
-
-    document.getElementById('rebookPolicyPopup').classList.add('show');
-    document.body.style.overflow = 'hidden';
-}
-
-function closeRebookPolicyPopup() {
-    document.getElementById('rebookPolicyPopup').classList.remove('show');
-    document.body.style.overflow = 'auto';
-    rebookBookingId = null;
-}
-
-function proceedToRebook() {
-    if (rebookBookingId) {
-        window.location.href = 'rebook.php?booking_id=' + rebookBookingId;
-    } else {
-        alert('Booking ID not found. Please try again.');
-    }
-}
-
-// ============================================================
 // TAB SWITCHING
 // ============================================================
 function showTab(tab) {
@@ -5307,9 +5143,6 @@ window.onclick = function(event) {
         event.target.classList.remove('show');
         document.body.style.overflow = 'auto';
     }
-    if(event.target.classList.contains('rebook-policy-overlay')) {
-        closeRebookPolicyPopup();
-    }
 }
 
 document.addEventListener('keydown', function(event) {
@@ -5323,7 +5156,6 @@ document.addEventListener('keydown', function(event) {
             closeLogoutModal(); return;
         }
         document.querySelectorAll('.modal.show').forEach(function(modal) { modal.classList.remove('show'); });
-        closeRebookPolicyPopup();
         closeViewBookingModal();
         closeCancelRebookModal();
         closeCancelBookingModal();

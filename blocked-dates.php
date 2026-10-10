@@ -3,6 +3,7 @@ session_start();
 date_default_timezone_set('Asia/Manila'); // same timezone as the other admin pages
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
+require_once 'includes/admin-layout.php';
 require_once 'includes/AvailabilityService.php';
 
 // ✅ Load SystemLogger
@@ -275,13 +276,6 @@ $stmt = $pdo->query("SELECT section_name, content_key, content_value FROM site_c
 while($row = $stmt->fetch()) {
     $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 }
-
-$nav_logo = 'uploads/logos/logo.png';
-if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) {
-    $nav_logo = $content['site_settings']['logo_path'];
-}
-$nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
 
 $user_info = [];
 try {
@@ -704,38 +698,61 @@ try {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/admin-layout.css?v=<?php echo (int)@filemtime(__DIR__ . '/assets/css/admin-layout.css'); ?>">
     <style>
+        /* Page values that differ from assets/css/admin-layout.css (kept so this page looks exactly as before).
+           Delete a line to adopt the shared default. */
+        .sidebar-close-btn { transition: all; }
+        .sidebar-close-btn:hover { transform: none; }
+        .sidebar-header .role-badge { letter-spacing: inherit; }
+        .nav-link.active i { color: inherit; }
+        .sidebar-overlay { transition: all; }
+        .menu-toggle { transition: all; box-shadow: none; }
+        .menu-toggle:hover { background: rgb(11, 36, 71); transform: none; }
+        body.sidebar-open-mobile .menu-toggle { transform: none; }
+        .main-content { transition: all; }
+        .top-bar .user-profile { display: flex; align-items: center; gap: 15px; flex-shrink: 1; }
+        .top-bar .user-profile .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, rgb(77, 166, 217), rgb(123, 184, 240)); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 18px; border: 2px solid rgba(77, 166, 217, 0.2); flex-shrink: 0; overflow: visible; box-shadow: none; }
+        .top-bar .user-profile .avatar img { width: auto; height: auto; object-fit: fill; border-radius: 0px; }
+        .top-bar .user-profile .user-name { color: rgb(11, 36, 71); font-weight: 600; font-size: 14px; }
+        .top-bar .user-profile .user-role { color: rgb(74, 106, 140); font-size: 12px; }
+        @media (max-width: 1024px) {
+            .sidebar { top: 0px; left: auto; height: 100vh; width: 280px; box-shadow: rgba(0, 0, 0, 0.2) 4px 0px 20px; padding-top: 25px; }
+            .sidebar.open { box-shadow: rgba(0, 0, 0, 0.2) 4px 0px 20px; }
+            .sidebar-overlay.active { display: block; }
+        }
+        @media (max-width: 768px) {
+            .top-bar { position: static; justify-content: space-between; text-align: inherit; gap: 10px; padding-bottom: 10px; padding-left: 54px; padding-right: 0px; min-height: 48px; }
+            .top-bar .page-title { display: block; flex-direction: row; align-items: normal; gap: normal; width: auto; }
+            .top-bar .page-title h1 { font-size: 17px; display: block; align-items: normal; justify-content: normal; flex-wrap: nowrap; gap: normal; margin: 0px; }
+            .top-bar .page-title h1 > i { font-size: inherit; }
+            .top-bar .page-title p { font-size: 13px; text-align: inherit; margin: 2px 0px 0px 0px; }
+            .top-bar .user-profile { display: flex !important; }
+        }
+        @media (max-width: 480px) {
+            .menu-toggle { border-radius: 12px; }
+            .sidebar-header .logo .logo-text .main { font-size: 18px; }
+            .sidebar-header .logo .logo-icon { width: 48px; height: 48px; font-size: 22px; }
+            .nav-link { padding: 12px 20px; font-size: 14px; }
+            .nav-link i { font-size: 16px; }
+            .top-bar { padding-left: 50px; padding-right: 0px; min-height: 48px; }
+            .top-bar .page-title h1 { font-size: 15.5px; gap: normal; }
+            .top-bar .page-title h1 > i { font-size: inherit; }
+            .top-bar .page-title p { font-size: 13px; }
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; }
-
-        .app-container { display: flex; min-height: 100vh; }
 
         /* SIDEBAR */
         .sidebar { width: 280px; background: #0B2447; box-shadow: 4px 0 20px rgba(0,0,0,0.2); padding: 25px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 2px solid rgba(77, 166, 217, 0.15); flex-shrink: 0; z-index: 100; transition: transform 0.3s ease; }
         .sidebar::-webkit-scrollbar { width: 5px; }
         .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
-        .sidebar-header { padding: 0 20px 25px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 20px; }
-        .sidebar-header-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .sidebar-header .logo { font-size: 22px; font-weight: 700; color: white; text-decoration: none; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
         .sidebar-header .logo .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: white; flex-shrink: 0; box-shadow: 0 4px 15px rgba(77, 166, 217, 0.3); overflow: hidden; }
-        .sidebar-header .logo .logo-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; background: white; }
-        .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
-        .sidebar-header .logo .logo-text .main { font-size: 18px; font-weight: 700; color: white; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .sidebar-header .logo .logo-text .sub { font-size: 10px; color: #7bb8f0; font-weight: 400; }
         .sidebar-close-btn { display: none; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #e0eeff; width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; flex-shrink: 0; align-items: center; justify-content: center; }
         .sidebar-close-btn:hover { background: #ef4444; border-color: #ef4444; color: white; }
         .sidebar-header .role-badge { display: inline-block; margin-top: 12px; padding: 4px 14px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
-        .sidebar-header .role-badge.admin { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
-        .sidebar-header .role-badge.staff { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-
-        .nav-menu { list-style: none; padding: 0; margin: 0; }
-        .nav-item { margin-bottom: 2px; }
-        .nav-link { display: flex; align-items: center; gap: 14px; padding: 12px 20px; color: #b3d9ff; text-decoration: none; transition: all 0.3s; border-left: 3px solid transparent; font-weight: 500; font-size: 14px; }
-        .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
-        .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
-        .nav-link .nav-badge { margin-left: auto; background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 1px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; }
-        .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
 
         .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 99; opacity: 0; }
         .sidebar-overlay.active { display: block; opacity: 1; }
@@ -747,16 +764,11 @@ try {
             .sidebar { position: fixed; transform: translateX(-100%); z-index: 1000; }
             .sidebar.open { transform: translateX(0); }
             .menu-toggle { display: flex; }
-            .main-content { padding: 70px 16px 20px !important; }
             .sidebar-close-btn { display: flex; }
         }
 
         /* MAIN */
         .main-content { flex: 1; padding: 20px 30px 30px; min-width: 0; width: 100%; }
-        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid rgba(11, 36, 71, 0.1); flex-wrap: wrap; gap: 10px; }
-        .top-bar .page-title h1 { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0; }
-        .top-bar .page-title h1 i { color: #4DA6D9; }
-        .top-bar .page-title p { color: #4a6a8c; font-size: 13px; margin: 2px 0 0 0; }
         .user-profile { display: flex; align-items: center; gap: 15px; }
         .user-profile .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 18px; border: 2px solid rgba(77, 166, 217, 0.2); }
         .user-profile .user-name { color: #0B2447; font-weight: 600; font-size: 14px; }
@@ -787,12 +799,10 @@ try {
     color: #0B2447;
 }
 
-
 .blocked-stats .stat-icon {
     margin-bottom: 14px;
     color: white;
 }
-
 
 /* Icon colors */
 
@@ -821,7 +831,6 @@ try {
     color: #8b5cf6;
 }
 
-
 /* Text */
 
 .blocked-stats .stat-number {
@@ -830,13 +839,11 @@ try {
     font-weight: 800;
 }
 
-
 .blocked-stats .stat-label {
     color: #0B2447;
     font-size: 14px;
     font-weight: 700;
 }
-
 
 .blocked-stats .stat-description {
     color: #64748b;
@@ -978,7 +985,6 @@ try {
             .sidebar { width: 85%; max-width: 300px; }
             .stats-grid { grid-template-columns: 1fr; }
         }
-            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
 
         /* =====================================================
            RESERVATION-STYLE WORKFLOW (overview / list / wizard)
@@ -1139,70 +1145,17 @@ try {
             .main-content .top-bar .user-profile .user-name { max-width: 80px; }
             .main-content .blocked-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
+        .logout-modal-overlay.show { display: flex; }
+        .logout-modal h3 { font-size: 22px; font-weight: 700; color: #991b1b; margin-bottom: 8px; }
+        .logout-modal p { color: #64748b; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
     </style>
     <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
 <div class="app-container">
     <!-- SIDEBAR -->
-    <div class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="sidebar-header-top">
-                <a href="admin-dashboard.php" class="logo">
-                    <div class="logo-icon">
-                        <?php if($nav_logo_exists): ?>
-                            <img src="<?php echo htmlspecialchars($nav_logo); ?>?<?php echo time(); ?>" alt="Logo">
-                        <?php else: ?>
-                            <i class="fas fa-umbrella-beach"></i>
-                        <?php endif; ?>
-                    </div>
-                    <div class="logo-text">
-                        <span class="main">Hundred Islands</span>
-                        <span class="sub">Reservation System</span>
-                    </div>
-                </a>
-                <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <div class="role-badge <?php echo $is_admin ? 'admin' : 'staff'; ?>">
-                <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
-                <?php echo $is_admin ? 'Administrator' : 'Staff'; ?>
-            </div>
-        </div>
-
-        <ul class="nav-menu">
-            <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-th-large"></i><span>Dashboard</span></a></li>
-            <?php if($is_admin): ?>
-            <li class="nav-item"><a href="user-management.php" class="nav-link"><i class="fas fa-users"></i><span>User Management</span></a></li>
-            <?php endif; ?>
-            <li class="nav-item"><a href="house-dashboard.php" class="nav-link"><i class="fas fa-home"></i><span>House Management</span></a></li>
-            <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
-            <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
-            <li class="nav-item"><a href="food-dashboard.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food Management</span></a></li>
-            <li class="nav-item"><a href="booking-management.php" class="nav-link"><i class="fas fa-calendar-check"></i><span>Booking Management</span><?php if($sidebar_pending_bookings > 0): ?><span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span><?php endif; ?></a></li>
-<li class="nav-item">
-    <a href="blocked-dates.php" class="nav-link active">
-        <i class="fas fa-ban"></i>
-        <span>Blocked Dates</span>
-    </a>
-</li>            <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span><?php if($sidebar_pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span><?php endif; ?></a></li>
-            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
-            <?php if($is_admin): ?>
-            <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
-            <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span><?php if($sidebar_failed_logs > 0): ?><span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span><?php endif; ?></a></li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item"><a href="admin-profile.php" class="nav-link"><i class="fas fa-user-circle"></i><span>My Profile</span></a></li>
-            <li class="nav-item"><a href="?logout=1" class="nav-link" onclick="return confirm('Logout?');"><i class="fas fa-sign-out-alt"></i><span>Logout</span></a></li>
-        </ul>
-    </div>
+    <?php admin_layout_sidebar(['active' => 'blocked']); ?>
 
     <!-- MAIN CONTENT -->
     <div class="main-content">
@@ -1559,6 +1512,8 @@ try {
         </form>
     </div>
 </div>
+
+<?php admin_layout_footer(); ?>
 
 <script>
 // ============================================================
@@ -2006,20 +1961,7 @@ document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
     if (document.getElementById('blockModal').classList.contains('show')) closeBlockWizard();
     if (document.getElementById('unblockModal').classList.contains('show')) closeUnblock();
-    var sb = document.getElementById('sidebar');
-    if (sb && sb.classList.contains('open')) toggleSidebar();
 });
-
-// ============================================================
-// SIDEBAR
-// ============================================================
-function toggleSidebar() {
-    var sidebar = document.getElementById('sidebar');
-    var overlay = document.getElementById('sidebarOverlay');
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    document.body.classList.toggle('sidebar-open-mobile');
-}
 
 // Auto-dismiss alerts
 setTimeout(function() {

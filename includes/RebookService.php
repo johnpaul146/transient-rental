@@ -179,6 +179,150 @@ class RebookService {
     }
 
     // ------------------------------------------------------------------
+    // HOUSE — guest REQUESTS a rebook (rebook.php). Rules unchanged: 2 per booking, 7-day window,
+    // same number of nights, check-in/check-out TIMES stay exactly as saved on the booking (the guest never
+    // edits a time), payment carried forward, status 'pending' until confirmHouseRebook() above.
+    // ------------------------------------------------------------------
+
+    /** Why this house booking cannot be rebooked right now, or null if it can. $b = the house_bookings row. */
+    public static function houseBlockReason(array $b) {
+        if (!empty($b['original_booking_id'])) return 'This is an old rebooking record.';
+        if (!empty($b['package_id'])) return 'This house is part of a package. Rebook the whole package instead.';
+        if (($b['booking_status'] ?? '') === 'pending' && !empty($b['rebooked_at']) && empty($b['rebook_confirmed_at'])) {
+            return 'A rebook request for this booking is already waiting for confirmation. You can cancel it from your dashboard if you want to choose other dates.';
+        }
+        if (!in_array($b['booking_status'] ?? '', ['confirmed', 'cancelled'], true)) {
+            return 'Only confirmed bookings or paid cancelled reservations can be rebooked (completed stays cannot).';
+        }
+        if (PaymentService::amounts($b)['paid'] <= 0) return 'Only bookings with a paid reservation fee can be rebooked.';
+        $count = (int)($b['rebook_count'] ?? 0);
+        if ($count >= self::MAX_REBOOKS) {
+            return 'You have already rebooked this booking ' . $count . ' time(s). Maximum of ' . self::MAX_REBOOKS . ' rebooks allowed per booking.';
+        }
+        if (self::daysLeft($b) <= 0) {
+            $when = !empty($b['created_at']) ? ' (' . date('M d, Y', strtotime(substr((string)$b['created_at'], 0, 10))) . ')' : '';
+            return 'Rebook option expired. You can only rebook within ' . self::WINDOW_DAYS . ' days from booking date' . $when . '. The amount already paid is carried forward when you rebook.';
+        }
+        return null;
+    }
+
+    /** The house row plus its name and capacity (display + guest-count limit). */
+    public static function houseView(PDO $pdo, array $b) {
+        $b['house_name'] = ''; $b['capacity'] = 0;
+        try {
+            $n = $pdo->prepare('SELECT house_name, capacity FROM houses WHERE id = ?'); $n->execute([(int)$b['house_id']]);
+            if ($h = $n->fetch(PDO::FETCH_ASSOC)) { $b['house_name'] = (string)$h['house_name']; $b['capacity'] = (int)$h['capacity']; }
+        } catch (PDOException $e) {}
+        return $b;
+    }
+
+    /** Saved check-in / check-out times of the booking ('HH:MM:SS'). A rebook never changes them. */
+    public static function houseTimes(array $b) {
+        $t = function ($v, $default) {
+            $v = trim((string)$v);
+            if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?/', $v)) return $default;
+            $v = substr($v, 0, 8);
+            return strlen($v) === 5 ? $v . ':00' : $v;
+        };
+        return ['in' => $t($b['check_in_time'] ?? '', '14:00:00'), 'out' => $t($b['check_out_time'] ?? '', '12:00:00')];
+    }
+
+    /** Number of nights of the booking as saved (this is the LOCKED stay length). */
+    public static function houseNights(array $b) {
+        return (int)(new DateTime(substr((string)$b['check_out_date'], 0, 10)))->diff(new DateTime(substr((string)$b['check_in_date'], 0, 10)))->days;
+    }
+
+    /**
+     * Turn an availability message into text that is safe for a guest: other guests' booking references and
+     * the owner's internal block notes are never shown. Dates are fine (the calendar already shows them).
+     */
+    public static function houseSafeMessage($msg) {
+        $msg = (string)$msg;
+        if (preg_match('/^Already reserved from (.+?) to (.+?) \(booking /', $msg, $m)) {
+            return 'The house is already reserved from ' . $m[1] . ' to ' . $m[2] . '.';
+        }
+        if (preg_match('/^(.+?) is blocked/', $msg, $m)) return $m[1] . ' is not available (blocked by the owner).';
+        return $msg;
+    }
+
+    const SAME_DATE_MESSAGE = 'Please choose a different check-in date.';
+
+    /**
+     * Would a stay starting on $newIn work? Same checks requestHouseRebook() makes (no locks — display only; the
+     * real check runs again inside the transaction). The check-out DATE is always check-in + the original nights.
+     * Returns ['ok' => bool, 'message' => string, 'plan' => ['in','out','in_time','out_time','nights','old_in','old_out']|null].
+     */
+    public static function houseDateCheck(PDO $pdo, array $b, $newIn) {
+        try { $new = self::parseDate($newIn); }
+        catch (InvalidArgumentException $e) { return ['ok' => false, 'message' => $e->getMessage(), 'plan' => null]; }
+        $nights = self::houseNights($b);
+        $times = self::houseTimes($b);
+        $in = $new->format('Y-m-d');
+        $out = (clone $new)->modify('+' . $nights . ' days')->format('Y-m-d');
+        $plan = ['in' => $in, 'out' => $out, 'in_time' => $times['in'], 'out_time' => $times['out'], 'nights' => $nights,
+                 'old_in' => substr((string)$b['check_in_date'], 0, 10), 'old_out' => substr((string)$b['check_out_date'], 0, 10)];
+        if ($nights < 1) return ['ok' => false, 'message' => 'This booking has no stay length to move.', 'plan' => $plan];
+        if ($in === $plan['old_in']) return ['ok' => false, 'message' => self::SAME_DATE_MESSAGE, 'plan' => $plan];
+        $m = AvailabilityService::houseConflict($pdo, $b['house_id'], $in, $out, [$b['id']], [$b['reference_number']], $times['in'], $times['out']);
+        if ($m) return ['ok' => false, 'message' => self::houseSafeMessage($m), 'plan' => $plan];
+        return ['ok' => true, 'message' => '', 'plan' => $plan];
+    }
+
+    /**
+     * Guest requests new dates for a house booking. Everything is decided HERE from the saved booking: the nights,
+     * the times, the price and the payment fields are never taken from the browser — only the new check-in date and
+     * the number of guests are. The booking becomes 'pending' (owner/staff confirm or reject in Booking Management);
+     * the previous dates are backed up so a rejection or a guest cancel restores them. No money is touched.
+     * Returns ['reference','house_name','old_in','old_out','new_in','new_out','nights','guests','total','rebook_count'].
+     * Throws AvailabilityConflictException / RuntimeException / InvalidArgumentException (guest-safe messages).
+     */
+    public static function requestHouseRebook(PDO $pdo, $bookingId, $guestId, $newIn, $guests) {
+        $new = self::parseDate($newIn);
+        $pdo->beginTransaction();
+        try {
+            $b = self::lockBooking($pdo, 'house_bookings', $bookingId);
+            if ((int)$b['guest_id'] !== (int)$guestId) throw new RuntimeException('Booking not found.');
+            if ($why = self::houseBlockReason($b)) throw new RuntimeException($why);
+            $v = self::houseView($pdo, $b);
+            $guests = (int)$guests;
+            if ($guests < 1) throw new InvalidArgumentException('Please enter the number of guests.');
+            if ($v['capacity'] > 0 && $guests > $v['capacity']) throw new InvalidArgumentException('This house accommodates up to ' . $v['capacity'] . ' guests.');
+
+            $nights = self::houseNights($b);
+            if ($nights < 1) throw new RuntimeException('This booking has no stay length to move.');
+            $times = self::houseTimes($b);
+            $in = $new->format('Y-m-d');
+            // Choosing the stay's current check-in date is not a rebook: nothing is changed, nothing is counted.
+            if ($in === substr((string)$b['check_in_date'], 0, 10)) throw new InvalidArgumentException(self::SAME_DATE_MESSAGE);
+            $out = (clone $new)->modify('+' . $nights . ' days')->format('Y-m-d');
+            AvailabilityService::lockItem($pdo, 'house', $b['house_id']);
+            $m = AvailabilityService::houseConflict($pdo, $b['house_id'], $in, $out, [$b['id']], [$b['reference_number']], $times['in'], $times['out']);
+            if ($m) throw new AvailabilityConflictException(self::houseSafeMessage($m));
+
+            // House price is per NIGHT; guests never multiply it and the nights never change, so the total stays the same.
+            $ppn = $nights > 0 ? $b['total_amount'] / $nights : $b['total_amount'];
+            $total = round($ppn * $nights, 2);
+            $up = $pdo->prepare("UPDATE house_bookings SET
+                    previous_check_in_date = ?, previous_check_out_date = ?, previous_number_of_guests = ?,
+                    previous_total_amount = ?, previous_booking_status = ?,
+                    check_in_date = ?, check_out_date = ?, number_of_guests = ?, total_amount = ?,
+                    booking_status = 'pending', rebook_count = COALESCE(rebook_count, 0) + 1,
+                    rebooked_at = NOW(), rebook_confirmed_at = NULL
+                  WHERE id = ? AND guest_id = ? AND booking_status IN ('confirmed','cancelled')");
+            $up->execute([$b['check_in_date'], $b['check_out_date'], $b['number_of_guests'], $b['total_amount'], $b['booking_status'],
+                          $in, $out, $guests, $total, (int)$b['id'], (int)$b['guest_id']]);
+            if ($up->rowCount() !== 1) throw new RuntimeException('This booking changed while you were rebooking. Please refresh and try again.');
+            $pdo->commit();
+            return ['reference' => $b['reference_number'], 'house_name' => $v['house_name'], 'old_in' => $b['check_in_date'], 'old_out' => $b['check_out_date'],
+                    'old_guests' => $b['number_of_guests'], 'old_total' => $b['total_amount'],
+                    'new_in' => $in, 'new_out' => $out, 'nights' => $nights, 'guests' => $guests, 'total' => $total, 'rebook_count' => (int)($b['rebook_count'] ?? 0) + 1];
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // TOUR / FOOD / PACKAGE — guest picks a new date
     // ------------------------------------------------------------------
 

@@ -2,6 +2,7 @@
 session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
+require_once 'includes/admin-layout.php';
 
 // ============================================================
 // ✅ NEW: Load SystemLogger
@@ -508,9 +509,6 @@ try {
     while($row = $stmt->fetch()) $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 } catch(PDOException $e) { $content = []; }
 
-$nav_logo = 'uploads/logos/logo.png';
-if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) $nav_logo = $content['site_settings']['logo_path'];
-$nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
 $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
 ?>
 <!DOCTYPE html>
@@ -522,42 +520,53 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/admin-layout.css?v=<?php echo (int)@filemtime(__DIR__ . '/assets/css/admin-layout.css'); ?>">
     <style>
+        /* Page values that differ from assets/css/admin-layout.css (kept so this page looks exactly as before).
+           Delete a line to adopt the shared default. */
+        .sidebar { transition: all; }
+        .sidebar-header .logo .logo-icon { box-shadow: none; }
+        .sidebar-header .logo .logo-text .main { letter-spacing: inherit; }
+        .sidebar-close-btn { transition: all; }
+        .sidebar-header .role-badge { letter-spacing: inherit; }
+        .sidebar-header .role-badge.admin { border: 0px none rgb(239, 68, 68); }
+        .sidebar-header .role-badge.staff { border: 0px none rgb(251, 191, 36); }
+        .menu-toggle { transition: all; box-shadow: none; }
+        body.sidebar-open-mobile .menu-toggle { transform: none; }
+        .main-content { transition: all; }
+        .top-bar .page-title p { margin: 0px 0px 1rem 0px; }
+        .top-bar .user-profile .avatar { box-shadow: none; }
+        .mobile-avatar { width: auto; height: auto; border-radius: 0px; background: rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box; align-items: normal; justify-content: normal; color: inherit; font-weight: inherit; font-size: inherit; border: 0px none rgb(11, 36, 71); flex-shrink: 1; overflow: visible; box-shadow: none; }
+        .mobile-avatar img { width: auto; height: auto; object-fit: fill; border-radius: 0px; }
+        .badge { letter-spacing: inherit; }
+        .btn-logout-cancel:hover { background: rgb(226, 232, 240); }
+        .btn-logout-confirm:hover { box-shadow: none; color: rgb(10, 88, 202); }
+        @media (max-width: 1024px) {
+            .sidebar { box-shadow: rgba(0, 0, 0, 0.2) 4px 0px 20px; }
+        }
+        @media (max-width: 480px) {
+            .menu-toggle { border-radius: 12px; }
+            .sidebar-header .logo .logo-text .main { font-size: 18px; }
+            .sidebar-header .logo .logo-icon { width: 48px; height: 48px; font-size: 22px; }
+            .nav-link { padding: 12px 20px; font-size: 14px; }
+            .nav-link i { font-size: 16px; }
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; overflow-x: hidden; }
-        .app-container { display: flex; min-height: 100vh; }
 
         /* SIDEBAR */
         .sidebar { width: 280px; background: #0B2447; box-shadow: 4px 0 20px rgba(0,0,0,0.2); padding: 25px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 2px solid rgba(77, 166, 217, 0.15); z-index: 100; flex-shrink: 0; }
         .sidebar::-webkit-scrollbar { width: 5px; }
         .sidebar::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
         .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
-        .sidebar-header { padding: 0 20px 25px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 20px; }
-        .sidebar-header-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .sidebar-header .logo { font-size: 22px; font-weight: 700; color: white; text-decoration: none; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
         .sidebar-header .logo .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: white; flex-shrink: 0; overflow: hidden; }
-        .sidebar-header .logo .logo-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; background: white; }
-        .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
         .sidebar-header .logo .logo-text .main { font-size: 18px; font-weight: 700; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .sidebar-header .logo .logo-text .sub { font-size: 10px; color: #7bb8f0; }
         .sidebar-close-btn { display: none; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #e0eeff; width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; flex-shrink: 0; align-items: center; justify-content: center; }
         .sidebar-close-btn:hover { background: #ef4444; border-color: #ef4444; color: white; transform: rotate(90deg); }
         .sidebar-header .role-badge { display: inline-block; margin-top: 12px; padding: 4px 14px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
         .sidebar-header .role-badge.admin { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
         .sidebar-header .role-badge.staff { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
-
-        .nav-menu { list-style: none; padding: 0; margin: 0; }
-        .nav-item { margin-bottom: 2px; }
-        .nav-link { display: flex; align-items: center; gap: 14px; padding: 12px 20px; color: #b3d9ff; text-decoration: none; transition: all 0.3s; border-left: 3px solid transparent; font-weight: 500; font-size: 14px; }
-        .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
-        .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active i { color: #7bb8f0; }
-        .nav-link .nav-badge { margin-left: auto; background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 1px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; }
-        .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
-
-        .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 99; opacity: 0; transition: opacity 0.3s ease; }
-        .sidebar-overlay.active { display: block; opacity: 1; }
 
         .menu-toggle { display: none; position: fixed; top: 12px; left: 12px; z-index: 1001; background: #0B2447; color: white; border: none; border-radius: 12px; width: 48px; height: 48px; font-size: 22px; cursor: pointer; align-items: center; justify-content: center; border: 1px solid rgba(77, 166, 217, 0.2); }
         .menu-toggle:hover { background: rgba(77, 166, 217, 0.2); transform: scale(1.05); }
@@ -569,25 +578,15 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             .sidebar { position: fixed; top: 0; left: 0; height: 100vh; transform: translateX(-100%); width: 280px; z-index: 1000; padding-top: 25px; }
             .sidebar.open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,0.4); }
             .menu-toggle { display: flex; }
-            .sidebar-overlay.active { display: block; }
-            .main-content { padding: 70px 16px 20px !important; }
             .sidebar-close-btn { display: flex; }
         }
         @media (max-width: 480px) {
             .sidebar { width: 85%; max-width: 300px; }
             .menu-toggle { width: 42px; height: 42px; font-size: 18px; top: 10px; left: 10px; }
-            .main-content { padding: 60px 12px 16px !important; }
         }
 
         .main-content { flex: 1; padding: 20px 30px 30px; min-width: 0; width: 100%; }
-
-        /* TOP BAR */
-        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid rgba(11, 36, 71, 0.1); flex-wrap: wrap; gap: 10px; }
-        .top-bar .page-title h1 { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0; }
-        .top-bar .page-title h1 i { color: #4DA6D9; }
         .top-bar .page-title p { color: #4a6a8c; font-size: 13px; }
-
-        .top-bar .user-profile { display: flex; align-items: center; gap: 15px; flex-shrink: 0; }
 
         .top-bar .user-profile .avatar {
             width: 42px;
@@ -604,53 +603,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
             overflow: hidden;
             border: 2px solid rgba(77, 166, 217, 0.25);
         }
-        .top-bar .user-profile .avatar img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            border-radius: 50%;
-        }
 
         .top-bar .user-profile .user-name { color: #0B2447; font-weight: 600; font-size: 14px; }
         .top-bar .user-profile .user-role { color: #4a6a8c; font-size: 12px; }
 
-        .mobile-role-badge,
-        .mobile-avatar {
-            display: none;
-        }
-
         @media (max-width: 768px) {
-            .top-bar {
-                position: relative;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                text-align: center;
-                gap: 8px;
-                padding-bottom: 15px;
-                padding-left: 100px;
-                padding-right: 100px;
-                min-height: 130px;
-            }
-
-            .top-bar .page-title {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 8px;
-                width: 100%;
-            }
-
-            .top-bar .page-title h1 {
-                font-size: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                flex-wrap: wrap;
-                gap: 8px;
-                margin: 0;
-            }
-            .top-bar .page-title h1 > i { font-size: 18px; }
 
             .top-bar .page-title h1 .mobile-role-badge {
                 display: inline-flex;
@@ -710,19 +667,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
                 text-align: center;
                 margin: 0;
             }
-            .top-bar .user-profile {
-                display: none !important;
-            }
         }
 
         @media (max-width: 480px) {
-            .top-bar {
-                padding-left: 92px;
-                padding-right: 92px;
-                min-height: 120px;
-            }
-            .top-bar .page-title h1 { font-size: 17px; gap: 6px; }
-            .top-bar .page-title h1 > i { font-size: 15px; }
             .top-bar .page-title p { font-size: 11px; }
             .top-bar .page-title h1 .mobile-avatar {
                 width: 72px;
@@ -789,10 +736,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         tr:hover { background: #f8fafc; }
 
         .badge { padding: 4px 12px; border-radius: 20px; font-size: 10px; font-weight: 600; display: inline-block; text-transform: uppercase; white-space: nowrap; }
-        .badge-success { background: #e6f7e6; color: #10b981; }
-        .badge-info { background: #dbeafe; color: #3b82f6; }
-        .badge-warning { background: #fef3c7; color: #f59e0b; }
-        .badge-danger { background: #fee2e2; color: #ef4444; }
         .badge-admin { background: #fee2e2; color: #ef4444; }
         .badge-staff { background: #fef3c7; color: #f59e0b; }
         .badge-guest { background: #e6f7e6; color: #10b981; }
@@ -1058,23 +1001,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
         .booking-card-mobile .btn-disabled-mobile {
             background: #e2e8f0; color: #94a3b8; cursor: not-allowed;
         }
-
-        /* LOGOUT MODAL */
-        .logout-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, 0.6); backdrop-filter: blur(6px); z-index: 99999; align-items: center; justify-content: center; padding: 20px; }
         .logout-modal-overlay.show { display: flex; }
-        .logout-modal { background: white; border-radius: 24px; max-width: 400px; width: 100%; padding: 35px 30px 25px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,0.4); border-top: 6px solid #ef4444; }
-        .logout-modal-icon { width: 80px; height: 80px; background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 18px; font-size: 36px; color: #ef4444; }
         .logout-modal h3 { font-size: 22px; font-weight: 700; color: #991b1b; margin-bottom: 8px; }
         .logout-modal p { color: #64748b; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
-        .logout-modal-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-        .btn-logout-cancel, .btn-logout-confirm { flex: 1; min-width: 130px; min-height: 48px; padding: 13px 18px; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
-        .btn-logout-cancel { background: #e2e8f0; color: #475569; }
-        .btn-logout-confirm { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
-        @media (max-width: 480px) {
-            .logout-modal { padding: 28px 22px 20px; }
-            .logout-modal-actions { flex-direction: column-reverse; }
-            .btn-logout-cancel, .btn-logout-confirm { width: 100%; }
-        }
 
         /* ===============================
    USER MANAGEMENT REDESIGN
@@ -1136,7 +1065,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     color:#64748b;
 }
 
-
 .user-toolbar{
     display:flex;
     justify-content:space-between;
@@ -1151,7 +1079,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     gap:10px;
 }
 
-
 .user-search{
     display:flex;
     gap:10px;
@@ -1164,13 +1091,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     border:2px solid #e2e8f0;
 }
 
-
 .user-filter{
     padding:12px 16px;
     border-radius:12px;
     border:2px solid #e2e8f0;
 }
-
 
 @media(max-width:900px){
 
@@ -1179,7 +1104,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     }
 
 }
-
 
 @media(max-width:600px){
 
@@ -1209,13 +1133,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     border:1px solid #e8f0fe;
 }
 
-
 .user-toolbar-title{
     display:flex;
     align-items:center;
     gap:12px;
 }
-
 
 .user-toolbar-title i{
     width:42px;
@@ -1228,13 +1150,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     justify-content:center;
 }
 
-
 .user-toolbar-title h2{
     margin:0;
     font-size:20px;
     color:#0B2447;
 }
-
 
 .user-toolbar-actions{
     display:flex;
@@ -1242,7 +1162,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     gap:10px;
     flex-wrap:wrap;
 }
-
 
 .user-toolbar-actions input{
     width:320px;
@@ -1252,12 +1171,10 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     font-size:14px;
 }
 
-
 .user-toolbar-actions input:focus{
     outline:none;
     border-color:#4DA6D9;
 }
-
 
 .user-search-btn{
     padding:12px 20px;
@@ -1268,7 +1185,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     font-weight:600;
 }
 
-
 .user-add-btn{
     padding:12px 20px;
     border-radius:12px;
@@ -1277,7 +1193,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     border:none;
     font-weight:600;
 }
-
 
 @media(max-width:768px){
 
@@ -1309,7 +1224,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     box-sizing:border-box;
 }
 
-
 .user-card{
     background:white;
     border-radius:24px;
@@ -1321,13 +1235,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     position:relative;
 }
 
-
 .user-card:hover{
     transform:translateY(-6px);
     box-shadow:
         0 18px 45px rgba(6,38,61,.12);
 }
-
 
 .user-card-top{
     display:flex;
@@ -1337,7 +1249,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     border-bottom:1px solid #edf2f7;
 }
 
-
 .user-card .user-avatar{
     width:60px;
     height:60px;
@@ -1345,24 +1256,20 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     flex-shrink:0;
 }
 
-
 .user-name{
     font-size:20px;
     font-weight:800;
     color:#0B2447;
 }
 
-
 .user-username{
     font-size:13px;
     color:#64748b;
 }
 
-
 .user-info{
     margin-top:18px;
 }
-
 
 .user-info-item{
     display:flex;
@@ -1372,11 +1279,9 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     font-size:14px;
 }
 
-
 .user-info-item strong{
     color:#64748b;
 }
-
 
 .user-card-actions{
     margin-top:20px;
@@ -1384,18 +1289,15 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     border-top:1px solid #edf2f7;
 }
 
-
 .user-card-actions button{
     border-radius:12px!important;
 }
-
 
 .user-card-top{
     display:flex;
     align-items:center;
     gap:15px;
 }
-
 
 .user-card .user-avatar{
     width:55px;
@@ -1410,13 +1312,11 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     font-weight:700;
 }
 
-
 .user-name{
     font-size:18px;
     font-weight:700;
     color:#0B2447;
 }
-
 
 .user-username{
     color:#64748b;
@@ -1428,29 +1328,24 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     overflow:hidden;
 }
 
-
 .user-card .user-username{
     overflow:hidden;
     text-overflow:ellipsis;
     white-space:nowrap;
 }
 
-
 .user-info{
     margin-top:20px;
 }
-
 
 .user-info-item{
     margin-bottom:12px;
     color:#475569;
 }
 
-
 .user-info-item strong{
     color:#0B2447;
 }
-
 
 .user-card-actions{
     display:flex;
@@ -1458,18 +1353,15 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     flex-wrap:wrap;
 }
 
-
 .user-card-actions button{
     flex:1;
     min-width:90px;
 }
 
-
 .user-card-actions button,
 .user-card-actions a{
     flex:1;
 }
-
 
 @media(max-width:1100px){
 
@@ -1478,7 +1370,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     }
 
 }
-
 
 @media(max-width:700px){
 
@@ -1497,24 +1388,20 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     margin-left:8px;
 }
 
-
 .role-badge.admin{
     background:#fee2e2;
     color:#dc2626;
 }
-
 
 .role-badge.staff{
     background:#fef3c7;
     color:#d97706;
 }
 
-
 .role-badge.guest{
     background:#dcfce7;
     color:#16a34a;
 }
-
 
 .booking-count{
     display:inline-block;
@@ -1664,7 +1551,6 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     white-space:nowrap;
 }
 
-
 .table-actions{
     display:flex;
     gap:6px;
@@ -1675,34 +1561,28 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     white-space:nowrap;
 }
 
-
 .user-action-btn i{
     font-size:13px;
 }
 
-
 .user-action-btn:hover{
     transform:translateY(-2px);
 }
-
 
 .user-action-view{
     background:#0ea5e9;
     color:white;
 }
 
-
 .user-action-edit{
     background:#f59e0b;
     color:white;
 }
 
-
 .user-action-delete{
     background:#ef4444;
     color:white;
 }
-
 
 @media(max-width:900px){
 
@@ -1724,173 +1604,66 @@ $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours'
     table-layout:fixed;
 }
 
-
 .users-table th,
 .users-table td{
     vertical-align:middle;
 }
-
 
 .users-table th:nth-child(1),
 .users-table td:nth-child(1){
     width:50px;
 }
 
-
 .users-table th:nth-child(2),
 .users-table td:nth-child(2){
     width:120px;
 }
-
 
 .users-table th:nth-child(3),
 .users-table td:nth-child(3){
     width:180px;
 }
 
-
 .users-table th:nth-child(4),
 .users-table td:nth-child(4){
     width:240px;
 }
-
 
 .users-table th:nth-child(5),
 .users-table td:nth-child(5){
     width:110px;
 }
 
-
 .users-table th:nth-child(6),
 .users-table td:nth-child(6){
     width:130px;
 }
-
 
 .users-table th:nth-child(7),
 .users-table td:nth-child(7){
     width:130px;
 }
 
-
 .users-table th:nth-child(8),
 .users-table td:nth-child(8){
     width:260px;
 }
-
 
 .users-table td{
     overflow:hidden;
     text-overflow:ellipsis;
 }
 
-
 .users-table td:nth-child(4){
     word-break:break-word;
 }
-
-        .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
     <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
 <div class="app-container">
-    <!-- SIDEBAR -->
-    <div class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="sidebar-header-top">
-                <a href="admin-dashboard.php" class="logo">
-                    <div class="logo-icon">
-                        <?php if($nav_logo_exists): ?>
-                            <img src="<?php echo htmlspecialchars($nav_logo); ?>?<?php echo time(); ?>" alt="<?php echo htmlspecialchars($site_name); ?>">
-                        <?php else: ?>
-                            <i class="fas fa-umbrella-beach"></i>
-                        <?php endif; ?>
-                    </div>
-                    <div class="logo-text">
-                        <span class="main">Hundred Islands</span>
-                        <span class="sub">Reservation System</span>
-                    </div>
-                </a>
-                <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <div class="role-badge <?php echo $is_admin ? 'admin' : 'staff'; ?>">
-                <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
-                <?php echo $is_admin ? 'Administrator' : 'Staff'; ?>
-            </div>
-        </div>
-
-        <ul class="nav-menu">
-            <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-th-large"></i><span>Dashboard</span></a></li>
-            <li class="nav-item"><a href="user-management.php" class="nav-link active"><i class="fas fa-users"></i><span>User Management</span><?php if($is_staff): ?><span class="nav-badge" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">View</span><?php endif; ?></a></li>
-            <li class="nav-item"><a href="house-dashboard.php" class="nav-link"><i class="fas fa-home"></i><span>House Management</span></a></li>
-            <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
-            <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
-<li class="nav-item">
-                <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i><span>Food Management</span></a>
-            </li>
-
-            <!-- ✅ BOOKING — badge = pending bookings -->
-            <li class="nav-item">
-                <a href="booking-management.php" class="nav-link">
-                    <i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                    <?php if($sidebar_pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-
-            <li class="nav-item"><a href="blocked-dates.php" class="nav-link"><i class="fas fa-ban"></i><span>Blocked Dates</span></a></li>
-
-            <!-- ✅ REVIEWS — badge = PENDING only -->
-            <li class="nav-item">
-                <a href="reviews-management.php" class="nav-link">
-                    <i class="fas fa-star"></i><span>Reviews Management</span>
-                    <?php if($sidebar_pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $sidebar_pending_reviews; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-
-            <li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li>
-            <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span><?php if($is_staff): ?><span class="nav-badge" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">View</span><?php endif; ?></a></li>
-
-            <?php if($is_admin): ?>
-            <!-- ✅ SYSTEM LOGS — badge = failed only -->
-            <li class="nav-item">
-                <a href="system-logs.php" class="nav-link">
-                    <i class="fas fa-history"></i><span>System Logs</span>
-                    <?php if($sidebar_failed_logs > 0): ?>
-                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-            <?php endif; ?>
-
-            <div class="nav-divider"></div>
-
-            <li class="nav-item">
-                <a href="admin-profile.php" class="nav-link">
-                    <i class="fas fa-user-circle"></i><span>My Profile</span>
-                </a>
-            </li>
-
-            <li class="nav-item">
-                <a href="#" class="nav-link" onclick="openLogoutModal(event); return false;">
-                    <i class="fas fa-sign-out-alt"></i><span>Logout</span>
-                </a>
-            </li>
-        </ul>
-    </div>
+    <?php admin_layout_sidebar(['active' => 'users']); ?>
 
     <!-- MAIN CONTENT -->
     <div class="main-content">
@@ -2697,58 +2470,9 @@ title="Delete user">
 </div>
 <?php endif; ?>
 
-<!-- LOGOUT MODAL -->
-<div class="logout-modal-overlay" id="logoutModal">
-    <div class="logout-modal">
-        <div class="logout-modal-icon"><i class="fas fa-sign-out-alt"></i></div>
-        <h3>Logout?</h3>
-        <p>Are you sure you want to sign out from your account?</p>
-        <div class="logout-modal-actions">
-            <button type="button" class="btn-logout-cancel" onclick="closeLogoutModal()">
-                <i class="fas fa-times"></i> Cancel
-            </button>
-            <a href="?logout=1" class="btn-logout-confirm">
-                <i class="fas fa-sign-out-alt"></i> Yes, Logout
-            </a>
-        </div>
-    </div>
-</div>
+<?php admin_layout_footer(); ?>
 
 <script>
-// ============================================================
-// SIDEBAR TOGGLE
-// ============================================================
-function toggleSidebar() {
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-    const willOpen = !sidebar.classList.contains('open');
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-    if (willOpen && window.innerWidth <= 1024) document.body.classList.add('sidebar-open-mobile');
-    else document.body.classList.remove('sidebar-open-mobile');
-    document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-}
-
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar.classList.contains('open')) toggleSidebar();
-    }
-});
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (window.innerWidth > 1024 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
-    }
-});
-
 // ============================================================
 // ✅ FULL NAME INPUT — Letters only restriction
 // ============================================================
@@ -3321,45 +3045,6 @@ function toggleReasonOther() {
         document.getElementById('delete_reason_other').value = '';
     }
 }
-
-// ============================================================
-// LOGOUT MODAL
-// ============================================================
-function openLogoutModal(event) {
-    if (event) event.preventDefault();
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) {
-        const overlay = document.getElementById('sidebarOverlay');
-        const toggleBtn = document.getElementById('menuToggle');
-        sidebar.classList.remove('open');
-        if (overlay) overlay.classList.remove('active');
-        if (toggleBtn) toggleBtn.classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-    document.getElementById('logoutModal').classList.add('show');
-    document.body.style.overflow = 'hidden';
-}
-
-function closeLogoutModal() {
-    document.getElementById('logoutModal').classList.remove('show');
-    document.body.style.overflow = 'auto';
-}
-
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        const modal = document.getElementById('logoutModal');
-        if (modal && modal.classList.contains('show')) closeLogoutModal();
-    }
-});
-
-document.addEventListener('DOMContentLoaded', function() {
-    const modal = document.getElementById('logoutModal');
-    if (modal) {
-        modal.addEventListener('click', function(e) {
-            if (e.target === this) closeLogoutModal();
-        });
-    }
-});
 
 // Close modals on outside click
 window.onclick = function(event) {

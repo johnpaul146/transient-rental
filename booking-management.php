@@ -2,12 +2,14 @@
 session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
+require_once 'includes/admin-layout.php';
 
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
 require_once 'includes/WalkInBookingService.php';
 require_once 'includes/RebookService.php';
+require_once 'includes/BookingFilters.php';   // read-only list filters (Phase 8.4a)
 
 // ✅ Load SystemLogger (for logout logging)
 if (file_exists('includes/SystemLogger.php')) {
@@ -159,15 +161,6 @@ $stmt = $pdo->query("SELECT section_name, content_key, content_value FROM site_c
 while($row = $stmt->fetch()) {
     $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 }
-
-// ============================================================
-// RESOLVE LOGO PATH
-// ============================================================
-$nav_logo = 'uploads/logos/logo.png';
-if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) {
-    $nav_logo = $content['site_settings']['logo_path'];
-}
-$nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
 
 $site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
 
@@ -747,8 +740,25 @@ $status_filter = isset($_GET['status']) ? (string)$_GET['status'] : 'all';
 if (!in_array($status_filter, ['all', 'pending', 'rebook', 'pending_rebook', 'paid', 'cancelled', 'history'], true)) $status_filter = 'all';
 // 'paid' filter = money received: Reservation Fee Paid or Fully Paid
 $paid_filter_sql = "IN ('reservation_paid','paid')";
-$search = isset($_GET['search']) ? $_GET['search'] : '';
 $view = (isset($_GET['view']) && $_GET['view'] === 'calendar') ? 'calendar' : 'list';
+// Phase 8.4a: validated service / arrival-date / quick / search filters (all read-only GET)
+$bm_filters = BookingFilters::parse($_GET);
+// Calendar RESOURCE filter (read-only, calendar events only): a house UNIT = houses.id, a tour BOAT = tours.id.
+// Validated against the real records; anything unknown / malformed / from another service falls back to "all".
+$bm_resources = ['house' => [], 'tour' => []];
+try { foreach ($pdo->query("SELECT id, house_name FROM houses ORDER BY house_name, id") as $bmR) $bm_resources['house'][(int)$bmR['id']] = trim((string)$bmR['house_name']); } catch (PDOException $e) {}
+try { foreach ($pdo->query("SELECT id, tour_name FROM tours ORDER BY tour_name, id") as $bmR) $bm_resources['tour'][(int)$bmR['id']] = trim((string)$bmR['tour_name']); } catch (PDOException $e) {}
+$bm_filters = BookingFilters::resolveResource($bm_filters, $bm_resources, $view);
+$search = $bm_filters['search'];
+$bm_state = ['status' => $status_filter, 'view' => $view, 'search' => $search, 'service' => $bm_filters['service'],
+             'date' => $bm_filters['date'], 'from' => $bm_filters['from'], 'to' => $bm_filters['to'], 'quick' => $bm_filters['quick'],
+             'resource' => $bm_filters['resource']];
+$bm_url = function (array $override = []) use ($bm_state) { return htmlspecialchars(BookingFilters::url($bm_state, $override), ENT_QUOTES, 'UTF-8'); };
+$bf_house   = BookingFilters::fragment('house', $bm_filters);
+$bf_tour    = BookingFilters::fragment('tour', $bm_filters);
+$bf_food    = BookingFilters::fragment('food', $bm_filters);
+$bf_package = BookingFilters::fragment('package', $bm_filters);
+$bm_search_like = BookingFilters::likeTerm($search);
 
 // ============================================================
 // ✅ Get House Bookings
@@ -769,13 +779,15 @@ if($status_filter == 'pending') {
 if($search) {
     $house_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR h.house_name LIKE :search)";
 }
-$house_query .= " ORDER BY COALESCE(b.rebooked_at, b.created_at) DESC";
+$house_query .= $bf_house['where'];
+$house_query .= " ORDER BY " . ($bf_house['order'] ?: "COALESCE(b.rebooked_at, b.created_at) DESC");
 
 $house_stmt = $pdo->prepare($house_query);
 if($status_filter != 'all' && $status_filter != 'pending' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') {
     $house_stmt->bindValue(':status', $status_filter);
 }
-if($search) $house_stmt->bindValue(':search', "%$search%");
+if($search) $house_stmt->bindValue(':search', $bm_search_like);
+foreach ($bf_house['params'] as $k => $v) $house_stmt->bindValue($k, $v);
 $house_stmt->execute();
 $house_bookings = $house_stmt->fetchAll();
 
@@ -793,11 +805,13 @@ if($status_filter == 'rebook' || $status_filter == 'pending_rebook') {
     $tour_query .= ($status_filter === 'paid') ? " AND b.payment_status $paid_filter_sql" : " AND b.payment_status = :status";
 }
 if($search) $tour_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR t.tour_name LIKE :search)";
-$tour_query .= " ORDER BY b.created_at DESC";
+$tour_query .= $bf_tour['where'];
+$tour_query .= " ORDER BY " . ($bf_tour['order'] ?: "b.created_at DESC");
 
 $tour_stmt = $pdo->prepare($tour_query);
 if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') $tour_stmt->bindValue(':status', $status_filter);
-if($search) $tour_stmt->bindValue(':search', "%$search%");
+if($search) $tour_stmt->bindValue(':search', $bm_search_like);
+foreach ($bf_tour['params'] as $k => $v) $tour_stmt->bindValue($k, $v);
 $tour_stmt->execute();
 $tour_bookings = $tour_stmt->fetchAll();
 
@@ -815,11 +829,13 @@ if($status_filter == 'rebook' || $status_filter == 'pending_rebook') {
     $food_query .= ($status_filter === 'paid') ? " AND b.payment_status $paid_filter_sql" : " AND b.payment_status = :status";
 }
 if($search) $food_query .= " AND (b.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR f.name LIKE :search)";
-$food_query .= " ORDER BY b.created_at DESC";
+$food_query .= $bf_food['where'];
+$food_query .= " ORDER BY " . ($bf_food['order'] ?: "b.created_at DESC");
 
 $food_stmt = $pdo->prepare($food_query);
 if($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'history' && $status_filter != 'paid') $food_stmt->bindValue(':status', $status_filter);
-if($search) $food_stmt->bindValue(':search', "%$search%");
+if($search) $food_stmt->bindValue(':search', $bm_search_like);
+foreach ($bf_food['params'] as $k => $v) $food_stmt->bindValue($k, $v);
 $food_stmt->execute();
 $food_bookings = $food_stmt->fetchAll();
 
@@ -879,13 +895,15 @@ try {
     }
 
     if ($search) {
-        $pkg_query .= " AND (p.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search)";
+        $pkg_query .= " AND (p.reference_number LIKE :search OR COALESCE(u.$name_column, '') LIKE :search OR h.house_name LIKE :search OR t.tour_name LIKE :search OR f.name LIKE :search)";
     }
-    $pkg_query .= " ORDER BY p.created_at DESC";
+    $pkg_query .= $bf_package['where'];
+    $pkg_query .= " ORDER BY " . ($bf_package['order'] ?: "p.created_at DESC");
 
     $pkg_stmt = $pdo->prepare($pkg_query);
     if ($status_filter != 'all' && $status_filter != 'rebook' && $status_filter != 'pending_rebook' && $status_filter != 'cancelled' && $status_filter != 'pending' && $status_filter != 'history' && $status_filter != 'paid') $pkg_stmt->bindValue(':status', $status_filter);
-    if ($search) $pkg_stmt->bindValue(':search', "%$search%");
+    if ($search) $pkg_stmt->bindValue(':search', $bm_search_like);
+    foreach ($bf_package['params'] as $k => $v) $pkg_stmt->bindValue($k, $v);
     $pkg_stmt->execute();
     $package_bookings = $pkg_stmt->fetchAll();
 } catch (PDOException $e) {
@@ -991,7 +1009,31 @@ $paid_food = $pdo->query("SELECT COUNT(*) FROM food_bookings WHERE payment_statu
 $paid_package = 0;
 try { $paid_package = $pdo->query("SELECT COUNT(*) FROM package_bookings WHERE payment_status IN ('reservation_paid','paid') AND booking_status NOT IN ('cancelled', 'completed')")->fetchColumn(); } catch (PDOException $e) {}
 
-$total_active = count($active_house) + count($active_tour) + count($active_food) + count($active_package);
+$total_active = count($active_house) + count($active_tour) + count($active_food) + count($active_package);   // filtered lists (used by the tabs below)
+
+// Phase 8.4a: the top "Active Bookings" card and the pending-rebook alerts are GLOBAL — never narrowed by the
+// service / date / quick / search / status filters. Same definitions as the lists above.
+$total_active_global = 0;
+foreach (['house_bookings', 'tour_bookings', 'food_bookings', 'package_bookings'] as $bmTbl) {
+    $bmOwn = $bmTbl === 'package_bookings' ? '' : " AND (package_id IS NULL OR package_id = 0)";
+    try { $total_active_global += (int)$pdo->query("SELECT COUNT(*) FROM `$bmTbl` WHERE booking_status NOT IN ('cancelled', 'completed')$bmOwn")->fetchColumn(); } catch (PDOException $e) {}
+}
+$rebook_pending_global = $rebook_pending_count;
+try {
+    $rebook_pending_global = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE (package_id IS NULL OR package_id = 0) AND booking_status NOT IN ('cancelled', 'completed') AND ((rebooked_at IS NOT NULL AND rebook_confirmed_at IS NULL) OR (booking_status = 'pending' AND rebook_count > 0))")->fetchColumn();
+} catch (PDOException $e) {}
+
+// When a filter is active and no tab was requested, open the tab that actually has results.
+$bm_auto_tab = '';
+if ($bm_filters['active'] > 0) {
+    if ($bm_filters['service'] !== 'all') {
+        $bm_auto_tab = $bm_filters['service'];
+    } else {
+        foreach (['house' => $active_house, 'tour' => $active_tour, 'food' => $active_food, 'package' => $active_package] as $bmT => $bmRows) {
+            if (count($bmRows) > 0) { $bm_auto_tab = $bmT; break; }
+        }
+    }
+}
 $pending_count = $pending_house + $pending_tour + $pending_food + $pending_package;
 $paid_count = $paid_house + $paid_tour + $paid_food + $paid_package;
 
@@ -1000,7 +1042,15 @@ $paid_count = $paid_house + $paid_tour + $paid_food + $paid_package;
 // Prepare calendar events (active only) — WITH TIMES
 // ============================================================
 $calendar_events = [];
-foreach($active_house as $booking) {
+// Resource filter: only the selected unit's / boat's bookings; other services' bookings are dropped defensively.
+$cal_house = $active_house; $cal_tour = $active_tour; $cal_food = $active_food; $cal_package = $active_package;
+if ($bm_filters['resource_type'] !== '') {
+    $calRid = (int)$bm_filters['resource_id'];
+    $cal_house   = $bm_filters['resource_type'] === 'house' ? array_values(array_filter($active_house, function ($b) use ($calRid) { return (int)$b['house_id'] === $calRid; })) : [];
+    $cal_tour    = $bm_filters['resource_type'] === 'tour'  ? array_values(array_filter($active_tour,  function ($b) use ($calRid) { return (int)$b['tour_id'] === $calRid; })) : [];
+    $cal_food = []; $cal_package = [];
+}
+foreach($cal_house as $booking) {
     $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $calendar_events[] = [
         'title' => '🏠 ' . htmlspecialchars($booking['guest_name']),
@@ -1021,7 +1071,7 @@ foreach($active_house as $booking) {
         ]
     ];
 }
-foreach($active_tour as $booking) {
+foreach($cal_tour as $booking) {
     $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $calendar_events[] = [
         'title' => '🏖️ ' . htmlspecialchars($booking['guest_name']),
@@ -1038,7 +1088,7 @@ foreach($active_tour as $booking) {
         ]
     ];
 }
-foreach($active_food as $booking) {
+foreach($cal_food as $booking) {
     $color = PaymentService::isSecured($booking) ? '#10b981' : '#f59e0b';
     $food_date = !empty($booking['preferred_date']) ? $booking['preferred_date'] : date('Y-m-d', strtotime($booking['created_at']));
     $calendar_events[] = [
@@ -1059,7 +1109,7 @@ foreach($active_food as $booking) {
         ]
     ];
 }
-foreach($active_package as $pkg) {
+foreach($cal_package as $pkg) {
     $color = PaymentService::isSecured($pkg) ? '#10b981' : '#f59e0b';
     $pkg_date = date('Y-m-d', strtotime($pkg['created_at']));
     $items = [];
@@ -1085,14 +1135,27 @@ foreach($active_package as $pkg) {
 // ✅ ADD BLOCKED DATES AS CALENDAR EVENTS (gray)
 // ============================================================
 try {
-    $stmt = $pdo->query("SELECT bd.*, 
+    // Blocked dates follow the Service filter: House shows house blocks only, Tour shows tour blocks only; with a
+    // specific unit / boat selected, only that item's blocks (item_type + item_id, bound parameters, never names).
+    // All services / Food / Package keep showing every block, as before.
+    $bmBlockedWhere = ''; $bmBlockedParams = [];
+    if (in_array($bm_filters['service'], BookingFilters::RESOURCE_SERVICES, true)) {
+        $bmBlockedWhere = ' AND bd.item_type = :bd_type';
+        $bmBlockedParams = [':bd_type' => $bm_filters['service']];
+        if ($bm_filters['resource_type'] === $bm_filters['service'] && (int)$bm_filters['resource_id'] > 0) {
+            $bmBlockedWhere .= ' AND bd.item_id = :bd_id';
+            $bmBlockedParams[':bd_id'] = (int)$bm_filters['resource_id'];
+        }
+    }
+    $stmt = $pdo->prepare("SELECT bd.*, 
         CASE 
             WHEN bd.item_type = 'house' THEN (SELECT house_name FROM houses WHERE id = bd.item_id)
             WHEN bd.item_type = 'tour' THEN (SELECT tour_name FROM tours WHERE id = bd.item_id)
         END as item_name
         FROM blocked_dates bd
-        WHERE bd.block_date >= CURDATE()
+        WHERE bd.block_date >= CURDATE()" . $bmBlockedWhere . "
         ORDER BY bd.block_date ASC");
+    $stmt->execute($bmBlockedParams);
     $blocked_for_calendar = $stmt->fetchAll();
     foreach($blocked_for_calendar as $bd) {
         $calendar_events[] = [
@@ -1166,70 +1229,59 @@ function formatGuestNames($guest_names) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/admin-layout.css?v=<?php echo (int)@filemtime(__DIR__ . '/assets/css/admin-layout.css'); ?>">
     <style>
+        /* Page values that differ from assets/css/admin-layout.css (kept so this page looks exactly as before).
+           Delete a line to adopt the shared default. */
+        .main-content { transition: all; }
+        .top-bar .user-profile .avatar { box-shadow: none; }
+        .logout-modal { box-shadow: none; }
+        .btn-logout-cancel:hover { background: rgb(226, 232, 240); }
+        .btn-logout-confirm:hover { box-shadow: none; color: rgb(10, 88, 202); }
+        @media (max-width: 1024px) {
+            .sidebar { padding-top: 25px; }
+        }
+        @media (max-width: 768px) {
+            .top-bar .page-title h1 { margin: 0px; }
+            .top-bar .page-title p { text-align: inherit; }
+        }
+        @media (max-width: 480px) {
+            .sidebar-header .logo .logo-text .main { font-size: 18px; }
+            .sidebar-header .logo .logo-icon { width: 48px; height: 48px; font-size: 22px; }
+            .nav-link { padding: 12px 20px; font-size: 14px; }
+            .nav-link i { font-size: 16px; }
+            .top-bar { padding-left: 100px; padding-right: 100px; min-height: 130px; }
+            .top-bar .page-title h1 { font-size: 20px; gap: 8px; }
+            .top-bar .page-title h1 > i { font-size: 18px; }
+            .top-bar .page-title p { font-size: 12px; }
+            .logout-modal { padding: 35px 30px 25px 30px; }
+            .logout-modal-actions { flex-direction: row; }
+            .btn-logout-cancel { width: auto; }
+            .btn-logout-confirm { width: auto; }
+        }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; overflow-x: hidden; }
-    .app-container { display: flex; min-height: 100vh; }
 
     /* SIDEBAR */
     .sidebar { width: 280px; background: #0B2447; box-shadow: 4px 0 20px rgba(0,0,0,0.2); padding: 25px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 2px solid rgba(77, 166, 217, 0.15); transition: transform 0.3s ease, width 0.3s ease; z-index: 100; flex-shrink: 0; }
     .sidebar::-webkit-scrollbar { width: 5px; }
     .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
-    .sidebar-header { padding: 0 20px 25px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 20px; }
-    .sidebar-header-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .sidebar-header .logo { font-size: 22px; font-weight: 700; color: white; text-decoration: none; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
     .sidebar-header .logo .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: white; flex-shrink: 0; box-shadow: 0 4px 15px rgba(77, 166, 217, 0.3); overflow: hidden; }
-    .sidebar-header .logo .logo-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; background: white; }
-    .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
-    .sidebar-header .logo .logo-text .main { font-size: 18px; font-weight: 700; color: white; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sidebar-header .logo .logo-text .sub { font-size: 10px; color: #7bb8f0; font-weight: 400; }
-    .sidebar-close-btn { display: none; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #e0eeff; width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; flex-shrink: 0; align-items: center; justify-content: center; transition: all 0.2s; }
-    .sidebar-close-btn:hover { background: #ef4444; border-color: #ef4444; color: white; transform: rotate(90deg); }
-    .sidebar-header .role-badge { display: inline-block; margin-top: 12px; padding: 4px 14px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-    .sidebar-header .role-badge.admin { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
-    .sidebar-header .role-badge.staff { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-
-    .nav-menu { list-style: none; padding: 0; margin: 0; }
     .nav-item { margin-bottom: 2px; position: relative; }
-    .nav-link { display: flex; align-items: center; gap: 14px; padding: 12px 20px; color: #b3d9ff; text-decoration: none; transition: all 0.3s; border-left: 3px solid transparent; font-weight: 500; font-size: 14px; }
-    .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
-    .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
-    .nav-link.active { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
-    .nav-link.active i { color: #7bb8f0; }
-    .nav-link .nav-badge { margin-left: auto; background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 1px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; }
-    .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
-    .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
-
-    .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 99; opacity: 0; transition: opacity 0.3s ease; }
-    .sidebar-overlay.active { display: block; opacity: 1; }
-
-    .menu-toggle { display: none; position: fixed; top: 12px; left: 12px; z-index: 1001; background: #0B2447; color: white; border: none; border-radius: 12px; width: 48px; height: 48px; font-size: 22px; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.3); align-items: center; justify-content: center; border: 1px solid rgba(77, 166, 217, 0.2); }
-    .menu-toggle:hover { background: rgba(77, 166, 217, 0.2); transform: scale(1.05); }
-    body.sidebar-open-mobile .menu-toggle { opacity: 0; visibility: hidden; pointer-events: none; transform: scale(0.8); }
 
     @media (max-width: 1024px) {
         .sidebar { position: fixed; top: 0; left: 0; height: 100vh; transform: translateX(-100%); width: 280px; z-index: 1000; box-shadow: none; border-radius: 0; }
         .sidebar.open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,0.4); }
-        .menu-toggle { display: flex; }
-        .sidebar-overlay.active { display: block; }
-        .main-content { padding: 70px 16px 20px !important; }
-        .sidebar-close-btn { display: flex; }
     }
     @media (max-width: 480px) {
         .sidebar { width: 85%; max-width: 300px; }
-        .menu-toggle { width: 42px; height: 42px; font-size: 18px; top: 10px; left: 10px; border-radius: 10px; }
-        .main-content { padding: 60px 12px 16px !important; }
     }
 
     /* MAIN */
     .main-content { flex: 1; padding: 20px 30px 30px; min-width: 0; width: 100%; }
-    .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid rgba(11, 36, 71, 0.1); flex-wrap: wrap; gap: 10px; }
-    .top-bar .page-title h1 { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0; }
-    .top-bar .page-title h1 i { color: #4DA6D9; }
-    .top-bar .page-title p { color: #4a6a8c; font-size: 13px; margin: 2px 0 0 0; }
-    .top-bar .user-profile { display: flex; align-items: center; gap: 15px; flex-shrink: 0; }
     .top-bar .user-profile .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 18px; border: 2px solid rgba(77, 166, 217, 0.2); flex-shrink: 0; overflow: hidden; }
-    .top-bar .user-profile .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
     .top-bar .user-profile .user-name { color: #0B2447; font-weight: 600; font-size: 14px; }
     .top-bar .user-profile .user-role { color: #4a6a8c; font-size: 12px; }
 
@@ -1241,14 +1293,10 @@ function formatGuestNames($guest_names) {
     .avatar-mobile img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 
     @media (max-width: 768px) {
-        .top-bar { position: relative; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 8px; padding-bottom: 15px; padding-left: 100px; padding-right: 100px; min-height: 130px; }
-        .top-bar .page-title { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
         .top-bar .page-title h1 { font-size: 20px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
-        .top-bar .page-title h1 > i { font-size: 18px; }
         .top-bar .page-title p { font-size: 12px; margin: 0; }
         .top-bar .page-title h1 .title-badge-mobile { display: inline-flex; }
         .top-bar .page-title h1 .avatar-mobile { display: inline-flex; position: absolute; top: 50%; right: 14px; transform: translateY(-50%); width: 80px; height: 80px; font-size: 32px; border: 4px solid #4DA6D9; box-shadow: 0 6px 20px rgba(77, 166, 217, 0.4), 0 0 0 4px rgba(255, 255, 255, 1), 0 0 0 7px rgba(77, 166, 217, 0.4); }
-        .top-bar .user-profile { display: none !important; }
     }
 
     .page-title-banner { background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); border-radius: 20px; padding: 30px 35px; margin-bottom: 30px; color: white; box-shadow: 0 10px 30px rgba(11, 36, 71, 0.15); position: relative; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
@@ -1287,7 +1335,6 @@ function formatGuestNames($guest_names) {
 
 }
 
-
 .stat-card:hover{
 
     transform:translateY(-6px);
@@ -1303,7 +1350,6 @@ function formatGuestNames($guest_names) {
     color:#0B2447;
     margin-top:18px;
 }
-
 
 .stat-label{
     color:#334155;
@@ -1330,6 +1376,33 @@ function formatGuestNames($guest_names) {
     .search-box input { padding: 8px 14px; border: 2px solid #e8f0fe; border-radius: 10px; width: 100%; font-size: 13px; }
     .search-box input:focus { outline: none; border-color: #4DA6D9; }
     .search-box button { padding: 8px 16px; background: #4DA6D9; color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 500; white-space: nowrap; }
+    /* Phase 8.4a filters */
+    .bm-filters { background: white; border-radius: 16px; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: 1px solid #e8f0fe; }
+    .bm-filters > summary { cursor: pointer; padding: 12px 18px; font-weight: 600; color: #0B2447; font-size: 14px; list-style: none; display: flex; align-items: center; gap: 8px; min-height: 44px; }
+    .bm-filters > summary::-webkit-details-marker { display: none; }
+    .bm-filters > summary::after { content: '\25BE'; margin-left: auto; color: #94a3b8; }
+    .bm-filters[open] > summary::after { content: '\25B4'; }
+    .bm-active-count { background: #4DA6D9; color: white; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 700; }
+    .bm-filters-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; padding: 2px 18px 12px; align-items: end; }
+    .bm-field { min-width: 0; }
+    .bm-field[hidden] { display: none; }
+    .bm-field label { display: block; font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 4px; }
+    .bm-field select, .bm-field input { width: 100%; padding: 8px 12px; border: 2px solid #e8f0fe; border-radius: 10px; font-size: 13px; background: white; min-height: 40px; box-sizing: border-box; }
+    .bm-field select:focus, .bm-field input:focus { outline: none; border-color: #4DA6D9; }
+    .bm-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .bm-apply { padding: 9px 18px; background: #4DA6D9; color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 13px; min-height: 40px; }
+    .bm-quick { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 18px 14px; }
+    .bm-notice { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+    .bm-notice a { color: #92400e; font-weight: 700; }
+    @media (max-width: 768px) {
+        .bm-filters-body { grid-template-columns: 1fr 1fr; padding: 2px 14px 12px; }
+        .bm-actions { grid-column: 1 / -1; }
+        .bm-field select, .bm-field input, .bm-apply { min-height: 44px; font-size: 16px; }
+        .bm-quick { padding: 0 14px 14px; }
+        .search-box input, .search-box button { min-height: 44px; font-size: 16px; }
+        .bm-quick .filter-btn { padding: 10px 14px; font-size: 13px; }
+    }
+    @media (max-width: 380px) { .bm-filters-body { grid-template-columns: 1fr; } }
     .btn-clear { background: #64748b; color: white; padding: 8px 14px; text-decoration: none; border-radius: 10px; font-size: 12px; white-space: nowrap; }
     .btn-clear:hover { background: #475569; color: white; }
     @media (max-width: 768px) { .filter-bar { flex-direction: column; align-items: stretch; padding: 15px; } .search-box { max-width: 100%; } }
@@ -1419,10 +1492,6 @@ function formatGuestNames($guest_names) {
 
     /* BADGES */
     .badge { padding: 3px 10px; border-radius: 20px; font-size: 9px; font-weight: 600; display: inline-block; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
-    .badge-success { background: #e6f7e6; color: #10b981; }
-    .badge-warning { background: #fef3c7; color: #f59e0b; }
-    .badge-danger { background: #fee2e2; color: #ef4444; }
-    .badge-info { background: #dbeafe; color: #3b82f6; }
     .badge-cancelled { background: #fee2e2; color: #ef4444; }
     .badge-purple { background: #f3e8ff; color: #8b5cf6; }
     .badge-package { background: #e0f2fe; color: #0369a1; }
@@ -1499,18 +1568,10 @@ function formatGuestNames($guest_names) {
     .btn-confirm-submit { background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }
     .confirm-modal.rebook-variant .btn-confirm-submit { background: linear-gradient(135deg, #8b5cf6, #7c3aed); }
     .confirm-modal.package-variant .btn-confirm-submit { background: linear-gradient(135deg, #0ea5e9, #0284c7); }
-
-    /* LOGOUT MODAL */
-    .logout-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, 0.6); backdrop-filter: blur(6px); z-index: 99999; align-items: center; justify-content: center; padding: 20px; }
     .logout-modal-overlay.show { display: flex; }
     .logout-modal { background: white; border-radius: 24px; max-width: 400px; width: 100%; padding: 35px 30px 25px; text-align: center; border-top: 6px solid #ef4444; }
-    .logout-modal-icon { width: 80px; height: 80px; background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 18px; font-size: 36px; color: #ef4444; }
     .logout-modal h3 { font-size: 22px; font-weight: 700; color: #991b1b; margin-bottom: 8px; }
     .logout-modal p { color: #64748b; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
-    .logout-modal-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-    .btn-logout-cancel, .btn-logout-confirm { flex: 1; min-width: 130px; min-height: 48px; padding: 13px 18px; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
-    .btn-logout-cancel { background: #e2e8f0; color: #475569; }
-    .btn-logout-confirm { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
 
     /* PACKAGE BOOKING MODAL */
     .pkg-booking-modal .modal-content { max-width: 750px; padding: 0; border-radius: 24px; overflow: hidden; }
@@ -1588,30 +1649,25 @@ function formatGuestNames($guest_names) {
     color:#16a34a;
 }
 
-
 .pending-card .stat-icon{
     background:#fef3c7;
     color:#d97706;
 }
-
 
 .rebook-card .stat-icon{
     background:#ede9fe;
     color:#7c3aed;
 }
 
-
 .paid-card .stat-icon{
     background:#dbeafe;
     color:#0284c7;
 }
 
-
 .blocked-card .stat-icon{
     background:#e2e8f0;
     color:#475569;
 }
-
 
 /* Better status emphasis */
 
@@ -1619,11 +1675,9 @@ function formatGuestNames($guest_names) {
     box-shadow:0 20px 40px rgba(245,158,11,.25);
 }
 
-
 .rebook-card:hover{
     box-shadow:0 20px 40px rgba(139,92,246,.25);
 }
-
 
 .active-card:hover{
     box-shadow:0 20px 40px rgba(16,185,129,.25);
@@ -1639,69 +1693,8 @@ function formatGuestNames($guest_names) {
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
 <div class="app-container">
-    <!-- Sidebar -->
-    <div class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="sidebar-header-top">
-                <a href="admin-dashboard.php" class="logo">
-                    <div class="logo-icon">
-                        <?php if($nav_logo_exists): ?>
-                            <img src="<?php echo htmlspecialchars($nav_logo); ?>?<?php echo time(); ?>" alt="Logo">
-                        <?php else: ?>
-                            <i class="fas fa-umbrella-beach"></i>
-                        <?php endif; ?>
-                    </div>
-                    <div class="logo-text">
-                        <span class="main">Hundred Islands</span>
-                        <span class="sub">Reservation System</span>
-                    </div>
-                </a>
-                <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <div class="role-badge <?php echo $is_admin ? 'admin' : 'staff'; ?>">
-                <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
-                <?php echo $is_admin ? 'Administrator' : 'Staff'; ?>
-            </div>
-        </div>
-
-        <ul class="nav-menu">
-            <li class="nav-item"><a href="admin-dashboard.php" class="nav-link"><i class="fas fa-th-large"></i><span>Dashboard</span></a></li>
-            <?php if($is_admin): ?>
-            <li class="nav-item"><a href="user-management.php" class="nav-link"><i class="fas fa-users"></i><span>User Management</span></a></li>
-            <?php endif; ?>
-            <li class="nav-item"><a href="house-dashboard.php" class="nav-link"><i class="fas fa-home"></i><span>House Management</span></a></li>
-            <li class="nav-item"><a href="tour-dashboard.php" class="nav-link"><i class="fas fa-umbrella-beach"></i><span>Tour Management</span></a></li>
-            <li class="nav-item"><a href="activities-dashboard.php" class="nav-link"><i class="fas fa-water"></i><span>Activities Management</span></a></li>
-            <li class="nav-item"><a href="food-dashboard.php" class="nav-link"><i class="fas fa-utensils"></i><span>Food Management</span>
-            </a></li>
-            <li class="nav-item"><a href="booking-management.php" class="nav-link active"><i class="fas fa-calendar-check"></i><span>Booking Management</span>
-                <?php if($sidebar_pending_bookings > 0): ?><span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span><?php endif; ?>
-            </a></li>
-            <li class="nav-item"><a href="blocked-dates.php" class="nav-link"><i class="fas fa-ban"></i><span>Blocked Dates</span>
-            </a></li>
-            <li class="nav-item"><a href="reviews-management.php" class="nav-link"><i class="fas fa-star"></i><span>Reviews Management</span>
-                <?php if($sidebar_pending_reviews > 0): ?><span class="nav-badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><?php echo $sidebar_pending_reviews; ?></span><?php endif; ?>
-            </a></li>
-            <?php if(!empty($is_admin)): ?><li class="nav-item"><a href="reports.php" class="nav-link"><i class="fas fa-file-alt"></i><span>Sales Report</span></a></li><?php endif; ?>
-            <?php if($is_admin): ?>
-            <li class="nav-item"><a href="edit-content.php" class="nav-link"><i class="fas fa-edit"></i><span>Edit Content</span></a></li>
-            <li class="nav-item"><a href="system-logs.php" class="nav-link"><i class="fas fa-history"></i><span>System Logs</span>
-                <?php if($sidebar_failed_logs > 0): ?><span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span><?php endif; ?>
-            </a></li>
-            <?php endif; ?>
-            <div class="nav-divider"></div>
-            <li class="nav-item"><a href="admin-profile.php" class="nav-link"><i class="fas fa-user-circle"></i><span>My Profile</span></a></li>
-            <li class="nav-item"><a href="#" class="nav-link" onclick="openLogoutModal(event); return false;"><i class="fas fa-sign-out-alt"></i><span>Logout</span></a></li>
-        </ul>
-    </div>
+    <?php admin_layout_sidebar(['active' => 'bookings']); ?>
 
     <!-- Main Content -->
     <div class="main-content">
@@ -1776,7 +1769,7 @@ function formatGuestNames($guest_names) {
             </div>
         </div>
 
-        <?php if($rebook_pending_count > 0): ?>
+        <?php if($rebook_pending_global > 0): ?>
         <div class="rebook-banner">
             <div style="display: flex; align-items: center; gap: 14px;">
                 <div style="width: 44px; height: 44px; border-radius: 50%; background: #fef3c7; display: flex; align-items: center; justify-content: center; font-size: 20px; color: #d97706; flex-shrink: 0;">
@@ -1784,7 +1777,7 @@ function formatGuestNames($guest_names) {
                 </div>
                 <div>
                     <div style="font-weight: 700; color: #92400e; font-size: 15px;">
-                        🔔 <?php echo $rebook_pending_count; ?> Pending Rebook Request<?php echo $rebook_pending_count > 1 ? 's' : ''; ?> Awaiting Confirmation
+                        🔔 <?php echo $rebook_pending_global; ?> Pending Rebook Request<?php echo $rebook_pending_global > 1 ? 's' : ''; ?> Awaiting Confirmation
                     </div>
                     <div style="color: #b45309; font-size: 13px; margin-top: 2px;">
                         Guests have updated stay dates on already-paid bookings. Please confirm to finalize their new dates.
@@ -1792,23 +1785,23 @@ function formatGuestNames($guest_names) {
                 </div>
             </div>
             <button type="button" onclick="showBookingType('rebook')" class="btn-sm btn-rebook-confirm" style="padding: 9px 18px; font-size: 13px;">
-                <i class="fas fa-check-circle"></i> Review & Confirm Rebooks (<?php echo $rebook_pending_count; ?>)
+                <i class="fas fa-check-circle"></i> Review & Confirm Rebooks (<?php echo $rebook_pending_global; ?>)
             </button>
         </div>
         <?php endif; ?>
 
         <div class="stats-grid">
 <a href="?status=all&view=<?php echo $view; ?>" class="stat-card active-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-calendar-alt"></i></div></div>
-                <div class="stat-number"><?php echo $total_active; ?></div>
+                <div class="stat-number"><?php echo $total_active_global; ?></div>
                 <div class="stat-label">Active Bookings</div>
             </a>
 <a href="?status=pending&view=<?php echo $view; ?>" class="stat-card pending-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-clock"></i></div></div>
                 <div class="stat-number"><?php echo $pending_count; ?></div>
                 <div class="stat-label">Pending Payment</div>
             </a>
-            <a href="javascript:void(0)" onclick="showBookingType('rebook')" class="stat-card rebook-card <?php echo $rebook_pending_count > 0 ? 'rebook-stat-alert' : ''; ?>">
+            <a href="javascript:void(0)" onclick="showBookingType('rebook')" class="stat-card rebook-card <?php echo $rebook_pending_global > 0 ? 'rebook-stat-alert' : ''; ?>">
                 <div class="stat-top"><div class="stat-icon" style="background: rgba(139, 92, 246, 0.15); color: #8b5cf6;"><i class="fas fa-redo"></i></div></div>
-                <div class="stat-number"><?php echo $rebook_pending_count; ?></div>
+                <div class="stat-number"><?php echo $rebook_pending_global; ?></div>
                 <div class="stat-label">Pending Rebooks</div>
             </a>
 <a href="?status=paid&view=<?php echo $view; ?>" class="stat-card paid-card">                <div class="stat-top"><div class="stat-icon"><i class="fas fa-check-circle"></i></div></div>
@@ -1824,36 +1817,110 @@ function formatGuestNames($guest_names) {
 
         <div class="view-toggle">
             <span class="view-label"><i class="fas fa-eye"></i> View:</span>
-            <a href="?status=<?php echo $status_filter; ?>&view=list<?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="btn-view <?php echo $view == 'list' ? 'active' : ''; ?>">
+            <a href="<?php echo $bm_url(['view' => 'list']); ?>" class="btn-view <?php echo $view == 'list' ? 'active' : ''; ?>">
                 <i class="fas fa-list"></i> List View
             </a>
-            <a href="?status=<?php echo $status_filter; ?>&view=calendar<?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="btn-view <?php echo $view == 'calendar' ? 'active' : ''; ?>">
+            <a href="<?php echo $bm_url(['view' => 'calendar']); ?>" class="btn-view <?php echo $view == 'calendar' ? 'active' : ''; ?>">
                 <i class="fas fa-calendar-alt"></i> Calendar View
             </a>
         </div>
 
         <div class="filter-bar">
             <div class="filter-buttons">
-                <a href="?status=all&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'all' ? 'active' : ''; ?>">All</a>
-                <a href="?status=pending&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'pending' ? 'active' : ''; ?>">Pending</a>
-                <a href="?status=rebook&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo ($status_filter == 'rebook' || $status_filter == 'pending_rebook') ? 'active' : ''; ?>">Rebooks</a>
-                <a href="?status=paid&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'paid' ? 'active' : ''; ?>">Fee / Fully Paid</a>
-                <a href="?status=cancelled&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'cancelled' ? 'active' : ''; ?>">Cancelled</a>
-                <a href="?status=history&view=<?php echo $view; ?><?php echo $search ? '&search='.urlencode($search) : ''; ?>" class="filter-btn <?php echo $status_filter == 'history' ? 'active' : ''; ?>">History</a>
+                <a href="<?php echo $bm_url(['status' => 'all']); ?>" class="filter-btn <?php echo $status_filter == 'all' ? 'active' : ''; ?>">All</a>
+                <a href="<?php echo $bm_url(['status' => 'pending']); ?>" class="filter-btn <?php echo $status_filter == 'pending' ? 'active' : ''; ?>">Pending</a>
+                <a href="<?php echo $bm_url(['status' => 'rebook']); ?>" class="filter-btn <?php echo ($status_filter == 'rebook' || $status_filter == 'pending_rebook') ? 'active' : ''; ?>">Rebooks</a>
+                <a href="<?php echo $bm_url(['status' => 'paid']); ?>" class="filter-btn <?php echo $status_filter == 'paid' ? 'active' : ''; ?>">Fee / Fully Paid</a>
+                <a href="<?php echo $bm_url(['status' => 'cancelled']); ?>" class="filter-btn <?php echo $status_filter == 'cancelled' ? 'active' : ''; ?>">Cancelled</a>
+                <a href="<?php echo $bm_url(['status' => 'history']); ?>" class="filter-btn <?php echo $status_filter == 'history' ? 'active' : ''; ?>">History</a>
             </div>
-<div class="search-box">                <input type="hidden" name="status" value="<?php echo $status_filter; ?>">
-                <input type="hidden" name="view" value="<?php echo $view; ?>">
-<input 
-    type="text" 
-    id="bookingSearch"
-    placeholder="Search by reference, guest, or item..."
-    autocomplete="off"
->                <button type="button"><i class="fas fa-search"></i></button>
+<div class="search-box">
+                <input
+                    type="text"
+                    id="bookingSearch"
+                    name="search"
+                    form="bmFilterForm"
+                    value="<?php echo htmlspecialchars($search, ENT_QUOTES, 'UTF-8'); ?>"
+                    maxlength="<?php echo BookingFilters::SEARCH_MAX; ?>"
+                    placeholder="Search by reference, guest, or item..."
+                    aria-label="Search bookings by reference, guest or item"
+                    autocomplete="off"
+                >
+                <button type="submit" form="bmFilterForm" aria-label="Search"><i class="fas fa-search"></i></button>
                 <?php if($search): ?>
-                    <a href="?status=<?php echo $status_filter; ?>&view=<?php echo $view; ?>" class="btn-clear"><i class="fas fa-times"></i> Clear</a>
+                    <a href="<?php echo $bm_url(['search' => '']); ?>" class="btn-clear"><i class="fas fa-times"></i> Clear</a>
                 <?php endif; ?>
           </div>
         </div>
+
+        <!-- Phase 8.4a: service / arrival date / quick filters. One GET form (also carries the search box above). -->
+        <form id="bmFilterForm" method="get" action="booking-management.php">
+            <input type="hidden" name="status" value="<?php echo htmlspecialchars($status_filter, ENT_QUOTES, 'UTF-8'); ?>">
+            <input type="hidden" name="view" value="<?php echo htmlspecialchars($view, ENT_QUOTES, 'UTF-8'); ?>">
+            <input type="hidden" name="quick" value="<?php echo htmlspecialchars($bm_filters['quick'], ENT_QUOTES, 'UTF-8'); ?>">
+            <input type="hidden" name="tab" id="bmTabField" value="">
+        </form>
+        <?php if($bm_filters['notice'] !== ''): ?>
+        <div class="bm-notice"><i class="fas fa-info-circle"></i> <?php echo htmlspecialchars($bm_filters['notice']); ?></div>
+        <?php endif; ?>
+        <details class="bm-filters" id="bmFilters" <?php echo $bm_filters['active'] > 0 ? 'open' : ''; ?>>
+            <summary><i class="fas fa-sliders-h"></i> Filters<?php if($bm_filters['active'] > 0): ?> <span class="bm-active-count"><?php echo (int)$bm_filters['active']; ?> active</span><?php endif; ?></summary>
+            <div class="bm-filters-body">
+                <div class="bm-field">
+                    <label for="bmService">Service</label>
+                    <select id="bmService" name="service" form="bmFilterForm">
+                        <?php foreach(BookingFilters::SERVICE_LABELS as $bmK => $bmL): ?>
+                        <option value="<?php echo $bmK; ?>" <?php echo $bm_filters['service'] === $bmK ? 'selected' : ''; ?>><?php echo $bmL; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <?php
+                    $bmResSvc = $bm_filters['service'];
+                    $bmResOn  = in_array($bmResSvc, BookingFilters::RESOURCE_SERVICES, true);
+                    $bmResNote = $bmResSvc === 'food' ? 'No resource filter for Food' : ($bmResSvc === 'package' ? 'No resource filter for Package' : 'Select a service first');
+                ?>
+                <div class="bm-field bm-resource" id="bmResourceField" <?php echo $view === 'calendar' ? '' : 'hidden'; ?>>
+                    <label for="bmResource" id="bmResourceLabel"><?php echo $bmResOn ? BookingFilters::RESOURCE_LABELS[$bmResSvc]['field'] : 'Resource'; ?></label>
+                    <select id="bmResource" name="resource" form="bmFilterForm" <?php echo $bmResOn ? '' : 'disabled'; ?>>
+                        <?php if($bmResOn): ?>
+                        <option value=""><?php echo BookingFilters::RESOURCE_LABELS[$bmResSvc]['all']; ?></option>
+                        <?php foreach($bm_resources[$bmResSvc] as $bmRid => $bmRname): $bmRval = $bmResSvc . '-' . $bmRid; ?>
+                        <option value="<?php echo $bmRval; ?>" <?php echo $bm_filters['resource'] === $bmRval ? 'selected' : ''; ?>><?php echo htmlspecialchars($bmRname !== '' ? $bmRname : ('#' . $bmRid), ENT_QUOTES, 'UTF-8'); ?></option>
+                        <?php endforeach; ?>
+                        <?php else: ?>
+                        <option value=""><?php echo $bmResNote; ?></option>
+                        <?php endif; ?>
+                    </select>
+                </div>
+                <div class="bm-field">
+                    <label for="bmDate">Arrival date</label>
+                    <select id="bmDate" name="date" form="bmFilterForm">
+                        <?php foreach(BookingFilters::DATE_LABELS as $bmK => $bmL): ?>
+                        <option value="<?php echo $bmK; ?>" <?php echo $bm_filters['date'] === $bmK ? 'selected' : ''; ?>><?php echo $bmL; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="bm-field bm-custom" <?php echo $bm_filters['date'] === 'custom' ? '' : 'hidden'; ?>>
+                    <label for="bmFrom">From</label>
+                    <input type="date" id="bmFrom" name="from" form="bmFilterForm" value="<?php echo htmlspecialchars($bm_filters['from'], ENT_QUOTES, 'UTF-8'); ?>">
+                </div>
+                <div class="bm-field bm-custom" <?php echo $bm_filters['date'] === 'custom' ? '' : 'hidden'; ?>>
+                    <label for="bmTo">To</label>
+                    <input type="date" id="bmTo" name="to" form="bmFilterForm" value="<?php echo htmlspecialchars($bm_filters['to'], ENT_QUOTES, 'UTF-8'); ?>">
+                </div>
+                <div class="bm-actions">
+                    <button type="submit" form="bmFilterForm" class="bm-apply"><i class="fas fa-filter"></i> Apply</button>
+                    <?php if($bm_filters['active'] > 0): ?>
+                    <a href="<?php echo $bm_url(['search' => '', 'service' => 'all', 'date' => '', 'from' => '', 'to' => '', 'quick' => '', 'resource' => '']); ?>" class="btn-clear"><i class="fas fa-times"></i> Clear filters</a>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <div class="bm-quick" role="group" aria-label="Quick filters">
+                <?php foreach(BookingFilters::QUICK_LABELS as $bmK => $bmL): $bmOn = $bm_filters['quick'] === $bmK; ?>
+                <a href="<?php echo $bm_url(['quick' => $bmOn ? '' : $bmK]); ?>" class="filter-btn <?php echo $bmOn ? 'active' : ''; ?>" aria-pressed="<?php echo $bmOn ? 'true' : 'false'; ?>"><?php echo $bmL; ?></a>
+                <?php endforeach; ?>
+            </div>
+        </details>
 
         <?php if($view == 'calendar'): ?>
         <div class="card">
@@ -1878,10 +1945,10 @@ function formatGuestNames($guest_names) {
             <div class="booking-tab" onclick="showBookingType('tour')"><i class="fas fa-umbrella-beach"></i> Tour (<?php echo count($active_tour); ?>)</div>
             <div class="booking-tab" onclick="showBookingType('food')"><i class="fas fa-utensils"></i> Food (<?php echo count($active_food); ?>)</div>
             <div class="booking-tab package-tab" onclick="showBookingType('package')"><i class="fas fa-box-open"></i> Package (<?php echo count($active_package); ?>)</div>
-            <div class="booking-tab rebook-tab <?php echo $rebook_pending_count > 0 ? 'has-pending' : ''; ?>" onclick="showBookingType('rebook')">
+            <div class="booking-tab rebook-tab <?php echo $rebook_pending_global > 0 ? 'has-pending' : ''; ?>" onclick="showBookingType('rebook')">
                 <i class="fas fa-redo"></i> Rebooks
-                <?php if($rebook_pending_count > 0): ?>
-                    <span class="tab-count"><?php echo $rebook_pending_count; ?> pending</span>
+                <?php if($rebook_pending_global > 0): ?>
+                    <span class="tab-count"><?php echo $rebook_pending_global; ?> pending</span>
                 <?php endif; ?>
             </div>
             <div class="booking-tab history-tab" onclick="showBookingType('history')">
@@ -2626,6 +2693,9 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                     <h2><i class="fas fa-clock" style="color:#f59e0b;"></i> Pending Rebooks (<?php echo $rebook_pending_count; ?>)</h2>
                 </div>
 
+                <?php if($rebook_pending_global > $rebook_pending_count): ?>
+                <div class="bm-notice"><i class="fas fa-filter"></i> <?php echo (int)($rebook_pending_global - $rebook_pending_count); ?> more pending rebook(s) are hidden by the current filters. <a href="<?php echo $bm_url(['search' => '', 'service' => 'all', 'date' => '', 'from' => '', 'to' => '', 'quick' => '', 'status' => 'all']); ?>">Clear filters</a></div>
+                <?php endif; ?>
                 <?php if($rebook_pending_count > 0): ?>
                 <div class="rebook-info-note">
                     <i class="fas fa-info-circle"></i>
@@ -3074,54 +3144,12 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
     </div>
 </div>
 
-<!-- LOGOUT MODAL -->
-<div class="logout-modal-overlay" id="logoutModal">
-    <div class="logout-modal">
-        <div class="logout-modal-icon"><i class="fas fa-sign-out-alt"></i></div>
-        <h3>Logout?</h3>
-        <p>Are you sure you want to sign out from your account?</p>
-        <div class="logout-modal-actions">
-            <button type="button" class="btn-logout-cancel" onclick="closeLogoutModal()">
-                <i class="fas fa-times"></i> Cancel
-            </button>
-            <a href="?logout=1" class="btn-logout-confirm">
-                <i class="fas fa-sign-out-alt"></i> Yes, Logout
-            </a>
-        </div>
-    </div>
-</div>
+<?php admin_layout_footer(); ?>
 
 <script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js"></script>
 <script>
-/* ============================================================
-   SIDEBAR
-   ============================================================ */
-function toggleSidebar() {
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('menuToggle');
-    const willOpen = !sidebar.classList.contains('open');
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-    toggleBtn.classList.toggle('active');
-    if (willOpen && window.innerWidth <= 1024) {
-        document.body.classList.add('sidebar-open-mobile');
-    } else {
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-    document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-}
-
-window.addEventListener('resize', function() {
-    const sidebar = document.getElementById('sidebar');
-    if (window.innerWidth > 1024 && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        document.getElementById('sidebarOverlay').classList.remove('active');
-        document.getElementById('menuToggle').classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-        document.body.style.overflow = 'auto';
-    }
-});
+// Tab opened automatically when a filter is active (Phase 8.4a)
+var BM_AUTO_TAB = <?php echo json_encode($bm_auto_tab); ?>;
 
 /* ============================================================
    TAB SWITCHING
@@ -4037,43 +4065,16 @@ function exportHistoryCSV() {
 }
 
 /* ============================================================
-   LOGOUT MODAL
-   ============================================================ */
-function openLogoutModal(event) {
-    if (event) event.preventDefault();
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        var overlay = document.getElementById('sidebarOverlay');
-        var toggleBtn = document.getElementById('menuToggle');
-        if (overlay) overlay.classList.remove('active');
-        if (toggleBtn) toggleBtn.classList.remove('active');
-        document.body.classList.remove('sidebar-open-mobile');
-    }
-    document.getElementById('logoutModal').classList.add('show');
-    document.body.style.overflow = 'hidden';
-}
-
-function closeLogoutModal() {
-    document.getElementById('logoutModal').classList.remove('show');
-    document.body.style.overflow = 'auto';
-}
-
-/* ============================================================
    ESC KEY + OUTSIDE CLICK
    ============================================================ */
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
-        var sidebar = document.getElementById('sidebar');
-        if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
         closeProofModal();
         closeViewBookingModal();
         closeConfirmModal();
         closeRejectModal();
         closeRejectRebookModal();
         closeAdminCancelModal();
-        var logoutModal = document.getElementById('logoutModal');
-        if (logoutModal && logoutModal.classList.contains('show')) closeLogoutModal();
     }
 });
 
@@ -4092,17 +4093,21 @@ document.addEventListener('DOMContentLoaded', function() {
     var urlParams = new URLSearchParams(window.location.search);
     var requestedTab = urlParams.get('tab');
     var statusParam = urlParams.get('status');
+    // With a filter active, a requested service tab that has no results gives way to the tab that does.
+    if (requestedTab && BM_AUTO_TAB && ['house', 'tour', 'food', 'package'].indexOf(requestedTab) !== -1) {
+        var reqSection = document.getElementById(requestedTab + '-section');
+        if (!reqSection || !reqSection.querySelector('tbody tr')) requestedTab = BM_AUTO_TAB;
+    }
     if (requestedTab && ['house', 'tour', 'food', 'package', 'rebook', 'history'].indexOf(requestedTab) !== -1) {
         showBookingType(requestedTab);
     } else if (statusParam === 'rebook' || statusParam === 'pending_rebook') {
         showBookingType('rebook');
-    } else if (statusParam === 'history') {
-        showBookingType('history');
-    } else if (window.location.hash) {
-        var hashTab = window.location.hash.replace('#', '');
-        if (['house', 'tour', 'food', 'package', 'rebook', 'history'].indexOf(hashTab) !== -1) {
-            showBookingType(hashTab);
-        }
+    } else if (statusParam === 'history' || statusParam === 'cancelled') {
+        showBookingType('history');   // cancelled bookings only ever appear in the History tab
+    } else if (window.location.hash && ['house', 'tour', 'food', 'package', 'rebook', 'history'].indexOf(window.location.hash.replace('#', '')) !== -1) {
+        showBookingType(window.location.hash.replace('#', ''));
+    } else if (BM_AUTO_TAB) {
+        showBookingType(BM_AUTO_TAB);  // a filter is active: open the tab that has results
     }
 
     var rejectModal = document.getElementById('rejectReasonModal');
@@ -4113,8 +4118,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (rejectRebookModal) rejectRebookModal.addEventListener('click', function(e) { if (e.target === this) closeRejectRebookModal(); });
     var adminCancelModal = document.getElementById('adminCancelModal');
     if (adminCancelModal) adminCancelModal.addEventListener('click', function(e) { if (e.target === this) closeAdminCancelModal(); });
-    var logoutModal = document.getElementById('logoutModal');
-    if (logoutModal) logoutModal.addEventListener('click', function(e) { if (e.target === this) closeLogoutModal(); });
 
     setTimeout(function() {
         document.querySelectorAll('.alert').forEach(function(alert) {
@@ -4173,85 +4176,54 @@ document.addEventListener('DOMContentLoaded', function() {
     <?php endif; ?>
 });
 
-document.addEventListener("DOMContentLoaded", function(){
+/* ============================================================
+   Phase 8.4a — FILTER FORM (server-side GET is the source of truth; no client-side filtering)
+   ============================================================ */
+document.addEventListener("DOMContentLoaded", function() {
+    var form = document.getElementById('bmFilterForm');
+    var details = document.getElementById('bmFilters');
+    var dateSel = document.getElementById('bmDate');
+    var svcSel = document.getElementById('bmService');
+    var resSel = document.getElementById('bmResource');
+    var resLabel = document.getElementById('bmResourceLabel');
 
-    const search = document.getElementById("bookingSearch");
-
-    const rows = document.querySelectorAll(".booking-row");
-
-
-    if(!search) return;
-
-
-    search.addEventListener("input", function(){
-
-        const keyword = this.value.toLowerCase().trim();
-
-
-        rows.forEach(row => {
-
-            const text = row.dataset.search;
-
-
-            if(text.includes(keyword)){
-
-                row.style.display = "";
-
-            }else{
-
-                row.style.display = "none";
-
-            }
-
-        });
-
-    });
-
-});
-document.addEventListener("DOMContentLoaded", function(){
-
-const search = document.getElementById("bookingSearch");
-const rows = document.querySelectorAll(".booking-row");
-
-search.addEventListener("input", function(){
-
-    let keyword = this.value.toLowerCase();
-
-    rows.forEach(row=>{
-
-        if(row.dataset.search.includes(keyword)){
-            row.style.display="";
-        }else{
-            row.style.display="none";
+    // Resource (unit / boat) depends on Service: rebuild its options when Service changes; the old choice never carries over.
+    var RES = <?php
+        $bmResJs = ['labels' => BookingFilters::RESOURCE_LABELS, 'items' => ['house' => [], 'tour' => []]];
+        foreach (['house', 'tour'] as $bmJsT) foreach ($bm_resources[$bmJsT] as $bmJsId => $bmJsName) $bmResJs['items'][$bmJsT][] = [$bmJsT . '-' . $bmJsId, $bmJsName !== '' ? $bmJsName : ('#' . $bmJsId)];
+        echo json_encode($bmResJs, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    ?>;
+    if (svcSel && resSel) svcSel.addEventListener('change', function() {
+        var svc = svcSel.value, on = (svc === 'house' || svc === 'tour');
+        while (resSel.options.length) resSel.remove(0);
+        function add(v, t) { var o = document.createElement('option'); o.value = v; o.textContent = t; resSel.appendChild(o); }
+        if (on) {
+            add('', RES.labels[svc].all);
+            RES.items[svc].forEach(function(it) { add(it[0], it[1]); });
+            if (resLabel) resLabel.textContent = RES.labels[svc].field;
+        } else {
+            add('', svc === 'food' ? 'No resource filter for Food' : (svc === 'package' ? 'No resource filter for Package' : 'Select a service first'));
+            if (resLabel) resLabel.textContent = 'Resource';
         }
-
+        resSel.disabled = !on;
+        resSel.value = '';
     });
 
+    // Desktop: filter panel open by default. Phones: collapsed unless a filter is already active.
+    if (details && window.innerWidth > 768) details.open = true;
+
+    // Show the From / To pickers only for a custom range.
+    if (dateSel) dateSel.addEventListener('change', function() {
+        document.querySelectorAll('#bmFilters .bm-custom').forEach(function(el) { el.hidden = (dateSel.value !== 'custom'); });
+    });
+
+    // Remember which tab the user is looking at, so the results page opens the same one.
+    if (form) form.addEventListener('submit', function() {
+        var active = document.querySelector('.booking-section.active');
+        var field = document.getElementById('bmTabField');
+        if (active && field) field.value = active.id.replace('-section', '');
+    });
 });
-
-});
-
-document.addEventListener("DOMContentLoaded", function(){
-
-const search = document.getElementById("bookingSearch");
-
-search.addEventListener("input", function(){
-
-let keyword = this.value.toLowerCase();
-
-document.querySelectorAll(".booking-row").forEach(row=>{
-
-row.style.display =
-row.dataset.search.includes(keyword)
-? ""
-: "none";
-
-});
-
-});
-
-});
-
 </script>
 
 <?php require __DIR__ . '/includes/walkin-modal.php'; ?>

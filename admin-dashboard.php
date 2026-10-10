@@ -5,6 +5,7 @@ date_default_timezone_set('Asia/Manila');
 
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
+require_once 'includes/admin-layout.php';
 
 
 if (file_exists('includes/SystemLogger.php')) {
@@ -232,14 +233,6 @@ if(isset($_GET['logout'])) {
     exit();
 }
 
-// Logo
-$nav_logo = 'uploads/logos/logo.png';
-if(isset($content['site_settings']['logo_path']) && !empty($content['site_settings']['logo_path'])) {
-    $nav_logo = $content['site_settings']['logo_path'];
-}
-$nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
-$site_name = $content['site_settings']['site_name'] ?? 'Hundred Islands';
-
 function renderSmallStars($rating) {
     $html = '';
     $fullStars = floor($rating);
@@ -305,41 +298,61 @@ function getBookingStatusLabel($payment_status) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
+    <link rel="stylesheet" href="assets/css/admin-layout.css?v=<?php echo (int)@filemtime(__DIR__ . '/assets/css/admin-layout.css'); ?>">
     <style>
+        /* Page values that differ from assets/css/admin-layout.css (kept so this page looks exactly as before).
+           Delete a line to adopt the shared default. */
+        .sidebar { transition: all; }
+        .sidebar-header .logo .logo-icon { box-shadow: none; }
+        .sidebar-header .logo .logo-text .main { letter-spacing: inherit; }
+        .sidebar-close-btn { transition: all; }
+        .sidebar-header .role-badge { letter-spacing: inherit; }
+        .menu-toggle { transition: all; }
+        body.sidebar-open-mobile .menu-toggle { transform: none; }
+        .main-content { transition: all; }
+        .top-bar .user-profile .avatar { box-shadow: none; }
+        .mobile-avatar { box-shadow: none; }
+        .badge { letter-spacing: inherit; white-space: nowrap; }
+        .logout-modal p { line-height: inherit; }
+        @media (max-width: 1024px) {
+            .sidebar { padding-top: 25px; }
+            .sidebar-overlay.active { display: block; }
+        }
+        @media (max-width: 768px) {
+            .top-bar { padding-bottom: 15px; padding-left: 100px; padding-right: 100px; }
+            .top-bar .page-title h1 > i { font-size: inherit; }
+            .top-bar .page-title h1 .mobile-role-badge { white-space: inherit; }
+        }
+        @media (max-width: 480px) {
+            .menu-toggle { border-radius: 12px; }
+            .sidebar-header .logo .logo-text .main { font-size: 18px; }
+            .sidebar-header .logo .logo-icon { width: 48px; height: 48px; font-size: 22px; }
+            .nav-link i { font-size: 16px; }
+            .top-bar { padding-left: 92px; padding-right: 92px; }
+            .top-bar .page-title h1 { gap: 8px; }
+            .top-bar .page-title h1 > i { font-size: inherit; }
+            .top-bar .page-title p { font-size: 12px; }
+            .top-bar .page-title h1 .mobile-avatar { right: 14px; }
+            .top-bar .page-title h1 .mobile-role-badge { font-size: 11px; padding: 4px 12px; }
+            .logout-modal { padding: 35px 30px 25px 30px; }
+            .logout-modal-actions { flex-direction: row; }
+            .btn-logout-cancel { width: auto; }
+            .btn-logout-confirm { width: auto; }
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; overflow-x: hidden; }
-        .app-container { display: flex; min-height: 100vh; }
 
         /* ==================== SIDEBAR ==================== */
         .sidebar { width: 280px; background: #0B2447; box-shadow: 4px 0 20px rgba(0,0,0,0.2); padding: 25px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 2px solid rgba(77, 166, 217, 0.15); z-index: 100; flex-shrink: 0; }
         .sidebar::-webkit-scrollbar { width: 5px; }
         .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
-        .sidebar-header { padding: 0 20px 25px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 20px; }
-        .sidebar-header-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .sidebar-header .logo { font-size: 22px; font-weight: 700; color: white; text-decoration: none; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
         .sidebar-header .logo .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: white; flex-shrink: 0; overflow: hidden; }
-        .sidebar-header .logo .logo-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; background: white; }
-        .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
         .sidebar-header .logo .logo-text .main { font-size: 18px; font-weight: 700; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .sidebar-header .logo .logo-text .sub { font-size: 10px; color: #7bb8f0; }
         .sidebar-close-btn { display: none; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #e0eeff; width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; flex-shrink: 0; align-items: center; justify-content: center; }
         .sidebar-close-btn:hover { background: #ef4444; border-color: #ef4444; color: white; transform: rotate(90deg); }
         .sidebar-header .role-badge { display: inline-block; margin-top: 12px; padding: 4px 14px; border-radius: 20px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
-        .sidebar-header .role-badge.admin { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
-        .sidebar-header .role-badge.staff { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-
-        .nav-menu { list-style: none; padding: 0; margin: 0; }
         .nav-item { margin-bottom: 2px; position: relative; }
-        .nav-link { display: flex; align-items: center; gap: 14px; padding: 12px 20px; color: #b3d9ff; text-decoration: none; transition: all 0.3s; border-left: 3px solid transparent; font-weight: 500; font-size: 14px; }
-        .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
-        .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
-        .nav-link.active i { color: #7bb8f0; }
-        .nav-link .nav-badge { margin-left: auto; background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 1px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; }
-        .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
-
-        .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 99; opacity: 0; transition: opacity 0.3s ease; }
-        .sidebar-overlay.active { display: block; opacity: 1; }
 
         .menu-toggle { display: none; position: fixed; top: 12px; left: 12px; z-index: 1001; background: #0B2447; color: white; border: none; border-radius: 12px; width: 48px; height: 48px; font-size: 22px; cursor: pointer; align-items: center; justify-content: center; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid rgba(77, 166, 217, 0.2); }
         .menu-toggle:hover { background: rgba(77, 166, 217, 0.2); transform: scale(1.05); }
@@ -357,7 +370,6 @@ function getBookingStatusLabel($payment_status) {
             .sidebar { width: 85%; max-width: 300px; }
             .menu-toggle { width: 42px; height: 42px; font-size: 18px; top: 10px; left: 10px; }
             .main-content { padding: 60px 12px 16px !important; }
-            .nav-link { padding: 10px 16px; font-size: 13px; }
         }
 
         /* ==================== MAIN CONTENT ==================== */
@@ -368,31 +380,13 @@ function getBookingStatusLabel($payment_status) {
             width: calc(100% - 280px);
             overflow: hidden;
         }
-
-        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid rgba(11, 36, 71, 0.1); flex-wrap: wrap; gap: 10px; }
-        .top-bar .page-title h1 { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0; }
-        .top-bar .page-title h1 i { color: #4DA6D9; }
-        .top-bar .page-title p { color: #4a6a8c; font-size: 13px; margin: 2px 0 0 0; }
-        .top-bar .user-profile { display: flex; align-items: center; gap: 15px; flex-shrink: 0; }
         .top-bar .user-profile .avatar { width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 26px; border: 3px solid rgba(77, 166, 217, 0.35); flex-shrink: 0; overflow: hidden; }
-        .top-bar .user-profile .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-        .top-bar .user-profile .user-name { color: #0B2447; font-weight: 600; font-size: 15px; }
-        .top-bar .user-profile .user-role { color: #4a6a8c; font-size: 13px; }
-
-        .mobile-role-badge, .mobile-avatar { display: none; }
         .mobile-avatar { display: none; width: 80px; height: 80px; border-radius: 50%; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 32px; border: 4px solid #4DA6D9; flex-shrink: 0; overflow: hidden; }
-        .mobile-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 
         @media (max-width: 768px) {
             .top-bar { position: relative; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 8px; padding: 15px 100px; min-height: 130px; }
-            .top-bar .page-title { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
-            .top-bar .page-title h1 { font-size: 20px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; margin: 0; }
             .top-bar .page-title h1 .mobile-role-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-            .top-bar .page-title h1 .mobile-role-badge.admin { background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1.5px solid rgba(239, 68, 68, 0.25); }
-            .top-bar .page-title h1 .mobile-role-badge.staff { background: rgba(251, 191, 36, 0.15); color: #d97706; border: 1.5px solid rgba(251, 191, 36, 0.3); }
             .top-bar .page-title h1 .mobile-avatar { display: inline-flex; position: absolute; top: 50%; right: 14px; transform: translateY(-50%); }
-            .top-bar .page-title p { font-size: 12px; text-align: center; margin: 0; }
-            .top-bar .user-profile { display: none !important; }
         }
         @media (max-width: 480px) {
             .top-bar { padding: 15px 92px; min-height: 120px; }
@@ -453,7 +447,6 @@ function getBookingStatusLabel($payment_status) {
 
 }
 
-
 .stat-card:hover{
 
     transform:translateY(-6px);
@@ -462,8 +455,6 @@ function getBookingStatusLabel($payment_status) {
     0 20px 45px rgba(6,38,61,.15);
 
 }
-
-
 
 .stat-icon{
 
@@ -487,8 +478,6 @@ function getBookingStatusLabel($payment_status) {
 
 }
 
-
-
 .stat-number{
 
     margin-top:18px;
@@ -501,8 +490,6 @@ function getBookingStatusLabel($payment_status) {
 
 }
 
-
-
 .stat-label{
 
     font-size:15px;
@@ -512,8 +499,6 @@ function getBookingStatusLabel($payment_status) {
     color:#334155;
 
 }
-
-
 
 .stat-small{
 
@@ -529,42 +514,35 @@ function getBookingStatusLabel($payment_status) {
     color:#2563eb;
 }
 
-
 .stat-card:nth-child(2) .stat-icon{
     background:#cffafe;
     color:#0891b2;
 }
-
 
 .stat-card:nth-child(3) .stat-icon{
     background:#ede9fe;
     color:#7c3aed;
 }
 
-
 .stat-card:nth-child(4) .stat-icon{
     background:#dcfce7;
     color:#16a34a;
 }
-
 
 .stat-card:nth-child(5) .stat-icon{
     background:#fef3c7;
     color:#d97706;
 }
 
-
 .stat-card:nth-child(6) .stat-icon{
     background:#fef9c3;
     color:#ca8a04;
 }
 
-
 .stat-card:nth-child(7) .stat-icon{
     background:#ffedd5;
     color:#ea580c;
 }
-
 
 .stat-card:nth-child(8) .stat-icon{
     background:#e2e8f0;
@@ -580,19 +558,16 @@ function getBookingStatusLabel($payment_status) {
     margin-top:18px;
 }
 
-
 .stat-label{
     color:#334155 !important;
     font-size:15px;
     font-weight:700;
 }
 
-
 .stat-small{
     color:#64748b !important;
     font-size:12px;
 }
-
 
 .stat-small.warning{
     color:#f59e0b !important;
@@ -759,9 +734,6 @@ function getBookingStatusLabel($payment_status) {
 
         /* ==================== BADGES ==================== */
         .badge { padding: 3px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; display: inline-block; text-transform: uppercase; }
-        .badge-success { background: #e6f7e6; color: #10b981; }
-        .badge-warning { background: #fef3c7; color: #f59e0b; }
-        .badge-danger { background: #fee2e2; color: #ef4444; }
         .badge-info { background: #e0f2fe; color: #0369a1; }
 
         .review-stars { white-space: nowrap; }
@@ -771,20 +743,7 @@ function getBookingStatusLabel($payment_status) {
         .footer { background: #0B2447; color: #b3d9ff; padding: 15px 0; text-align: center; margin-top: 30px; border-radius: 12px; font-size: 13px; border: 1px solid rgba(77, 166, 217, 0.15); }
         .footer i { color: #4DA6D9; }
         @media (max-width: 768px) { .footer { font-size: 11px; padding: 12px 10px; } }
-
-        /* ==================== LOGOUT MODAL ==================== */
-        .logout-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, 0.6); backdrop-filter: blur(6px); z-index: 99999; align-items: center; justify-content: center; padding: 20px; }
-        .logout-modal-overlay.show { display: flex; }
-        .logout-modal { background: white; border-radius: 24px; max-width: 400px; width: 100%; padding: 35px 30px 25px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,0.4); border-top: 6px solid #ef4444; }
-        .logout-modal-icon { width: 80px; height: 80px; background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 18px; font-size: 36px; color: #ef4444; }
-        .logout-modal h3 { font-size: 22px; font-weight: 700; color: #991b1b; margin-bottom: 8px; }
         .logout-modal p { color: #64748b; font-size: 14px; margin-bottom: 25px; }
-        .logout-modal-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-        .btn-logout-cancel, .btn-logout-confirm { flex: 1; min-width: 130px; min-height: 48px; padding: 13px 18px; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
-        .btn-logout-cancel { background: #e2e8f0; color: #475569; }
-        .btn-logout-cancel:hover { background: #cbd5e1; }
-        .btn-logout-confirm { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
-        .btn-logout-confirm:hover { box-shadow: 0 8px 25px rgba(239, 68, 68, 0.45); color: white; }
 
         /* ==================== BUSINESS OVERVIEW SECTION ==================== */
         .dashboard-section {
@@ -809,7 +768,6 @@ function getBookingStatusLabel($payment_status) {
             .section-heading h2 { font-size: 18px; }
             .section-heading span { font-size: 12px; }
         }
-
 
         /* FINAL ADMIN DASHBOARD LAYOUT OVERRIDE */
         .main-content .dashboard-grid {
@@ -875,7 +833,6 @@ function getBookingStatusLabel($payment_status) {
     .main-content .dashboard-grid { grid-template-columns: 1fr !important; }
 }
 
-
 /* FINAL CARD NATURAL HEIGHT */
 
 .main-content .dashboard-column .card {
@@ -886,154 +843,14 @@ function getBookingStatusLabel($payment_status) {
 .main-content .table-responsive {
     min-height:0;
 }
-
-            .nav-link .nav-badge.blocked { background: rgba(100, 116, 139, 0.3); color: #cbd5e1; }
     </style>
     
     <link rel="stylesheet" href="assets/css/admin-responsive.css">
 </head>
 <body>
 
-<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-<button class="menu-toggle" id="menuToggle" onclick="toggleSidebar()" aria-label="Toggle Menu">
-    <i class="fas fa-bars"></i>
-</button>
-
 <div class="app-container">
-    <div class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="sidebar-header-top">
-                <a href="admin-dashboard.php" class="logo">
-                    <div class="logo-icon">
-                        <?php if($nav_logo_exists): ?>
-                            <img src="<?php echo htmlspecialchars($nav_logo); ?>?<?php echo time(); ?>" alt="<?php echo htmlspecialchars($site_name); ?>">
-                        <?php else: ?>
-                            <i class="fas fa-umbrella-beach"></i>
-                        <?php endif; ?>
-                    </div>
-                    <div class="logo-text">
-                        <span class="main">Hundred Islands</span>
-                        <span class="sub">Reservation System</span>
-                    </div>
-                </a>
-                <button class="sidebar-close-btn" onclick="toggleSidebar()" aria-label="Close menu">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <div class="role-badge <?php echo $is_admin ? 'admin' : 'staff'; ?>">
-                <i class="fas fa-<?php echo $is_admin ? 'crown' : 'user-tie'; ?>"></i>
-                <?php echo $is_admin ? 'Administrator' : 'Staff'; ?>
-            </div>
-        </div>
-
-        <ul class="nav-menu">
-            <li class="nav-item">
-                <a href="admin-dashboard.php" class="nav-link active">
-                    <i class="fas fa-th-large"></i>
-                    <span>Dashboard</span>
-                </a>
-            </li>
-
-            <?php if($is_admin): ?>
-            <li class="nav-item">
-                <a href="user-management.php" class="nav-link">
-                    <i class="fas fa-users"></i>
-                    <span>User Management</span>
-                </a>
-            </li>
-            <?php endif; ?>
-
-            <li class="nav-item">
-                <a href="house-dashboard.php" class="nav-link">
-                    <i class="fas fa-home"></i>
-                    <span>House Management</span>
-                </a>
-            </li>
-            <li class="nav-item">
-                <a href="tour-dashboard.php" class="nav-link">
-                    <i class="fas fa-umbrella-beach"></i>
-                    <span>Tour Management</span>
-                </a>
-            </li>
-            <li class="nav-item">
-                <a href="activities-dashboard.php" class="nav-link">
-                    <i class="fas fa-water"></i>
-                    <span>Activities Management</span>
-                </a>
-            </li>
-            <li class="nav-item">
-                <a href="food-dashboard.php" class="nav-link">
-                    <i class="fas fa-utensils"></i>
-                    <span>Food Management</span></a>
-            </li>
-
-            <li class="nav-item">
-                <a href="booking-management.php" class="nav-link">
-                    <i class="fas fa-calendar-check"></i>
-                    <span>Booking Management</span>
-                    <?php if($sidebar_pending_bookings > 0): ?>
-                        <span class="nav-badge" style="background: rgba(245,158,11,0.2); color:#f59e0b;"><?php echo $sidebar_pending_bookings; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-
-            <li class="nav-item">
-                <a href="blocked-dates.php" class="nav-link">
-                    <i class="fas fa-ban"></i>
-                    <span>Blocked Dates</span></a>
-            </li>
-
-            <li class="nav-item">
-                <a href="reviews-management.php" class="nav-link">
-                    <i class="fas fa-star"></i>
-                    <span>Reviews Management</span>
-                    <?php if($sidebar_pending_reviews > 0): ?>
-                        <span class="nav-badge" style="background: rgba(16,185,129,0.2); color:#10b981;"><?php echo $sidebar_pending_reviews; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-
-            <?php if(!empty($is_admin)): ?><li class="nav-item">
-                <a href="reports.php" class="nav-link">
-                    <i class="fas fa-file-alt"></i>
-                    <span>Sales Report</span>
-                </a>
-            </li><?php endif; ?>
-
-            <?php if($is_admin): ?>
-            <li class="nav-item">
-                <a href="edit-content.php" class="nav-link">
-                    <i class="fas fa-edit"></i>
-                    <span>Edit Content</span>
-                </a>
-            </li>
-
-            <li class="nav-item">
-                <a href="system-logs.php" class="nav-link">
-                    <i class="fas fa-history"></i>
-                    <span>System Logs</span>
-                    <?php if($sidebar_failed_logs > 0): ?>
-                        <span class="nav-badge"><?php echo $sidebar_failed_logs; ?></span>
-                    <?php endif; ?>
-                </a>
-            </li>
-            <?php endif; ?>
-
-            <div class="nav-divider"></div>
-            <li class="nav-item">
-                <a href="admin-profile.php" class="nav-link">
-                    <i class="fas fa-user-circle"></i>
-                    <span>My Profile</span>
-                </a>
-            </li>
-            <li class="nav-item">
-                <a href="#" class="nav-link" onclick="openLogoutModal(event); return false;">
-                    <i class="fas fa-sign-out-alt"></i>
-                    <span>Logout</span>
-                </a>
-            </li>
-        </ul>
-    </div>
+    <?php admin_layout_sidebar(['active' => 'dashboard']); ?>
 
     <div class="main-content">
         <div class="top-bar">
@@ -1556,84 +1373,7 @@ function getBookingStatusLabel($payment_status) {
     </div>
 </div>
 
-<div class="logout-modal-overlay" id="logoutModal">
-    <div class="logout-modal">
-        <div class="logout-modal-icon"><i class="fas fa-sign-out-alt"></i></div>
-        <h3>Logout?</h3>
-        <p>Are you sure you want to sign out from your account?</p>
-        <div class="logout-modal-actions">
-            <button type="button" class="btn-logout-cancel" onclick="closeLogoutModal()">
-                <i class="fas fa-times"></i> Cancel
-            </button>
-            <a href="?logout=1" class="btn-logout-confirm">
-                <i class="fas fa-sign-out-alt"></i> Yes, Logout
-            </a>
-        </div>
-    </div>
-</div>
-
-<script>
-    function toggleSidebar() {
-        const sidebar = document.getElementById('sidebar');
-        const overlay = document.getElementById('sidebarOverlay');
-        const toggleBtn = document.getElementById('menuToggle');
-        const willOpen = !sidebar.classList.contains('open');
-        sidebar.classList.toggle('open');
-        overlay.classList.toggle('active');
-        toggleBtn.classList.toggle('active');
-        if (willOpen && window.innerWidth <= 1024) {
-            document.body.classList.add('sidebar-open-mobile');
-        } else {
-            document.body.classList.remove('sidebar-open-mobile');
-        }
-        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : 'auto';
-    }
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
-            const sidebar = document.getElementById('sidebar');
-            if (sidebar.classList.contains('open')) toggleSidebar();
-        }
-    });
-
-    window.addEventListener('resize', function() {
-        const sidebar = document.getElementById('sidebar');
-        if (window.innerWidth > 1024 && sidebar.classList.contains('open')) {
-            sidebar.classList.remove('open');
-            document.getElementById('sidebarOverlay').classList.remove('active');
-            document.getElementById('menuToggle').classList.remove('active');
-            document.body.classList.remove('sidebar-open-mobile');
-            document.body.style.overflow = 'auto';
-        }
-    });
-
-    function openLogoutModal(event) {
-        if (event) event.preventDefault();
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar && sidebar.classList.contains('open')) {
-            sidebar.classList.remove('open');
-            document.getElementById('sidebarOverlay').classList.remove('active');
-            document.getElementById('menuToggle').classList.remove('active');
-            document.body.classList.remove('sidebar-open-mobile');
-        }
-        document.getElementById('logoutModal').classList.add('show');
-        document.body.style.overflow = 'hidden';
-    }
-
-    function closeLogoutModal() {
-        document.getElementById('logoutModal').classList.remove('show');
-        document.body.style.overflow = 'auto';
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
-        const modal = document.getElementById('logoutModal');
-        if (modal) {
-            modal.addEventListener('click', function(e) {
-                if (e.target === this) closeLogoutModal();
-            });
-        }
-    });
-</script>
+<?php admin_layout_footer(); ?>
 
 </body>
 </html>
