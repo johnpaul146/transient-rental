@@ -10,6 +10,8 @@
  *    package counts once.
  *  - "Pending"  = payment still pending (house: or a rebook awaiting confirmation),
  *                 booking not cancelled/completed.
+ *  - "Pending rebooks" = house rebooks awaiting confirmation + tour/food/package rebook requests
+ *                 waiting in `rebook_requests` (Phase 7.6) — the Rebooks tab's number.
  *  - "Paid"     = Reservation Fee Paid or Fully Paid, not cancelled/completed.
  *
  * Staff-safe by construction: no method returns a payment amount, refund/credit
@@ -58,6 +60,10 @@ class DashboardService
             $out['paid']          += (int)$r[2];
             $out['pending_rebooks'] += (int)$r[3];
         }
+        // Phase 7.6: tour / food / package rebook requests waiting for Admin/Staff (same number as the Rebooks tab).
+        try {
+            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending'")->fetchColumn();
+        } catch (PDOException $e) { /* table not created yet: house requests only */ }
         return $out;
     }
 

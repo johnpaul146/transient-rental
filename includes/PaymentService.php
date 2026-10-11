@@ -603,16 +603,24 @@ class PaymentService {
      *    pending so staff can still check the payment.
      *  - package parts follow their package.
      * completed_at is set whenever a booking becomes completed.
+     * $skipPendingRebooks (Phase 7.6; true once the `rebook_requests` table exists): a tour / food / package whose
+     * rebook request is still waiting for Admin/Staff is not completed while it waits — its saved date may pass
+     * before the request is decided, and completing it would make the approved move impossible.
      */
-    public static function autoCompleteSql() {
+    public static function autoCompleteSql($skipPendingRebooks = false) {
         $r = "'" . self::EXPIRED_REASON . "'";
         $noProof = "(payment_proof IS NULL OR payment_proof = '')";
         $standalone = "(package_id IS NULL OR package_id = 0)";
+        $waiting = function ($type, $col) use ($skipPendingRebooks) {
+            return $skipPendingRebooks
+                ? " AND NOT EXISTS (SELECT 1 FROM rebook_requests rr WHERE rr.booking_type = '$type' AND rr.booking_id = $col AND rr.status = 'pending')"
+                : '';
+        };
         $sql = [];
         foreach ([
             ['house_bookings', 'check_out_date < CURDATE()', ' AND original_booking_id IS NULL'],
-            ['tour_bookings',  'booking_date < CURDATE()', ''],
-            ['food_bookings',  'preferred_date IS NOT NULL AND preferred_date < CURDATE()', ''],
+            ['tour_bookings',  'booking_date < CURDATE()', $waiting('tour', 'tour_bookings.id')],
+            ['food_bookings',  'preferred_date IS NOT NULL AND preferred_date < CURDATE()', $waiting('food', 'food_bookings.id')],
         ] as $d) {
             list($t, $past, $extra) = $d;
             $sql[] = "UPDATE $t SET booking_status = 'completed', completed_at = COALESCE(completed_at, NOW())
@@ -631,7 +639,7 @@ class PaymentService {
                 LEFT JOIN tour_bookings tb ON p.tour_booking_id = tb.id
                 LEFT JOIN food_bookings fb ON p.food_booking_id = fb.id";
         $sql[] = "UPDATE $pkgJoin SET p.booking_status = 'completed', p.completed_at = COALESCE(p.completed_at, NOW())
-                   WHERE p.booking_status IN ('pending','confirmed') AND p.amount_paid > 0 AND $pkgPast";
+                   WHERE p.booking_status IN ('pending','confirmed') AND p.amount_paid > 0 AND $pkgPast" . $waiting('package', 'p.id');
         $sql[] = "UPDATE $pkgJoin SET p.booking_status = 'cancelled', p.cancelled_at = COALESCE(p.cancelled_at, NOW()), p.cancellation_reason = $r
                    WHERE p.booking_status IN ('pending','confirmed') AND p.payment_status = 'pending' AND p.amount_paid = 0
                      AND (p.payment_proof IS NULL OR p.payment_proof = '') AND $pkgPast";

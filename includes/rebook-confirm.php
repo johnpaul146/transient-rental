@@ -2,10 +2,11 @@
 /**
  * includes/rebook-confirm.php
  *
- * Confirmation step shown before a guest's rebook request is sent (house / tour / food / package).
+ * Confirmation step shown before a rebook REQUEST is sent (house / tour / food / package). Every rebook is a request
+ * that Admin/Staff confirm later (Phase 7.6), so the final button reads "Submit Rebook Request".
  * UX ONLY: it never validates, prices or changes anything. The form's own POST (same URL, same fields, same CSRF
- * token) is submitted unchanged once the guest presses "Confirm Rebook"; all rules stay in RebookService and the
- * rebook pages' server-side code.
+ * token) is submitted unchanged once the guest presses "Submit Rebook Request"; all rules stay in RebookService and
+ * the rebook pages' server-side code.
  *
  * Include once, inside <body>, before the page's own <script>. A page calls, from its form's submit handler:
  *     if (!RebookConfirm.gate(event, [{label:'Check-in', from:'Oct 14, 2026 · 2:00 PM', to:'Oct 20, 2026 · 2:00 PM'}, ...])) return;
@@ -28,8 +29,9 @@
 .rbc-line.new{color:#0B2447;font-weight:700}
 .rbc-line.new small{color:#4DA6D9}
 .rbc-note{margin:2px 20px 4px;padding:10px 12px;border-radius:10px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;font-size:13px;font-weight:600;display:flex;gap:8px;align-items:center}
+.rbc-sub{margin:6px 20px 0;font-size:12px;color:#64748b}
 .rbc-actions{display:flex;gap:10px;padding:14px 20px 18px}
-.rbc-btn{flex:1;min-height:46px;border:0;border-radius:12px;font-weight:700;font-size:15px;cursor:pointer}
+.rbc-btn{flex:1;min-height:46px;border:0;border-radius:12px;font-weight:700;font-size:15px;cursor:pointer;padding:0 10px}
 .rbc-btn.ghost{background:#e2e8f0;color:#475569}
 .rbc-btn.primary{background:#4DA6D9;color:#fff}
 .rbc-btn:disabled{opacity:.6;cursor:not-allowed}
@@ -37,12 +39,13 @@
 </style>
 <div class="rbc-overlay" id="rbcModal" role="dialog" aria-modal="true" aria-labelledby="rbcTitle">
     <div class="rbc-box">
-        <div class="rbc-head"><h3 id="rbcTitle"><i class="fas fa-redo"></i> Confirm your rebook</h3></div>
+        <div class="rbc-head"><h3 id="rbcTitle"><i class="fas fa-redo"></i> Submit rebook request?</h3></div>
         <div class="rbc-body" id="rbcRows"></div>
         <div class="rbc-note"><i class="fas fa-wallet"></i><span>Your payment remains unchanged.</span></div>
+        <p class="rbc-sub">Admin/Staff confirm the request. Until then the current schedule stays.</p>
         <div class="rbc-actions">
             <button type="button" class="rbc-btn ghost" id="rbcCancel">Cancel</button>
-            <button type="button" class="rbc-btn primary" id="rbcOk">Confirm Rebook</button>
+            <button type="button" class="rbc-btn primary" id="rbcOk">Submit Rebook Request</button>
         </div>
     </div>
 </div>

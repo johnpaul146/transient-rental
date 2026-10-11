@@ -2,11 +2,12 @@
 /**
  * Food Rebook Dashboard (guest, or ADMIN / STAFF from Booking Management).
  *
- * Shows the current food order, the rebooking rules and allowance, the deadline and a calendar. Only the DATE moves:
- * quantity, size, time, pickup/delivery, the delivery unit, the price and every payment field stay exactly as they are.
- * A DELIVERY order can only move to a date inside the guest's confirmed stay at that unit (same rule as ordering).
- * All rules live in RebookService — this page only displays them and calls RebookService::rebookService(), which
- * re-checks everything under locks. Every other role gets 403. This page never touches money.
+ * Shows the current food order, the rebooking rules and allowance, the deadline, a calendar and a time choice.
+ * Phase 7.6: the guest (or staff assisting the guest) picks a new DATE and TIME and submits a REQUEST; the order
+ * stays exactly as it is until Admin/Staff confirm it in Booking Management (Rebooks tab). Item, size, quantity,
+ * pickup/delivery, the delivery unit, the price and every payment field stay the same. A DELIVERY order must stay
+ * inside the guest's confirmed stay at that unit (same rule as ordering). All rules live in RebookService. Every
+ * other role gets 403. This page never touches money.
  */
 session_start();
 require_once 'database.php';
@@ -73,6 +74,11 @@ if (empty($_SESSION['food_rebook_csrf'])) $_SESSION['food_rebook_csrf'] = bin2he
 $csrf = (string)$_SESSION['food_rebook_csrf'];
 
 $blockReason = RebookService::serviceBlockReason('food', $order);
+// Phase 7.6: one request at a time — while one waits for Admin/Staff, the page shows it instead of the calendar.
+$pending = RebookService::pendingRequest($pdo, 'food', $order_pk);
+$curSchedule = RebookService::currentSchedule('food', $order);
+$timeChoices = RebookService::timeChoices('food', $curSchedule['time']);
+$gs = function ($k) { return isset($_GET[$k]) && is_string($_GET[$k]) ? $_GET[$k] : ''; };
 $view = RebookService::foodView($pdo, $order);
 $startDate = $order['preferred_date'];
 $stayWindows = RebookService::foodStayWindows($pdo, $order);
@@ -80,44 +86,51 @@ $stayWindows = RebookService::foodStayWindows($pdo, $order);
 // ------------------------------------------------------------------ AJAX (read-only)
 if ($isAjax) {
     if ($blockReason !== null || !$startDate) jsonOut(['error' => $blockReason ?: 'This food order has no date to move.'], 409);
-    $mode = (string)$_GET['ajax'];
+    if ($pending) jsonOut(['error' => RebookService::PENDING_MESSAGE], 409);
+    $mode = $gs('ajax');
     if ($mode === 'month') {
-        $ym = (string)($_GET['ym'] ?? '');
+        $ym = $gs('ym');
         if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) jsonOut(['error' => 'Invalid month.'], 400);
         $days = [];
         $n = (int)date('t', strtotime($ym . '-01'));
         for ($d = 1; $d <= $n; $d++) {
             $ds = sprintf('%s-%02d', $ym, $d);
-            $r = RebookService::foodDateCheck($pdo, $order, $ds);
-            $days[$ds] = ['ok' => $r['ok'], 'message' => $r['message']];
+            $days[$ds] = RebookService::dayCheck($pdo, 'food', $order, 'food', $ds);
         }
         jsonOut(['days' => $days]);
     }
     if ($mode === 'preview') {
-        $r = RebookService::foodDateCheck($pdo, $order, (string)($_GET['date'] ?? ''));
-        jsonOut($r);
+        // The same validation the request (and later the confirmation) runs; display only.
+        $r = RebookService::plan($pdo, 'food', $order, ['date' => $gs('date'), 'time' => $gs('time')]);
+        jsonOut(['ok' => $r['ok'], 'message' => $r['message'],
+                 'current' => RebookService::scheduleLines('food', $curSchedule),
+                 'requested' => $r['schedule'] ? RebookService::scheduleLines('food', $r['schedule']) : []]);
     }
     jsonOut(['error' => 'Unknown request.'], 400);
 }
 
-// ------------------------------------------------------------------ SUBMIT
+// ------------------------------------------------------------------ SUBMIT (a REQUEST: the booking does not change until Admin/Staff confirm)
 $error = '';
 if (isset($_POST['rebook_food'])) {
     try {
         if (!hash_equals($csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception('Your session expired. Please refresh the page and try again.');
-        $res = RebookService::rebookService($pdo, 'food', $order_pk, (string)($_POST['new_date'] ?? ''), $guest_id, (int)$_SESSION['user_id']);
+        // Only the new date and time are read from the browser; everything else comes from the saved booking.
+        $res = RebookService::requestServiceRebook($pdo, 'food', $order_pk, $guest_id, RebookService::inputFromRequest('food', $_POST), (int)$_SESSION['user_id'], $role);
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'rebook', 'booking',
-                ($isAssist ? (($role === 'admin') ? 'Admin' : 'Staff') . ' rebooked' : 'Guest rebooked') . " food order '{$res['reference']}' from {$res['old_date']} to {$res['new_date']} (payment carried forward, no new fee)",
-                $order_pk, 'food_booking', ['old_date' => $res['old_date']], ['new_date' => $res['new_date'], 'by' => $isAssist ? $role : 'guest']);
+            $old = RebookService::scheduleLines('food', $res['original']); $new = RebookService::scheduleLines('food', $res['requested']);
+            SystemLogger::log($pdo, 'rebook_request', 'booking',
+                ($isAssist ? (($role === 'admin') ? 'Admin' : 'Staff') . ' requested' : 'Guest requested') . " a rebook for food order '{$res['reference']}': " . $old[0]['text'] . ' -> ' . $new[0]['text'] . ' (waiting for confirmation; payment unchanged)',
+                $order_pk, 'food_booking', ['schedule' => $res['original']], ['schedule' => $res['requested'], 'request_id' => $res['id'], 'by' => $isAssist ? $role : 'guest']);
         }
-        header('Location: ' . ($isAssist ? 'booking-management.php?tab=food&food_rebooked=' . urlencode($res['reference']) : 'profile.php?rebooked=service'));
+        header('Location: ' . ($isAssist ? 'booking-management.php?tab=rebook&rebook_requested=' . urlencode($res['reference']) : 'profile.php?rebook_requested=food'));
         exit();
-    } catch (AvailabilityConflictException $e) {
-        $error = 'That date is not available — ' . $e->getMessage() . ' Please choose another date.';
+    } catch (PDOException $e) {
+        error_log('food rebook request failed: ' . $e->getMessage());
+        $error = 'Something went wrong and nothing was saved. Please try again.';
     } catch (Throwable $e) {
         $error = $e->getMessage();
     }
+    $pending = RebookService::pendingRequest($pdo, 'food', $order_pk);
 }
 
 $remaining = RebookService::remaining($order);
@@ -200,6 +213,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .pr-preview .row i{color:#4DA6D9;width:20px}
 .pr-btn{width:100%;margin-top:14px;min-height:48px;padding:12px;border:0;border-radius:12px;background:#F4B400;color:#0B2447;font-weight:700;font-size:15px;cursor:pointer}
 .pr-btn:disabled{background:#e2e8f0;color:#94a3b8;cursor:not-allowed}
+.pr-field{margin-top:12px}.pr-field label{display:block;font-weight:600;font-size:13px;margin-bottom:6px;color:#0B2447}.pr-field select{width:100%;padding:11px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px;background:#fff;color:#1e293b}
+.pr-hint{font-size:12px;color:#64748b;margin-top:8px}
+.pr-pending{border:2px solid #f59e0b;background:#fffbeb;border-radius:12px;padding:12px 14px;font-size:14px;color:#92400e}
+.pr-pending b{display:block;color:#92400e;margin-bottom:4px}.pr-pending .row{padding:3px 0;overflow-wrap:anywhere}
 @media(max-width:820px){.pr-grid{grid-template-columns:1fr}}
 @media(max-width:480px){.pr-card{padding:14px}.pr-title h1{font-size:19px}.pr-stat b{font-size:17px}.cal-grid{gap:3px}.cal-grid .day{padding:8px 0;font-size:13px}}
 </style>
@@ -246,32 +263,48 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <div class="pr-stat"><b><?php echo $deadline ? htmlspecialchars(date('M j', strtotime($deadline))) : '—'; ?></b><small>Deadline</small></div>
                 </div>
                 <ul class="pr-rules">
-                    <li><i class="fas fa-check-circle"></i><span>Only the <strong>date</strong> moves. Item, size, quantity and your order time stay the same.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Choose a new <strong>date and time</strong>. Item, size, quantity, pickup/delivery and price stay the same.</span></li>
                     <?php if (($order['fulfillment_method'] ?? '') === 'delivery'): ?><li><i class="fas fa-check-circle"></i><span><strong>Delivery</strong> must stay inside your confirmed house stay, at the same unit (<?php echo htmlspecialchars((string)$order['delivery_address']); ?>). Dates outside the stay are not available.</span></li><?php endif; ?>
                     <li><i class="fas fa-check-circle"></i><span><?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment is <strong>carried forward</strong>: no new reservation fee, no refund, price unchanged.</span></li>
                     <li><i class="fas fa-check-circle"></i><span>Up to <?php echo $maxRebooks; ?> rebooks per booking, within <?php echo RebookService::WINDOW_DAYS; ?> days from the booking date.</span></li>
-                    <li><i class="fas fa-check-circle"></i><span>The date must be available. It is checked again when you confirm; if it was taken, nothing changes.</span></li>
+                    <li><i class="fas fa-hourglass-half" style="color:#f59e0b"></i><span><strong>This is a request.</strong> Admin/Staff confirm it in Booking Management. Until then <?php echo $isAssist ? 'the guest keeps the' : 'you keep your'; ?> current schedule, and it can be cancelled from the dashboard.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Availability is checked now and again when the request is confirmed; if the new schedule was taken meanwhile, nothing changes.</span></li>
                 </ul>
             </div>
         </div>
 
         <div class="pr-card">
-            <h2><i class="fas fa-calendar-alt"></i> Choose the new date</h2>
-            <?php if ($blockReason === null && $startDate): ?>
+            <h2><i class="fas fa-calendar-alt"></i> Choose the new date and time</h2>
+            <?php if ($pending): $pLines = RebookService::scheduleLines('food', $pending['requested']); ?>
+            <div class="pr-pending"><b><i class="fas fa-hourglass-half"></i> Pending rebook — waiting for admin confirmation</b>
+                <?php foreach ($pLines as $pl): ?><div class="row">Requested <?php echo htmlspecialchars($pl['label']); ?>: <strong><?php echo htmlspecialchars($pl['text']); ?></strong></div><?php endforeach; ?>
+                <div class="row" style="font-size:13px;">Requested on <?php echo htmlspecialchars(date('M j, Y g:i A', strtotime($pending['requested_at']))); ?>. <?php echo $isAssist ? 'Confirm or reject it in the Rebooks tab.' : 'You can cancel it from your dashboard.'; ?></div>
+            </div>
+            <p class="pr-hint"><a href="<?php echo $isAssist ? 'booking-management.php?tab=rebook' : 'profile.php'; ?>"><?php echo $isAssist ? 'Open the Rebooks tab' : 'Back to my bookings'; ?></a></p>
+            <?php elseif ($blockReason === null && $startDate): ?>
             <div class="cal-head">
                 <h3 id="calTitle"></h3>
                 <div class="cal-nav"><button type="button" id="calPrev" aria-label="Previous month">&lsaquo;</button> <button type="button" id="calNext" aria-label="Next month">&rsaquo;</button></div>
             </div>
             <div class="cal-grid" id="calGrid"></div>
             <div class="cal-legend"><span><i style="background:#ecfdf5;border:1px solid #10b981"></i>Available</span><span><i style="background:#f1f5f9;border:1px solid #cbd5e1"></i>Unavailable</span><span><i style="background:#4DA6D9"></i>Selected</span><span><i style="box-shadow:inset 0 0 0 2px #F4B400"></i>Current date</span></div>
-            <div class="cal-note" id="calNote">Pick a date. Unavailable dates are greyed out — tap one to see why.</div>
+            <div class="cal-note" id="calNote">Pick a date, then a time. Unavailable dates are greyed out — tap one to see why.</div>
             <div class="pr-preview" id="preview"></div>
             <form method="POST" id="rebookForm">
                 <input type="hidden" name="rebook_food" value="1">
                 <input type="hidden" name="id" value="<?php echo (int)$order_pk; ?>">
                 <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($csrf); ?>">
                 <input type="hidden" name="new_date" id="newDate" value="">
-                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-check-circle"></i> Confirm Rebook</button>
+                <div class="pr-field">
+                    <label for="newTime"><i class="fas fa-clock"></i> Food time</label>
+                    <select name="new_time" id="newTime">
+                        <?php foreach ($timeChoices as $tc): ?>
+                        <option value="<?php echo substr($tc, 0, 5); ?>" <?php echo $tc === $curSchedule['time'] ? 'selected' : ''; ?>><?php echo date('g:i A', strtotime($tc)); ?><?php echo $tc === $curSchedule['time'] ? ' (current)' : ''; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> Submit Rebook Request</button>
+                <p class="pr-hint">The request waits for Admin/Staff confirmation. <?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment stays as it is.</p>
             </form>
             <?php else: ?>
             <p style="font-size:14px;color:#64748b;">This food order cannot be rebooked right now.</p>
@@ -280,19 +313,19 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     </div>
 </div>
 
-<?php if ($blockReason === null && $startDate): ?>
+<?php if ($blockReason === null && $startDate && !$pending): ?>
 <?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
 <script>
 (function () {
-    var PKG_ID = <?php echo (int)$order_pk; ?>;
+    var PAGE = 'food-rebook.php', BID = <?php echo (int)$order_pk; ?>;
     var CURRENT = <?php echo json_encode($startDate); ?>;
-    var CUR_LABEL = <?php echo json_encode(pr_dt($order['preferred_date'], $order['preferred_time'] ?: null)); ?>, lastPlan = null;   // confirmation step only
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var grid = document.getElementById('calGrid'), title = document.getElementById('calTitle');
     var note = document.getElementById('calNote'), prev = document.getElementById('preview');
-    var btn = document.getElementById('submitBtn'), hidden = document.getElementById('newDate');
-    var parts = CURRENT.split('-'), y = +parts[0], m = +parts[1] - 1, selected = null, token = 0;
+    var btn = document.getElementById('submitBtn'), hidden = document.getElementById('newDate'), timeSel = document.getElementById('newTime');
+    var start = CURRENT && CURRENT >= TODAY ? CURRENT : TODAY;
+    var parts = start.split('-'), y = +parts[0], m = +parts[1] - 1, selected = null, token = 0, ptoken = 0, last = null;
     var cache = {}, MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     function pad(n) { return String(n).padStart(2, '0'); }
     function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
@@ -311,7 +344,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             if (off) cls += ' off';
             if (ds === CURRENT) cls += ' cur';
             if (ds === selected) cls += ' sel';
-            h += '<div class="' + cls + '" data-d="' + ds + '">' + d + '</div>';
+            h += '<div class="' + cls + '" data-d="' + ds + '" role="button" aria-disabled="' + (off ? 'true' : 'false') + '">' + d + '</div>';
         }
         grid.innerHTML = h;
     }
@@ -319,18 +352,30 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         var ym = y + '-' + pad(m + 1), my = ++token;
         if (cache[ym]) { draw(cache[ym]); return; }
         draw(null);
-        fetch('food-rebook.php?id=' + PKG_ID + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
+        fetch(PAGE + '?id=' + BID + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (j) { if (j.days) { cache[ym] = j.days; if (my === token) draw(j.days); } else { note.textContent = j.error || 'Could not load availability.'; } })
             .catch(function () { note.textContent = 'Could not load availability. Please refresh.'; });
     }
-    function showPlan(plan) {
-        lastPlan = plan;
-        var h = '<h3><i class="fas fa-calendar-check"></i> New schedule</h3>';
-        h += '<div class="row"><i class="fas fa-utensils"></i> ' + (plan.method === 'delivery' ? 'Delivery' : 'Pickup') + ': ' + fd(plan.date) + (plan.time ? ' · ' + ft(plan.time) : '') + '</div>';
-        if (plan.method === 'delivery' && plan.address) h += '<div class="row"><i class="fas fa-truck"></i> To ' + esc(plan.address) + '</div>';
-        h += '<div class="row"><i class="fas fa-check"></i> Item, size, quantity and time stay the same. Your payment carries over.</div>';
-        prev.innerHTML = h; prev.style.display = 'block';
+    function lines(list) { return (list || []).map(function (l) { return '<div class="row"><i class="fas fa-calendar-check"></i> ' + esc(l.label) + ': <strong>' + esc(l.text) + '</strong></div>'; }).join(''); }
+    // Live check: the SAME server validation the request runs (display only — the request and the confirmation re-check).
+    function preview() {
+        var ds = selected, tm = timeSel.value, my = ++ptoken;
+        last = null; btn.disabled = true; prev.style.display = 'none';
+        if (!ds) return;
+        note.textContent = 'Checking ' + fd(ds) + (tm ? ' at ' + ft(tm) : '') + '…';
+        fetch(PAGE + '?id=' + BID + '&ajax=preview&date=' + encodeURIComponent(ds) + '&time=' + encodeURIComponent(tm), { credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                if (my !== ptoken) return;
+                if (j.ok) {
+                    last = j; note.textContent = 'Available then.';
+                    prev.innerHTML = '<h3><i class="fas fa-calendar-check"></i> Requested schedule</h3>' + lines(j.requested)
+                        + '<div class="row"><i class="fas fa-hourglass-half"></i> Waits for Admin/Staff confirmation. Payment unchanged.</div>';
+                    prev.style.display = 'block'; btn.disabled = false;
+                } else { note.textContent = j.message || j.error || 'Not available.'; }
+            })
+            .catch(function () { note.textContent = 'Could not check that schedule. Please try again.'; });
     }
     grid.addEventListener('click', function (e) {
         var el = e.target.closest('.day[data-d]'); if (!el) return;
@@ -339,22 +384,18 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             note.textContent = ds < TODAY ? 'That date has passed.' : (ds > MAXD ? 'Please choose a date within the next 12 months.' : ((info && info.message) || 'Not available.'));
             return;
         }
-        selected = ds; lastPlan = null; hidden.value = ds; btn.disabled = true; note.textContent = 'Checking ' + fd(ds) + '…'; prev.style.display = 'none';
+        selected = ds; hidden.value = ds;
         draw(cache[ym]);
-        fetch('food-rebook.php?id=' + PKG_ID + '&ajax=preview&date=' + ds, { credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
-            .then(function (j) {
-                if (selected !== ds) return;
-                if (j.ok) { note.textContent = 'Available on ' + fd(ds) + '.'; showPlan(j.plan); btn.disabled = false; }
-                else { note.textContent = j.message || j.error || 'Not available.'; if (j.plan) showPlan(j.plan); btn.disabled = true; }
-            })
-            .catch(function () { note.textContent = 'Could not check that date. Please try again.'; });
+        preview();
     });
+    timeSel.addEventListener('change', preview);
     document.getElementById('calPrev').addEventListener('click', function () { m--; if (m < 0) { m = 11; y--; } load(); });
     document.getElementById('calNext').addEventListener('click', function () { m++; if (m > 11) { m = 0; y++; } load(); });
     document.getElementById('rebookForm').addEventListener('submit', function (e) {
-        if (!hidden.value || !lastPlan) { e.preventDefault(); return; }
-        RebookConfirm.gate(e, [{ label: lastPlan.method === 'delivery' ? 'Food delivery' : 'Food pickup', from: CUR_LABEL, to: fd(lastPlan.date) + (lastPlan.time ? ' · ' + ft(lastPlan.time) : '') }]);
+        if (!hidden.value || !last || btn.disabled) { e.preventDefault(); return; }
+        var rows = (last.requested || []).map(function (r, i) { return { label: r.label, from: (last.current[i] || {}).text || '', to: r.text }; });
+        if (!RebookConfirm.gate(e, rows)) return;          // first click opens the confirmation; the confirmed submit continues
+        btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';
     });
     load();
 })();

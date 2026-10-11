@@ -2,10 +2,11 @@
 /**
  * Tour Rebook Dashboard (guest, or ADMIN / STAFF from Booking Management).
  *
- * Shows the current tour, the rebooking rules and allowance, the deadline and a calendar. Only the DATE moves:
- * pax, the preferred time, the price and every payment field stay exactly as they are. All rules live in
- * RebookService — this page only displays them and calls RebookService::rebookService(), which re-checks
- * everything under locks. Every other role gets 403. This page never touches money.
+ * Shows the current tour, the rebooking rules and allowance, the deadline, a calendar and a time choice.
+ * Phase 7.6: the guest (or staff assisting the guest) picks a new DATE and TIME and submits a REQUEST; the booking
+ * stays exactly as it is until Admin/Staff confirm it in Booking Management (Rebooks tab). Same boat, same pax,
+ * same price, same payment. All rules live in RebookService (plan / requestServiceRebook); this page only displays
+ * them. Every other role gets 403. This page never touches money.
  */
 session_start();
 require_once 'database.php';
@@ -72,50 +73,62 @@ if (empty($_SESSION['tour_rebook_csrf'])) $_SESSION['tour_rebook_csrf'] = bin2he
 $csrf = (string)$_SESSION['tour_rebook_csrf'];
 
 $blockReason = RebookService::serviceBlockReason('tour', $tour);
+// Phase 7.6: one request at a time — while one waits for Admin/Staff, the page shows it instead of the calendar.
+$pending = RebookService::pendingRequest($pdo, 'tour', $tour_pk);
+$curSchedule = RebookService::currentSchedule('tour', $tour);
+$timeChoices = RebookService::timeChoices('tour', $curSchedule['time']);
+$gs = function ($k) { return isset($_GET[$k]) && is_string($_GET[$k]) ? $_GET[$k] : ''; };
 $view = RebookService::tourView($pdo, $tour);
 $startDate = $tour['booking_date'];
 
 // ------------------------------------------------------------------ AJAX (read-only)
 if ($isAjax) {
     if ($blockReason !== null || !$startDate) jsonOut(['error' => $blockReason ?: 'This tour has no date to move.'], 409);
-    $mode = (string)$_GET['ajax'];
+    if ($pending) jsonOut(['error' => RebookService::PENDING_MESSAGE], 409);
+    $mode = $gs('ajax');
     if ($mode === 'month') {
-        $ym = (string)($_GET['ym'] ?? '');
+        $ym = $gs('ym');
         if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) jsonOut(['error' => 'Invalid month.'], 400);
         $days = [];
         $n = (int)date('t', strtotime($ym . '-01'));
         for ($d = 1; $d <= $n; $d++) {
             $ds = sprintf('%s-%02d', $ym, $d);
-            $r = RebookService::tourDateCheck($pdo, $tour, $ds);
-            $days[$ds] = ['ok' => $r['ok'], 'message' => $r['message']];
+            $days[$ds] = RebookService::dayCheck($pdo, 'tour', $tour, 'tour', $ds);
         }
         jsonOut(['days' => $days]);
     }
     if ($mode === 'preview') {
-        $r = RebookService::tourDateCheck($pdo, $tour, (string)($_GET['date'] ?? ''));
-        jsonOut($r);
+        // The same validation the request (and later the confirmation) runs; display only.
+        $r = RebookService::plan($pdo, 'tour', $tour, ['date' => $gs('date'), 'time' => $gs('time')]);
+        jsonOut(['ok' => $r['ok'], 'message' => $r['message'],
+                 'current' => RebookService::scheduleLines('tour', $curSchedule),
+                 'requested' => $r['schedule'] ? RebookService::scheduleLines('tour', $r['schedule']) : []]);
     }
     jsonOut(['error' => 'Unknown request.'], 400);
 }
 
-// ------------------------------------------------------------------ SUBMIT
+// ------------------------------------------------------------------ SUBMIT (a REQUEST: the booking does not change until Admin/Staff confirm)
 $error = '';
 if (isset($_POST['rebook_tour'])) {
     try {
         if (!hash_equals($csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception('Your session expired. Please refresh the page and try again.');
-        $res = RebookService::rebookService($pdo, 'tour', $tour_pk, (string)($_POST['new_date'] ?? ''), $guest_id, (int)$_SESSION['user_id']);
+        // Only the new date and time are read from the browser; everything else comes from the saved booking.
+        $res = RebookService::requestServiceRebook($pdo, 'tour', $tour_pk, $guest_id, RebookService::inputFromRequest('tour', $_POST), (int)$_SESSION['user_id'], $role);
         if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'rebook', 'booking',
-                ($isAssist ? (($role === 'admin') ? 'Admin' : 'Staff') . ' rebooked' : 'Guest rebooked') . " tour booking '{$res['reference']}' from {$res['old_date']} to {$res['new_date']} (payment carried forward, no new fee)",
-                $tour_pk, 'tour_booking', ['old_date' => $res['old_date']], ['new_date' => $res['new_date'], 'by' => $isAssist ? $role : 'guest']);
+            $old = RebookService::scheduleLines('tour', $res['original']); $new = RebookService::scheduleLines('tour', $res['requested']);
+            SystemLogger::log($pdo, 'rebook_request', 'booking',
+                ($isAssist ? (($role === 'admin') ? 'Admin' : 'Staff') . ' requested' : 'Guest requested') . " a rebook for tour '{$res['reference']}': " . $old[0]['text'] . ' -> ' . $new[0]['text'] . ' (waiting for confirmation; payment unchanged)',
+                $tour_pk, 'tour_booking', ['schedule' => $res['original']], ['schedule' => $res['requested'], 'request_id' => $res['id'], 'by' => $isAssist ? $role : 'guest']);
         }
-        header('Location: ' . ($isAssist ? 'booking-management.php?tab=tour&tour_rebooked=' . urlencode($res['reference']) : 'profile.php?rebooked=service'));
+        header('Location: ' . ($isAssist ? 'booking-management.php?tab=rebook&rebook_requested=' . urlencode($res['reference']) : 'profile.php?rebook_requested=tour'));
         exit();
-    } catch (AvailabilityConflictException $e) {
-        $error = 'That date is not available — ' . $e->getMessage() . ' Please choose another date.';
+    } catch (PDOException $e) {
+        error_log('tour rebook request failed: ' . $e->getMessage());
+        $error = 'Something went wrong and nothing was saved. Please try again.';
     } catch (Throwable $e) {
         $error = $e->getMessage();
     }
+    $pending = RebookService::pendingRequest($pdo, 'tour', $tour_pk);
 }
 
 $remaining = RebookService::remaining($tour);
@@ -198,6 +211,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .pr-preview .row i{color:#4DA6D9;width:20px}
 .pr-btn{width:100%;margin-top:14px;min-height:48px;padding:12px;border:0;border-radius:12px;background:#F4B400;color:#0B2447;font-weight:700;font-size:15px;cursor:pointer}
 .pr-btn:disabled{background:#e2e8f0;color:#94a3b8;cursor:not-allowed}
+.pr-field{margin-top:12px}.pr-field label{display:block;font-weight:600;font-size:13px;margin-bottom:6px;color:#0B2447}.pr-field select{width:100%;padding:11px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px;background:#fff;color:#1e293b}
+.pr-hint{font-size:12px;color:#64748b;margin-top:8px}
+.pr-pending{border:2px solid #f59e0b;background:#fffbeb;border-radius:12px;padding:12px 14px;font-size:14px;color:#92400e}
+.pr-pending b{display:block;color:#92400e;margin-bottom:4px}.pr-pending .row{padding:3px 0;overflow-wrap:anywhere}
 @media(max-width:820px){.pr-grid{grid-template-columns:1fr}}
 @media(max-width:480px){.pr-card{padding:14px}.pr-title h1{font-size:19px}.pr-stat b{font-size:17px}.cal-grid{gap:3px}.cal-grid .day{padding:8px 0;font-size:13px}}
 </style>
@@ -244,31 +261,47 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <div class="pr-stat"><b><?php echo $deadline ? htmlspecialchars(date('M j', strtotime($deadline))) : '—'; ?></b><small>Deadline</small></div>
                 </div>
                 <ul class="pr-rules">
-                    <li><i class="fas fa-check-circle"></i><span>Only the <strong>date</strong> moves. Number of guests and your tour time stay the same.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Choose a new <strong>date and time</strong>. The boat, number of guests and price stay the same.</span></li>
                     <li><i class="fas fa-check-circle"></i><span><?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment is <strong>carried forward</strong>: no new reservation fee, no refund, price unchanged.</span></li>
                     <li><i class="fas fa-check-circle"></i><span>Up to <?php echo $maxRebooks; ?> rebooks per booking, within <?php echo RebookService::WINDOW_DAYS; ?> days from the booking date.</span></li>
-                    <li><i class="fas fa-check-circle"></i><span>The boat must be free on the new date. It is checked again when you confirm; if it was taken, nothing changes.</span></li>
+                    <li><i class="fas fa-hourglass-half" style="color:#f59e0b"></i><span><strong>This is a request.</strong> Admin/Staff confirm it in Booking Management. Until then <?php echo $isAssist ? 'the guest keeps the' : 'you keep your'; ?> current schedule, and it can be cancelled from the dashboard.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Availability is checked now and again when the request is confirmed; if the new schedule was taken meanwhile, nothing changes.</span></li>
                 </ul>
             </div>
         </div>
 
         <div class="pr-card">
-            <h2><i class="fas fa-calendar-alt"></i> Choose the new tour date</h2>
-            <?php if ($blockReason === null && $startDate): ?>
+            <h2><i class="fas fa-calendar-alt"></i> Choose the new date and time</h2>
+            <?php if ($pending): $pLines = RebookService::scheduleLines('tour', $pending['requested']); ?>
+            <div class="pr-pending"><b><i class="fas fa-hourglass-half"></i> Pending rebook — waiting for admin confirmation</b>
+                <?php foreach ($pLines as $pl): ?><div class="row">Requested <?php echo htmlspecialchars($pl['label']); ?>: <strong><?php echo htmlspecialchars($pl['text']); ?></strong></div><?php endforeach; ?>
+                <div class="row" style="font-size:13px;">Requested on <?php echo htmlspecialchars(date('M j, Y g:i A', strtotime($pending['requested_at']))); ?>. <?php echo $isAssist ? 'Confirm or reject it in the Rebooks tab.' : 'You can cancel it from your dashboard.'; ?></div>
+            </div>
+            <p class="pr-hint"><a href="<?php echo $isAssist ? 'booking-management.php?tab=rebook' : 'profile.php'; ?>"><?php echo $isAssist ? 'Open the Rebooks tab' : 'Back to my bookings'; ?></a></p>
+            <?php elseif ($blockReason === null && $startDate): ?>
             <div class="cal-head">
                 <h3 id="calTitle"></h3>
                 <div class="cal-nav"><button type="button" id="calPrev" aria-label="Previous month">&lsaquo;</button> <button type="button" id="calNext" aria-label="Next month">&rsaquo;</button></div>
             </div>
             <div class="cal-grid" id="calGrid"></div>
             <div class="cal-legend"><span><i style="background:#ecfdf5;border:1px solid #10b981"></i>Available</span><span><i style="background:#f1f5f9;border:1px solid #cbd5e1"></i>Unavailable</span><span><i style="background:#4DA6D9"></i>Selected</span><span><i style="box-shadow:inset 0 0 0 2px #F4B400"></i>Current tour date</span></div>
-            <div class="cal-note" id="calNote">Pick a date. Unavailable dates are greyed out — tap one to see why.</div>
+            <div class="cal-note" id="calNote">Pick a date, then a time. Unavailable dates are greyed out — tap one to see why.</div>
             <div class="pr-preview" id="preview"></div>
             <form method="POST" id="rebookForm">
                 <input type="hidden" name="rebook_tour" value="1">
                 <input type="hidden" name="id" value="<?php echo (int)$tour_pk; ?>">
                 <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($csrf); ?>">
                 <input type="hidden" name="new_date" id="newDate" value="">
-                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-check-circle"></i> Confirm Rebook</button>
+                <div class="pr-field">
+                    <label for="newTime"><i class="fas fa-clock"></i> Tour time</label>
+                    <select name="new_time" id="newTime">
+                        <?php foreach ($timeChoices as $tc): ?>
+                        <option value="<?php echo substr($tc, 0, 5); ?>" <?php echo $tc === $curSchedule['time'] ? 'selected' : ''; ?>><?php echo date('g:i A', strtotime($tc)); ?><?php echo $tc === $curSchedule['time'] ? ' (current)' : ''; ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> Submit Rebook Request</button>
+                <p class="pr-hint">The request waits for Admin/Staff confirmation. <?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment stays as it is.</p>
             </form>
             <?php else: ?>
             <p style="font-size:14px;color:#64748b;">This tour cannot be rebooked right now.</p>
@@ -277,19 +310,19 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     </div>
 </div>
 
-<?php if ($blockReason === null && $startDate): ?>
+<?php if ($blockReason === null && $startDate && !$pending): ?>
 <?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
 <script>
 (function () {
-    var PKG_ID = <?php echo (int)$tour_pk; ?>;
+    var PAGE = 'tour-rebook.php', BID = <?php echo (int)$tour_pk; ?>;
     var CURRENT = <?php echo json_encode($startDate); ?>;
-    var CUR_LABEL = <?php echo json_encode(pr_dt($tour['booking_date'], $tour['preferred_time'] ?: null)); ?>, lastPlan = null;   // confirmation step only
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var grid = document.getElementById('calGrid'), title = document.getElementById('calTitle');
     var note = document.getElementById('calNote'), prev = document.getElementById('preview');
-    var btn = document.getElementById('submitBtn'), hidden = document.getElementById('newDate');
-    var parts = CURRENT.split('-'), y = +parts[0], m = +parts[1] - 1, selected = null, token = 0;
+    var btn = document.getElementById('submitBtn'), hidden = document.getElementById('newDate'), timeSel = document.getElementById('newTime');
+    var start = CURRENT && CURRENT >= TODAY ? CURRENT : TODAY;
+    var parts = start.split('-'), y = +parts[0], m = +parts[1] - 1, selected = null, token = 0, ptoken = 0, last = null;
     var cache = {}, MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     function pad(n) { return String(n).padStart(2, '0'); }
     function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
@@ -308,7 +341,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             if (off) cls += ' off';
             if (ds === CURRENT) cls += ' cur';
             if (ds === selected) cls += ' sel';
-            h += '<div class="' + cls + '" data-d="' + ds + '">' + d + '</div>';
+            h += '<div class="' + cls + '" data-d="' + ds + '" role="button" aria-disabled="' + (off ? 'true' : 'false') + '">' + d + '</div>';
         }
         grid.innerHTML = h;
     }
@@ -316,17 +349,30 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         var ym = y + '-' + pad(m + 1), my = ++token;
         if (cache[ym]) { draw(cache[ym]); return; }
         draw(null);
-        fetch('tour-rebook.php?id=' + PKG_ID + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
+        fetch(PAGE + '?id=' + BID + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (j) { if (j.days) { cache[ym] = j.days; if (my === token) draw(j.days); } else { note.textContent = j.error || 'Could not load availability.'; } })
             .catch(function () { note.textContent = 'Could not load availability. Please refresh.'; });
     }
-    function showPlan(plan) {
-        lastPlan = plan;
-        var h = '<h3><i class="fas fa-calendar-check"></i> New schedule</h3>';
-        h += '<div class="row"><i class="fas fa-ship"></i> Tour: ' + fd(plan.date) + (plan.time ? ' · ' + ft(plan.time) : '') + '</div>';
-        h += '<div class="row"><i class="fas fa-users"></i> Guests and tour time stay the same. Your payment carries over.</div>';
-        prev.innerHTML = h; prev.style.display = 'block';
+    function lines(list) { return (list || []).map(function (l) { return '<div class="row"><i class="fas fa-calendar-check"></i> ' + esc(l.label) + ': <strong>' + esc(l.text) + '</strong></div>'; }).join(''); }
+    // Live check: the SAME server validation the request runs (display only — the request and the confirmation re-check).
+    function preview() {
+        var ds = selected, tm = timeSel.value, my = ++ptoken;
+        last = null; btn.disabled = true; prev.style.display = 'none';
+        if (!ds) return;
+        note.textContent = 'Checking ' + fd(ds) + (tm ? ' at ' + ft(tm) : '') + '…';
+        fetch(PAGE + '?id=' + BID + '&ajax=preview&date=' + encodeURIComponent(ds) + '&time=' + encodeURIComponent(tm), { credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                if (my !== ptoken) return;
+                if (j.ok) {
+                    last = j; note.textContent = 'Available — the boat is free then.';
+                    prev.innerHTML = '<h3><i class="fas fa-calendar-check"></i> Requested schedule</h3>' + lines(j.requested)
+                        + '<div class="row"><i class="fas fa-hourglass-half"></i> Waits for Admin/Staff confirmation. Payment unchanged.</div>';
+                    prev.style.display = 'block'; btn.disabled = false;
+                } else { note.textContent = j.message || j.error || 'Not available.'; }
+            })
+            .catch(function () { note.textContent = 'Could not check that schedule. Please try again.'; });
     }
     grid.addEventListener('click', function (e) {
         var el = e.target.closest('.day[data-d]'); if (!el) return;
@@ -335,22 +381,18 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             note.textContent = ds < TODAY ? 'That date has passed.' : (ds > MAXD ? 'Please choose a date within the next 12 months.' : ((info && info.message) || 'Not available.'));
             return;
         }
-        selected = ds; lastPlan = null; hidden.value = ds; btn.disabled = true; note.textContent = 'Checking ' + fd(ds) + '…'; prev.style.display = 'none';
+        selected = ds; hidden.value = ds;
         draw(cache[ym]);
-        fetch('tour-rebook.php?id=' + PKG_ID + '&ajax=preview&date=' + ds, { credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
-            .then(function (j) {
-                if (selected !== ds) return;
-                if (j.ok) { note.textContent = 'The boat is free on ' + fd(ds) + '.'; showPlan(j.plan); btn.disabled = false; }
-                else { note.textContent = j.message || j.error || 'Not available.'; if (j.plan) showPlan(j.plan); btn.disabled = true; }
-            })
-            .catch(function () { note.textContent = 'Could not check that date. Please try again.'; });
+        preview();
     });
+    timeSel.addEventListener('change', preview);
     document.getElementById('calPrev').addEventListener('click', function () { m--; if (m < 0) { m = 11; y--; } load(); });
     document.getElementById('calNext').addEventListener('click', function () { m++; if (m > 11) { m = 0; y++; } load(); });
     document.getElementById('rebookForm').addEventListener('submit', function (e) {
-        if (!hidden.value || !lastPlan) { e.preventDefault(); return; }
-        RebookConfirm.gate(e, [{ label: 'Tour', from: CUR_LABEL, to: fd(lastPlan.date) + (lastPlan.time ? ' · ' + ft(lastPlan.time) : '') }]);
+        if (!hidden.value || !last || btn.disabled) { e.preventDefault(); return; }
+        var rows = (last.requested || []).map(function (r, i) { return { label: r.label, from: (last.current[i] || {}).text || '', to: r.text }; });
+        if (!RebookConfirm.gate(e, rows)) return;          // first click opens the confirmation; the confirmed submit continues
+        btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';
     });
     load();
 })();

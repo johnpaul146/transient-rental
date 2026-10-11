@@ -66,6 +66,7 @@ if (!function_exists('bookingCancelAllowed')) {
 if (!function_exists('packageRebookAllowed')) {
     function packageRebookAllowed(array $row): bool {
         if (!in_array(($_SESSION['role'] ?? ''), ['admin', 'staff'], true)) return false;
+        if (!empty($GLOBALS['bm_svc_pending_map']['package'][(int)($row['id'] ?? 0)])) return false;   // a request is already waiting
         return RebookService::canRebookService('package', $row);
     }
 }
@@ -77,14 +78,24 @@ if (!function_exists('packageRebookAllowed')) {
 if (!function_exists('tourRebookAllowed')) {
     function tourRebookAllowed(array $row): bool {
         if (!in_array(($_SESSION['role'] ?? ''), ['admin', 'staff'], true)) return false;
+        if (!empty($GLOBALS['bm_svc_pending_map']['tour'][(int)($row['id'] ?? 0)])) return false;      // a request is already waiting
         return RebookService::canRebookService('tour', $row);
     }
 }
 /** "Rebooked #n/2" chip for a tour that has been moved (read-only information). */
 if (!function_exists('tourRebookChip')) {
-    function tourRebookChip(array $row): string {
+    function tourRebookChip(array $row, string $type = 'tour'): string {
         $n = (int)($row['rebook_count'] ?? 0);
-        return $n > 0 ? ' <span class="rebook-badge" title="Rebooked ' . $n . ' of ' . RebookService::MAX_REBOOKS . ' times"><i class="fas fa-redo"></i> #' . $n . '/' . RebookService::MAX_REBOOKS . '</span>' : '';
+        return ($n > 0 ? ' <span class="rebook-badge" title="Rebooked ' . $n . ' of ' . RebookService::MAX_REBOOKS . ' times"><i class="fas fa-redo"></i> #' . $n . '/' . RebookService::MAX_REBOOKS . '</span>' : '')
+             . svcPendingChip($type, $row);
+    }
+}
+
+/** "Pending rebook" chip for a tour / food / package with a request waiting in the Rebooks tab (Phase 7.6). */
+if (!function_exists('svcPendingChip')) {
+    function svcPendingChip(string $type, array $row): string {
+        if (empty($GLOBALS['bm_svc_pending_map'][$type][(int)($row['id'] ?? 0)])) return '';
+        return ' <span class="rebook-badge rebook-badge-pending" title="A rebook request is waiting in the Rebooks tab"><i class="fas fa-hourglass-half"></i> Pending rebook</span>';
     }
 }
 
@@ -95,6 +106,7 @@ if (!function_exists('tourRebookChip')) {
 if (!function_exists('foodRebookAllowed')) {
     function foodRebookAllowed(array $row): bool {
         if (!in_array(($_SESSION['role'] ?? ''), ['admin', 'staff'], true)) return false;
+        if (!empty($GLOBALS['bm_svc_pending_map']['food'][(int)($row['id'] ?? 0)])) return false;      // a request is already waiting
         return RebookService::canRebookService('food', $row);
     }
 }
@@ -127,11 +139,18 @@ if (isset($_POST['admin_cancel_booking']) && !$is_admin) {
     denyBookingPermission('Only an administrator can cancel bookings.');
 }
 
-foreach (['confirm_rebook', 'reject_rebook', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
+foreach (['confirm_rebook', 'reject_rebook', 'confirm_service_rebook', 'reject_service_rebook', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
     if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
         denyBookingPermission();
     }
 }
+
+// CSRF token for the rebook decisions (Confirm / Reject, house and tour/food/package). Phase 7.6.
+if (empty($_SESSION['bm_rebook_csrf'])) $_SESSION['bm_rebook_csrf'] = bin2hex(random_bytes(16));
+$bm_rebook_csrf = (string)$_SESSION['bm_rebook_csrf'];
+$bm_rebook_csrf_ok = function () use ($bm_rebook_csrf): bool {
+    return is_string($_POST['bm_rebook_csrf'] ?? null) && hash_equals($bm_rebook_csrf, $_POST['bm_rebook_csrf']);
+};
 
 // ============================================================
 // ✅ DUPLICATE REQUEST GUARD
@@ -352,7 +371,7 @@ try {
     // Service status only: payment status is never changed here, so a completed
     // stay with a balance due stays visible under Outstanding Balances.
     // Secured past bookings -> completed; never-paid past bookings (no proof) -> expired; packages and parts included.
-    foreach (PaymentService::autoCompleteSql() as $autoSql) { $pdo->exec($autoSql); }
+    foreach (PaymentService::autoCompleteSql(RebookService::requestTableReady($pdo)) as $autoSql) { $pdo->exec($autoSql); }
 } catch (PDOException $e) {
     error_log("AUTO-COMPLETE ERROR: " . $e->getMessage());
 }
@@ -426,7 +445,8 @@ if (isset($_POST['create_walkin_booking']) && $can_manage_booking) {
 
 if(isset($_POST['confirm_rebook']) && $can_manage_booking) {
     try {
-        $booking_id = (int)$_POST['booking_id'];
+        if (!$bm_rebook_csrf_ok()) throw new Exception('Your session expired. Please refresh the page and try again.');
+        $booking_id = (int)($_POST['booking_id'] ?? 0);
         if (isDuplicateBookingRequest('confirm_rebook', $booking_id)) {
             header("Location: booking-management.php?tab=rebook");
             exit();
@@ -460,6 +480,7 @@ if(isset($_POST['reject_rebook']) && $can_manage_booking) {
         $reject_reason_other = trim($_POST['reject_reason_other'] ?? '');
         $reject_notes  = trim($_POST['reject_notes'] ?? '');
 
+        if (!$bm_rebook_csrf_ok()) throw new Exception('Your session expired. Please refresh the page and try again.');
         if (isDuplicateBookingRequest('reject_rebook', $booking_id)) {
             header("Location: booking-management.php?tab=rebook");
             exit();
@@ -474,27 +495,9 @@ if(isset($_POST['reject_rebook']) && $can_manage_booking) {
         $final_reason = ($reject_reason === 'Other') ? $reject_reason_other : $reject_reason;
         if (!empty($reject_notes)) $final_reason .= ' — Notes: ' . $reject_notes;
 
-        $stmt = $pdo->prepare("SELECT reference_number, house_id, guest_id, previous_check_in_date, previous_check_out_date, previous_number_of_guests, previous_total_amount, previous_booking_status, check_in_date, check_out_date, number_of_guests, total_amount, rebook_count FROM house_bookings WHERE id = ?");
-        $stmt->execute([$booking_id]);
-        $booking = $stmt->fetch();
-        if (!$booking) throw new Exception("Booking not found.");
-
-        $has_backup = !empty($booking['previous_check_in_date']) && !empty($booking['previous_check_out_date']);
-
-        PaymentService::releaseBlockedDates($pdo, 'house', $booking['house_id'], $booking['reference_number']);
-
-        // Status before the rebook request (a rebooking credit returns to 'cancelled')
-        $restore_status = in_array($booking['previous_booking_status'] ?? '', ['confirmed', 'cancelled', 'completed', 'pending'], true)
-            ? $booking['previous_booking_status'] : 'confirmed';
-        if ($has_backup) {
-            $pdo->prepare("UPDATE house_bookings SET check_in_date = previous_check_in_date, check_out_date = previous_check_out_date, number_of_guests = previous_number_of_guests, total_amount = previous_total_amount, previous_check_in_date = NULL, previous_check_out_date = NULL, previous_number_of_guests = NULL, previous_total_amount = NULL, booking_status = ?, previous_booking_status = NULL, rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$restore_status, $booking_id]);
-            
-            if ($restore_status !== 'cancelled') {
-                autoBlockBookingDates($pdo, 'house', $booking['house_id'], $booking['previous_check_in_date'], $booking['previous_check_out_date'], $booking_id, $booking['reference_number']);
-            }
-        } else {
-            $pdo->prepare("UPDATE house_bookings SET booking_status = ?, previous_booking_status = NULL, rebook_count = GREATEST(0, rebook_count - 1), rebooked_at = NULL, rebook_confirmed_at = NULL WHERE id = ?")->execute([$restore_status, $booking_id]);
-        }
+        // Restore the original dates / guests / total / status and give the rebook back — one locked transaction
+        // (RebookService::rejectHouseRebook), and only while the request is still waiting.
+        $booking = RebookService::rejectHouseRebook($pdo, $booking_id, (int)$_SESSION['user_id']);
 
         $rejected_by_name = $_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Administrator';
         try {
@@ -508,6 +511,69 @@ if(isset($_POST['reject_rebook']) && $can_manage_booking) {
         }
         $success = "✅ Rebook rejected. Original dates have been restored and the guest has been notified via email.";
     } catch(Exception $e) {
+        $error = "Failed to reject rebook: " . $e->getMessage();
+    }
+}
+
+// ============================================================
+// Phase 7.6 — Confirm / Reject a TOUR / FOOD / PACKAGE rebook REQUEST (admin + staff)
+// Everything is re-checked inside RebookService (locked, one transaction). On any failure nothing changes
+// and the request stays pending.
+// ============================================================
+if (isset($_POST['confirm_service_rebook']) && $can_manage_booking) {
+    try {
+        if (!$bm_rebook_csrf_ok()) throw new InvalidArgumentException('Your session expired. Please refresh the page and try again.');
+        $svc_request_id = (int)($_POST['request_id'] ?? 0);
+        if ($svc_request_id <= 0) throw new InvalidArgumentException('Invalid rebook request.');
+        if (isDuplicateBookingRequest('confirm_service_rebook', $svc_request_id)) { header("Location: booking-management.php?tab=rebook"); exit(); }
+        $svc_res = RebookService::confirmServiceRebook($pdo, $svc_request_id, (int)$_SESSION['user_id'], (string)$_SESSION['role']);
+        if (class_exists('SystemLogger')) {
+            $svc_actor = ($is_admin ? 'Admin' : 'Staff') . ' ' . ($_SESSION['fullname'] ?? $_SESSION['username'] ?? '');
+            $svc_old = RebookService::scheduleLines($svc_res['type'], $svc_res['request']['original']);
+            $svc_new = RebookService::scheduleLines($svc_res['type'], $svc_res['request']['requested']);
+            $svc_txt = function ($lines) { return implode('; ', array_map(function ($l) { return $l['label'] . ' ' . $l['text']; }, $lines)); };
+            // 'rebook' = the booking really moved (feeds "recent rebooks" and the previous-dates list)
+            SystemLogger::log($pdo, 'rebook', 'booking',
+                "Rebook confirmed for {$svc_res['type']} booking '{$svc_res['reference']}' by " . trim($svc_actor) . ": " . $svc_txt($svc_old) . ' -> ' . $svc_txt($svc_new) . ' (payment carried forward, no new fee)',
+                $svc_res['booking_id'], $svc_res['type'] . '_booking',
+                ['old_date' => $svc_res['old_date'], 'schedule' => $svc_res['request']['original']],
+                ['new_date' => $svc_res['new_date'], 'schedule' => $svc_res['request']['requested'], 'request_id' => $svc_request_id, 'rebook_count' => $svc_res['rebook_count'], 'by' => (string)$_SESSION['role']]);
+            SystemLogger::log($pdo, 'confirm_rebook', 'booking', "Confirmed rebook request #{$svc_request_id} for {$svc_res['type']} booking {$svc_res['reference']}", $svc_res['booking_id'], 'booking');
+        }
+        $success = "✅ Rebook confirmed for " . $svc_res['reference'] . ". The new schedule is now in place; the payment is unchanged.";
+    } catch (AvailabilityConflictException $e) {
+        $error = "Cannot confirm this rebook — " . $e->getMessage() . " Nothing was changed: the booking keeps its current schedule and the request is still pending. You can reject it so the guest can choose again.";
+    } catch (PDOException $e) {
+        error_log('confirm service rebook failed: ' . $e->getMessage());
+        $error = "The rebook could not be confirmed right now (nothing was changed). Please try again.";
+    } catch (Throwable $e) {
+        $error = "Failed to confirm rebook: " . $e->getMessage();
+    }
+}
+
+if (isset($_POST['reject_service_rebook']) && $can_manage_booking) {
+    try {
+        if (!$bm_rebook_csrf_ok()) throw new InvalidArgumentException('Your session expired. Please refresh the page and try again.');
+        $svc_request_id = (int)($_POST['request_id'] ?? 0);
+        $svc_reason = trim((string)($_POST['reject_reason'] ?? ''));
+        $svc_reason_other = trim((string)($_POST['reject_reason_other'] ?? ''));
+        $svc_notes = trim((string)($_POST['reject_notes'] ?? ''));
+        if ($svc_request_id <= 0) throw new InvalidArgumentException('Invalid rebook request.');
+        if ($svc_reason === '') throw new InvalidArgumentException('Please select a reason for rejecting the rebook.');
+        if ($svc_reason === 'Other' && $svc_reason_other === '') throw new InvalidArgumentException("Please specify the reason when selecting 'Other'.");
+        if (isDuplicateBookingRequest('reject_service_rebook', $svc_request_id)) { header("Location: booking-management.php?tab=rebook"); exit(); }
+        $svc_final = ($svc_reason === 'Other') ? $svc_reason_other : $svc_reason;
+        if ($svc_notes !== '') $svc_final .= ' — Notes: ' . $svc_notes;
+        $svc_req = RebookService::rejectServiceRebook($pdo, $svc_request_id, (int)$_SESSION['user_id'], (string)$_SESSION['role'], $svc_final);
+        if (class_exists('SystemLogger')) {
+            SystemLogger::log($pdo, 'reject_rebook', 'booking', "Rejected rebook request #{$svc_request_id} for {$svc_req['booking_type']} booking {$svc_req['reference_number']} — Reason: {$svc_final}",
+                (int)$svc_req['booking_id'], $svc_req['booking_type'] . '_booking', ['requested' => $svc_req['requested']], ['reason' => $svc_final, 'rejected_by' => $_SESSION['fullname'] ?? $_SESSION['username'] ?? ''], 'warning');
+        }
+        $success = "✅ Rebook request rejected. " . $svc_req['reference_number'] . " keeps its current schedule; the payment is unchanged.";
+    } catch (PDOException $e) {
+        error_log('reject service rebook failed: ' . $e->getMessage());
+        $error = "The rebook request could not be rejected right now (nothing was changed). Please try again.";
+    } catch (Throwable $e) {
         $error = "Failed to reject rebook: " . $e->getMessage();
     }
 }
@@ -777,10 +843,14 @@ $bm_state = ['status' => $status_filter, 'view' => $view, 'search' => $search, '
              'date' => $bm_filters['date'], 'from' => $bm_filters['from'], 'to' => $bm_filters['to'], 'quick' => $bm_filters['quick'],
              'resource' => $bm_filters['resource']];
 $bm_url = function (array $override = []) use ($bm_state) { return htmlspecialchars(BookingFilters::url($bm_state, $override), ENT_QUOTES, 'UTF-8'); };
-$bf_house   = BookingFilters::fragment('house', $bm_filters);
-$bf_tour    = BookingFilters::fragment('tour', $bm_filters);
-$bf_food    = BookingFilters::fragment('food', $bm_filters);
-$bf_package = BookingFilters::fragment('package', $bm_filters);
+// Service tab counts must stay real when one Service is selected: the four list queries are built WITHOUT the
+// service restriction (every other filter still applies), the tab counts are taken from them, and only then are
+// the other services' lists emptied for display (see $bm_tab_counts below). Same four queries as "All services".
+$bm_list_filters = array_merge($bm_filters, ['service' => 'all']);
+$bf_house   = BookingFilters::fragment('house', $bm_list_filters);
+$bf_tour    = BookingFilters::fragment('tour', $bm_list_filters);
+$bf_food    = BookingFilters::fragment('food', $bm_list_filters);
+$bf_package = BookingFilters::fragment('package', $bm_list_filters);
 $bm_search_like = BookingFilters::likeTerm($search);
 
 // ============================================================
@@ -952,6 +1022,23 @@ $tour_bookings    = $annotateCancelledBy('tour', $tour_bookings);
 $food_bookings    = $annotateCancelledBy('food', $food_bookings);
 $package_bookings = $annotateCancelledBy('package', $package_bookings);
 
+// Service tab counts (active = not cancelled/completed, same rule as the lists below), taken before the Service
+// filter narrows the lists, so "Service = House" still shows the real Tour / Food / Package numbers.
+$bm_count_active = function (array $rows): int {
+    $n = 0;
+    foreach ($rows as $r) if (!in_array($r['booking_status'] ?? '', ['cancelled', 'completed'], true)) $n++;
+    return $n;
+};
+$bm_tab_counts = ['house' => $bm_count_active($house_bookings), 'tour' => $bm_count_active($tour_bookings),
+                  'food' => $bm_count_active($food_bookings), 'package' => $bm_count_active($package_bookings)];
+// The Service filter itself still narrows what is listed (and the calendar): other services' rows are dropped here.
+if ($bm_filters['service'] !== 'all') {
+    if ($bm_filters['service'] !== 'house')   $house_bookings = [];
+    if ($bm_filters['service'] !== 'tour')    $tour_bookings = [];
+    if ($bm_filters['service'] !== 'food')    $food_bookings = [];
+    if ($bm_filters['service'] !== 'package') $package_bookings = [];
+}
+
 // ============================================================
 // ✅ REBOOK FILTER — FIXED: base sa rebooked_at/rebook_confirmed_at
 // ============================================================
@@ -1045,6 +1132,45 @@ $rebook_pending_global = $rebook_pending_count;
 try {
     $rebook_pending_global = (int)$pdo->query("SELECT COUNT(*) FROM house_bookings WHERE (package_id IS NULL OR package_id = 0) AND booking_status NOT IN ('cancelled', 'completed') AND ((rebooked_at IS NOT NULL AND rebook_confirmed_at IS NULL) OR (booking_status = 'pending' AND rebook_count > 0))")->fetchColumn();
 } catch (PDOException $e) {}
+
+// Phase 7.6: TOUR / FOOD / PACKAGE rebook requests (rebook_requests) join the house requests in the Rebooks tab.
+// Every waiting request counts in the global number; the tab itself follows the Service filter and the search box.
+$svc_pending_all = RebookService::pendingRequests($pdo);
+$GLOBALS['bm_svc_pending_map'] = ['tour' => [], 'food' => [], 'package' => []];
+foreach ($svc_pending_all as $svcR) $GLOBALS['bm_svc_pending_map'][$svcR['booking_type']][(int)$svcR['booking_id']] = $svcR;
+$svc_pending = array_values(array_filter($svc_pending_all, function ($r) use ($bm_filters, $search) {
+    if ($bm_filters['service'] !== 'all' && $bm_filters['service'] !== $r['booking_type']) return false;
+    if ($search !== '') {
+        $hay = mb_strtolower($r['reference_number'] . ' ' . $r['guest_name'] . ' ' . ($r['booking']['item_name'] ?? ''), 'UTF-8');
+        if (mb_strpos($hay, mb_strtolower($search, 'UTF-8'), 0, 'UTF-8') === false) return false;
+    }
+    return true;
+}));
+$rebook_pending_count += count($svc_pending);
+$rebook_pending_global += count($svc_pending_all);
+
+// One list for the Rebooks tab (house + tour + food + package), newest request first: current vs requested schedule.
+$rebook_items = [];
+foreach ($pending_rebooks as $hb) {
+    $hasPrev = !empty($hb['previous_check_in_date']) && !empty($hb['previous_check_out_date']);
+    $rebook_items[] = [
+        'kind' => 'house', 'type' => 'house', 'id' => (int)$hb['id'], 'ref' => (string)$hb['reference_number'], 'guest' => (string)$hb['guest_name'],
+        'item' => (string)($hb['house_name'] ?? ''), 'at' => $hb['rebooked_at'] ?: $hb['created_at'], 'row' => $hb,
+        'current' => $hasPrev ? RebookService::scheduleLines('package', ['house' => ['in' => $hb['previous_check_in_date'], 'in_time' => $hb['check_in_time'], 'out' => $hb['previous_check_out_date'], 'out_time' => $hb['check_out_time'], 'guests' => $hb['previous_number_of_guests'] ?? $hb['number_of_guests']]]) : [['label' => 'House', 'text' => '—']],
+        'requested' => RebookService::scheduleLines('package', ['house' => ['in' => $hb['check_in_date'], 'in_time' => $hb['check_in_time'], 'out' => $hb['check_out_date'], 'out_time' => $hb['check_out_time'], 'guests' => $hb['number_of_guests']]]),
+        'this_rebook' => max(1, (int)$hb['rebook_count']),
+    ];
+}
+foreach ($svc_pending as $sr) {
+    $rebook_items[] = [
+        'kind' => 'service', 'type' => $sr['booking_type'], 'id' => (int)$sr['id'], 'ref' => (string)$sr['reference_number'], 'guest' => (string)$sr['guest_name'],
+        'item' => (string)($sr['booking']['item_name'] ?? ''), 'at' => $sr['requested_at'], 'row' => $sr['booking'] ?: [],
+        'current' => RebookService::scheduleLines($sr['booking_type'], $sr['original']),
+        'requested' => RebookService::scheduleLines($sr['booking_type'], $sr['requested']),
+        'this_rebook' => (int)($sr['booking']['rebook_count'] ?? 0) + 1, 'by' => (string)($sr['requested_role'] ?? ''),
+    ];
+}
+usort($rebook_items, function ($a, $b) { return strcmp((string)$b['at'], (string)$a['at']); });
 
 // When a filter is active and no tab was requested, open the tab that actually has results.
 $bm_auto_tab = '';
@@ -1545,6 +1671,34 @@ function formatGuestNames($guest_names) {
 
     .rebook-info-note { background: linear-gradient(135deg, #fef3c7, #fffbeb); border: 1px solid #fbbf24; border-radius: 10px; padding: 12px 16px; margin-top: 15px; font-size: 13px; color: #92400e; display: flex; align-items: center; gap: 10px; }
     .rebook-info-note i { color: #f59e0b; font-size: 18px; }
+    /* Phase 7.6 — Rebooks tab cards (house + tour + food + package), usable from 360px to desktop */
+    .rebook-badge.rebook-badge-pending { background: linear-gradient(135deg, #f59e0b, #d97706); }
+    .rb-list { display: grid; gap: 14px; margin-top: 15px; }
+    .rb-item { border: 1px solid #e8f0fe; border-left: 5px solid #8b5cf6; border-radius: 14px; padding: 14px 16px; background: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.04); min-width: 0; }
+    .rb-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .rb-ref { font-size: 15px; color: #0B2447; overflow-wrap: anywhere; }
+    .rb-svc { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; background: #e0f2fe; color: #0369a1; }
+    .rb-svc-house { background: #dbeafe; color: #1e40af; } .rb-svc-tour { background: #dcfce7; color: #166534; } .rb-svc-food { background: #ffedd5; color: #9a3412; } .rb-svc-package { background: #e0f2fe; color: #0369a1; }
+    .rb-left { font-size: 11px; color: #64748b; font-weight: 600; }
+    .rb-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12.5px; color: #475569; }
+    .rb-meta i { color: #94a3b8; margin-right: 3px; }
+    .rb-sched { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; align-items: stretch; margin-top: 12px; }
+    .rb-col { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 9px 11px; min-width: 0; }
+    .rb-col.rb-new { background: #f5f3ff; border-color: #ddd6fe; }
+    .rb-h { font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #64748b; margin-bottom: 4px; }
+    .rb-new .rb-h { color: #6d28d9; }
+    .rb-line { font-size: 13px; color: #0f172a; padding: 2px 0; overflow-wrap: anywhere; }
+    .rb-line span { display: inline-block; min-width: 46px; font-weight: 700; color: #475569; margin-right: 6px; }
+    .rb-arrow { display: flex; align-items: center; color: #8b5cf6; }
+    .rb-amount { margin-top: 8px; font-size: 12px; }
+    .rb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .rb-actions .btn-sm, .rb-actions .btn-view-booking { min-height: 40px; padding: 8px 14px; font-size: 12.5px; }
+    @media (max-width: 640px) {
+        .rb-item { padding: 12px; }
+        .rb-sched { grid-template-columns: minmax(0, 1fr); }
+        .rb-arrow { justify-content: center; transform: rotate(90deg); }
+        .rb-actions > * { flex: 1 1 auto; justify-content: center; }
+    }
 
     /* MODALS */
     .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center; }
@@ -1803,7 +1957,7 @@ function formatGuestNames($guest_names) {
                         🔔 <?php echo $rebook_pending_global; ?> Pending Rebook Request<?php echo $rebook_pending_global > 1 ? 's' : ''; ?> Awaiting Confirmation
                     </div>
                     <div style="color: #b45309; font-size: 13px; margin-top: 2px;">
-                        Guests have updated stay dates on already-paid bookings. Please confirm to finalize their new dates.
+                        Guests asked for new schedules on already-paid bookings (house, tour, food or package). Please confirm or reject each request.
                     </div>
                 </div>
             </div>
@@ -1964,10 +2118,12 @@ function formatGuestNames($guest_names) {
         <?php else: ?>
 
         <div class="booking-tabs">
-            <div class="booking-tab active" onclick="showBookingType('house')"><i class="fas fa-home"></i> House (<?php echo count($active_house); ?>)</div>
-            <div class="booking-tab" onclick="showBookingType('tour')"><i class="fas fa-umbrella-beach"></i> Tour (<?php echo count($active_tour); ?>)</div>
-            <div class="booking-tab" onclick="showBookingType('food')"><i class="fas fa-utensils"></i> Food (<?php echo count($active_food); ?>)</div>
-            <div class="booking-tab package-tab" onclick="showBookingType('package')"><i class="fas fa-box-open"></i> Package (<?php echo count($active_package); ?>)</div>
+            <?php /* Service tabs and the Service filter are one control: when a Service is selected, clicking another
+                     service tab switches the filter to it (data-service-href); with "All services" the tabs switch in place. */ ?>
+            <div class="booking-tab active" data-service="house" data-service-href="<?php echo $bm_url(['service' => 'house', 'resource' => '']); ?>&amp;tab=house" onclick="showBookingType('house', true)"><i class="fas fa-home"></i> House (<?php echo (int)$bm_tab_counts['house']; ?>)</div>
+            <div class="booking-tab" data-service="tour" data-service-href="<?php echo $bm_url(['service' => 'tour', 'resource' => '']); ?>&amp;tab=tour" onclick="showBookingType('tour', true)"><i class="fas fa-umbrella-beach"></i> Tour (<?php echo (int)$bm_tab_counts['tour']; ?>)</div>
+            <div class="booking-tab" data-service="food" data-service-href="<?php echo $bm_url(['service' => 'food', 'resource' => '']); ?>&amp;tab=food" onclick="showBookingType('food', true)"><i class="fas fa-utensils"></i> Food (<?php echo (int)$bm_tab_counts['food']; ?>)</div>
+            <div class="booking-tab package-tab" data-service="package" data-service-href="<?php echo $bm_url(['service' => 'package', 'resource' => '']); ?>&amp;tab=package" onclick="showBookingType('package', true)"><i class="fas fa-box-open"></i> Package (<?php echo (int)$bm_tab_counts['package']; ?>)</div>
             <div class="booking-tab rebook-tab <?php echo $rebook_pending_global > 0 ? 'has-pending' : ''; ?>" onclick="showBookingType('rebook')">
                 <i class="fas fa-redo"></i> Rebooks
                 <?php if($rebook_pending_global > 0): ?>
@@ -2385,7 +2541,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                                 $is_delivery = ($fulfillment === 'delivery');
                             ?>
                             <tr>
-                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?><?php echo tourRebookChip($booking); ?></td>
+                                <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?><?php echo tourRebookChip($booking, 'food'); ?></td>
                                 <td><?php echo htmlspecialchars($booking['guest_name']); ?></td>
                                 <td><?php echo htmlspecialchars($booking['food_name']); ?></td>
                                 <td><?php echo $booking['quantity']; ?></td>
@@ -2465,7 +2621,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($booking['reference_number']); ?><?php echo walkInChip($booking); ?><?php echo tourRebookChip($booking); ?>
+                                    <?php echo htmlspecialchars($booking['reference_number']); ?><?php echo walkInChip($booking); ?><?php echo tourRebookChip($booking, 'food'); ?>
                                 </div>
                                 <div class="card-badges">
                                     <?php echo PaymentService::adminBadge($booking); ?>
@@ -2558,7 +2714,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             ?>
                             <tr>
                                 <td>
-                                    <strong><?php echo htmlspecialchars($pkg['reference_number']); ?></strong><?php echo walkInChip($pkg); ?>
+                                    <strong><?php echo htmlspecialchars($pkg['reference_number']); ?></strong><?php echo walkInChip($pkg); ?><?php echo svcPendingChip('package', $pkg); ?>
                                     <span class="package-badge"><i class="fas fa-box-open"></i> <?php echo $itemCount; ?> items</span>
                                 </td>
                                 <td><?php echo htmlspecialchars($pkg['guest_name']); ?></td>
@@ -2639,7 +2795,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                             <div class="card-top-row">
                                 <div class="card-ref">
                                     <i class="fas fa-hashtag" style="color:#0ea5e9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($pkg['reference_number']); ?><?php echo walkInChip($pkg); ?>
+                                    <?php echo htmlspecialchars($pkg['reference_number']); ?><?php echo walkInChip($pkg); ?><?php echo svcPendingChip('package', $pkg); ?>
                                     <span class="package-badge"><i class="fas fa-box-open"></i> <?php echo $itemCount; ?> items</span>
                                 </div>
                                 <div class="card-badges">
@@ -2709,78 +2865,66 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
             </div>
         </div>
 
-        <!-- REBOOKS SECTION -->
+        <!-- REBOOKS SECTION — house + tour + food + package requests (Phase 7.6). One card layout for every width:
+             current vs requested schedule, request date, payment, rebook number, Confirm / Reject. -->
         <div id="rebook-section" class="booking-section">
             <div class="card">
                 <div class="card-header">
-                    <h2><i class="fas fa-clock" style="color:#f59e0b;"></i> Pending Rebooks (<?php echo $rebook_pending_count; ?>)</h2>
+                    <h2><i class="fas fa-clock" style="color:#f59e0b;"></i> Pending Rebooks (<?php echo (int)$rebook_pending_count; ?>)</h2>
                 </div>
 
                 <?php if($rebook_pending_global > $rebook_pending_count): ?>
                 <div class="bm-notice"><i class="fas fa-filter"></i> <?php echo (int)($rebook_pending_global - $rebook_pending_count); ?> more pending rebook(s) are hidden by the current filters. <a href="<?php echo $bm_url(['search' => '', 'service' => 'all', 'date' => '', 'from' => '', 'to' => '', 'quick' => '', 'status' => 'all']); ?>">Clear filters</a></div>
                 <?php endif; ?>
-                <?php if($rebook_pending_count > 0): ?>
+                <?php if(count($rebook_items) > 0): ?>
                 <div class="rebook-info-note">
                     <i class="fas fa-info-circle"></i>
-                    <span>These bookings have been rebooked by guests with new dates. Payment is already <strong>PAID</strong>. Click <strong>"Confirm Rebook"</strong> to finalize, or <strong>"Reject Rebook"</strong> to revert to the original dates.</span>
+                    <span>Each request shows the <strong>current</strong> and the <strong>requested</strong> schedule. The payment already received stays on the booking. <strong>Confirm</strong> re-checks availability and applies the new schedule; <strong>Reject</strong> keeps the current one.</span>
                 </div>
 
-                <div class="table-responsive desktop-table" style="margin-top: 15px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Ref #</th><th>Guest</th><th>House</th><th>Rebooked On</th><th>New Check In</th>
-                                <th>New Check Out</th><th>Guests</th><th>Total</th><th>Payment</th><th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach($pending_rebooks as $booking): ?>
-                            <tr>
-                                <td>
-                                    <strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong><?php echo walkInChip($booking); ?>
-                                    <span class="rebook-badge"><i class="fas fa-redo"></i> #<?php echo $booking['rebook_count']; ?>/2</span>
-                                </td>
-                                <td><?php echo htmlspecialchars($booking['guest_name']); ?></td>
-                                <td><?php echo htmlspecialchars($booking['house_name']); ?></td>
-                                <td><?php echo formatDateTimeDisplay($booking['rebooked_at'] ?? null); ?></td>
-                                <td>
-                                    <?php echo formatDateDisplay($booking['check_in_date']); ?>
-                                    <?php if (!empty($booking['check_in_time'])): ?>
-                                        <div class="booking-time-row">
-                                            <i class="fas fa-clock"></i>
-                                            <?php echo formatTimeDisplay($booking['check_in_time']); ?>
-                                        </div>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php echo formatDateDisplay($booking['check_out_date']); ?>
-                                    <?php if (!empty($booking['check_out_time'])): ?>
-                                        <div class="booking-time-row">
-                                            <i class="fas fa-clock"></i>
-                                            <?php echo formatTimeDisplay($booking['check_out_time']); ?>
-                                        </div>
-                                    <?php endif; ?>
-                                </td>
-                                <td><?php echo $booking['number_of_guests']; ?></td>
-                                <td><?php echo PaymentService::adminAmountCell($booking); ?></td>
-                                <td><?php echo PaymentService::adminBadge($booking); ?></td>
-                                <td>
-                                    <div style="display: flex; flex-wrap: wrap; gap: 4px;">
-                                        <button class="btn-view-booking" onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
-                                            <i class="fas fa-eye"></i> View
-                                        </button>
-                                        <button type="button" class="btn-sm btn-rebook-confirm" onclick="openConfirmModal('rebook', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['guest_name']); ?>', '<?php echo htmlspecialchars($booking['house_name']); ?>')">
-                                            <i class="fas fa-check-circle"></i> Confirm
-                                        </button>
-                                        <button type="button" class="btn-sm btn-rebook-reject" onclick="openRejectRebookModal(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
-                                            <i class="fas fa-times"></i> Reject
-                                        </button>
-                                    </div>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                <div class="rb-list">
+                    <?php foreach($rebook_items as $rbI):
+                        $rbIcon = ['house' => 'fa-home', 'tour' => 'fa-umbrella-beach', 'food' => 'fa-utensils', 'package' => 'fa-box-open'][$rbI['type']];
+                        $rbRow = $rbI['row'];
+                        $rbSummary = implode(' · ', array_map(function ($l) { return $l['label'] . ': ' . $l['text']; }, $rbI['requested']));
+                    ?>
+                    <article class="rb-item" data-rb-type="<?php echo $rbI['type']; ?>" data-rb-ref="<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>">
+                        <div class="rb-top">
+                            <span class="rb-svc rb-svc-<?php echo $rbI['type']; ?>"><i class="fas <?php echo $rbIcon; ?>"></i> <?php echo ucfirst($rbI['type']); ?></span>
+                            <strong class="rb-ref"><?php echo htmlspecialchars($rbI['ref']); ?></strong><?php echo $rbRow ? walkInChip($rbRow) : ''; ?>
+                            <span class="rebook-badge" title="This request would be rebook number <?php echo (int)$rbI['this_rebook']; ?> of <?php echo RebookService::MAX_REBOOKS; ?>"><i class="fas fa-redo"></i> #<?php echo (int)$rbI['this_rebook']; ?>/<?php echo RebookService::MAX_REBOOKS; ?></span>
+                            <span class="rb-left"><?php echo max(0, RebookService::MAX_REBOOKS - (int)$rbI['this_rebook']); ?> left after this</span>
+                        </div>
+                        <div class="rb-meta">
+                            <span><i class="fas fa-user"></i> <?php echo htmlspecialchars($rbI['guest']); ?></span>
+                            <?php if($rbI['item'] !== ''): ?><span><i class="fas fa-tag"></i> <?php echo htmlspecialchars($rbI['item']); ?></span><?php endif; ?>
+                            <span><i class="fas fa-paper-plane"></i> Requested <?php echo formatDateTimeDisplay($rbI['at']); ?><?php if(!empty($rbI['by']) && $rbI['by'] !== 'guest'): ?> (by <?php echo htmlspecialchars($rbI['by']); ?>)<?php endif; ?></span>
+                            <?php if($rbRow): ?><span class="rb-pay"><?php echo PaymentService::adminBadge($rbRow); ?></span><?php endif; ?>
+                        </div>
+                        <div class="rb-sched">
+                            <div class="rb-col">
+                                <div class="rb-h">Current</div>
+                                <?php foreach($rbI['current'] as $rbL): ?><div class="rb-line"><span><?php echo htmlspecialchars($rbL['label']); ?></span><?php echo htmlspecialchars($rbL['text']); ?></div><?php endforeach; ?>
+                            </div>
+                            <div class="rb-arrow" aria-hidden="true"><i class="fas fa-arrow-right"></i></div>
+                            <div class="rb-col rb-new">
+                                <div class="rb-h">Requested</div>
+                                <?php foreach($rbI['requested'] as $rbL): ?><div class="rb-line"><span><?php echo htmlspecialchars($rbL['label']); ?></span><?php echo htmlspecialchars($rbL['text']); ?></div><?php endforeach; ?>
+                            </div>
+                        </div>
+                        <?php if($rbRow): ?><div class="rb-amount"><?php echo PaymentService::adminAmountCell($rbRow); ?></div><?php endif; ?>
+                        <div class="rb-actions">
+                            <?php if($rbI['kind'] === 'house'): ?>
+                            <button class="btn-view-booking" type="button" onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($rbRow), ENT_QUOTES, "UTF-8"); ?>)'><i class="fas fa-eye"></i> View</button>
+                            <button type="button" class="btn-sm btn-rebook-confirm rb-confirm" onclick="openConfirmModal('rebook', <?php echo (int)$rbI['id']; ?>, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbI['guest']), ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbI['item']), ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-check-circle"></i> Confirm Rebook</button>
+                            <button type="button" class="btn-sm btn-rebook-reject rb-reject" onclick="openRejectRebookModal(<?php echo (int)$rbI['id']; ?>, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-times"></i> Reject Rebook</button>
+                            <?php else: ?>
+                            <button type="button" class="btn-sm btn-rebook-confirm rb-confirm" onclick="openConfirmModal('svc_rebook', <?php echo (int)$rbI['id']; ?>, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbI['guest']), ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbSummary), ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-check-circle"></i> Confirm <?php echo $rbI['type'] === 'package' ? 'Package ' : ''; ?>Rebook</button>
+                            <button type="button" class="btn-sm btn-rebook-reject rb-reject" onclick="openRejectRebookModal(0, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>', <?php echo (int)$rbI['id']; ?>)"><i class="fas fa-times"></i> Reject <?php echo $rbI['type'] === 'package' ? 'Package ' : ''; ?>Rebook</button>
+                            <?php endif; ?>
+                        </div>
+                    </article>
+                    <?php endforeach; ?>
                 </div>
                 <?php else: ?>
                 <div style="text-align: center; padding: 40px; color: #94a3b8;">
@@ -2936,6 +3080,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
             <input type="hidden" name="booking_id" id="confirmActionBookingId">
             <input type="hidden" name="booking_type" id="confirmActionBookingType">
             <input type="hidden" name="confirm_action_type" id="confirmActionType">
+            <input type="hidden" name="request_id" id="confirmActionRequestId" value="">
+            <input type="hidden" name="bm_rebook_csrf" value="<?php echo htmlspecialchars($bm_rebook_csrf, ENT_QUOTES, 'UTF-8'); ?>">
             <div class="confirm-modal-actions">
                 <button type="button" class="btn-confirm-cancel" onclick="closeConfirmModal()"><i class="fas fa-times"></i> Cancel</button>
                 <button type="submit" class="btn-confirm-submit" id="confirmActionSubmitBtn" name="confirm_payment">
@@ -3048,6 +3194,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
         </div>
         <form method="POST" id="rejectRebookForm">
             <input type="hidden" name="booking_id" id="reject_rebook_booking_id">
+            <input type="hidden" name="request_id" id="reject_rebook_request_id" value="">
+            <input type="hidden" name="bm_rebook_csrf" value="<?php echo htmlspecialchars($bm_rebook_csrf, ENT_QUOTES, 'UTF-8'); ?>">
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 6px; font-weight: 600; color: #1e293b; font-size: 13px;">
                     <i class="fas fa-comment-alt" style="color: #ef4444;"></i> Reason for Rejection <span style="color: #dc2626;">*</span>
@@ -3079,7 +3227,7 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 <button type="button" onclick="closeRejectRebookModal()" style="flex: 1; padding: 12px; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
                     <i class="fas fa-times"></i> Cancel
                 </button>
-                <button type="submit" name="reject_rebook" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
+                <button type="submit" name="reject_rebook" id="rejectRebookSubmitBtn" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
                     <i class="fas fa-undo"></i> Reject Rebook
                 </button>
             </div>
@@ -3173,11 +3321,19 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
 <script>
 // Tab opened automatically when a filter is active (Phase 8.4a)
 var BM_AUTO_TAB = <?php echo json_encode($bm_auto_tab); ?>;
+// Selected Service filter ('all' | house | tour | food | package): service tabs and the filter stay in sync.
+var BM_SERVICE = <?php echo json_encode($bm_filters['service']); ?>;
 
 /* ============================================================
    TAB SWITCHING
    ============================================================ */
-function showBookingType(type) {
+function showBookingType(type, fromTab) {
+    // A service tab clicked while ANOTHER service is selected in the filter: switch the filter (page reload with
+    // service=<tab>), so the list, the dropdown and the active tab always agree. Rebooks / History stay in place.
+    if (fromTab && BM_SERVICE !== 'all' && type !== BM_SERVICE && ['house', 'tour', 'food', 'package'].indexOf(type) !== -1) {
+        var svcTab = document.querySelector('.booking-tab[data-service="' + type + '"]');
+        if (svcTab && svcTab.getAttribute('data-service-href')) { window.location.href = svcTab.getAttribute('data-service-href'); return; }
+    }
     ['house', 'tour', 'food', 'package', 'rebook', 'history'].forEach(function(t) {
         var el = document.getElementById(t + '-section');
         if (el) el.classList.remove('active');
@@ -3268,6 +3424,8 @@ function openConfirmModal(actionType, bookingId, reference, guestName, extra, am
     var submitBtn = document.getElementById('confirmActionSubmitBtn');
 
     content.classList.remove('rebook-variant', 'payment-variant', 'package-variant');
+    var requestIdInput = document.getElementById('confirmActionRequestId');
+    if (requestIdInput) requestIdInput.value = '';
 
     bookingIdInput.value = bookingId;
     refEl.textContent = reference;
@@ -3286,6 +3444,22 @@ function openConfirmModal(actionType, bookingId, reference, guestName, extra, am
         bookingTypeInput.value = 'house';
         typeInput.value = 'rebook';
         submitBtn.name = 'confirm_rebook';
+    } else if (actionType === 'svc_rebook') {
+        // Tour / food / package rebook REQUEST (Phase 7.6): bookingId carries the request id here.
+        content.classList.add('rebook-variant');
+        iconInner.className = 'fas fa-redo';
+        titleEl.textContent = 'Confirm Rebook?';
+        msgEl.textContent = 'Everything is checked again now. If any part is no longer available, nothing changes and the request stays pending.';
+        itemLabel.textContent = 'Requested';
+        itemEl.textContent = extra || '—';
+        itemRow.style.display = 'flex';
+        warningText.innerHTML = 'The amount already paid is <strong>carried forward</strong> — no new reservation fee, price unchanged. The new schedule replaces the current one.';
+        submitBtn.innerHTML = '<i class="fas fa-check-circle"></i> Yes, Confirm Rebook';
+        bookingIdInput.value = '';
+        if (requestIdInput) requestIdInput.value = bookingId;
+        bookingTypeInput.value = '';
+        typeInput.value = 'svc_rebook';
+        submitBtn.name = 'confirm_service_rebook';
     } else if (actionType === 'payment') {
         if (extra === 'package') {
             content.classList.add('package-variant');
@@ -3396,8 +3570,11 @@ function toggleRejectOther() {
 /* ============================================================
    REJECT REBOOK MODAL
    ============================================================ */
-function openRejectRebookModal(bookingId, reference) {
-    document.getElementById('reject_rebook_booking_id').value = bookingId;
+function openRejectRebookModal(bookingId, reference, requestId) {
+    // requestId = a tour / food / package rebook request (Phase 7.6); without it this is a house rebook.
+    document.getElementById('reject_rebook_booking_id').value = requestId ? '' : bookingId;
+    document.getElementById('reject_rebook_request_id').value = requestId ? requestId : '';
+    document.getElementById('rejectRebookSubmitBtn').name = requestId ? 'reject_service_rebook' : 'reject_rebook';
     document.getElementById('reject_rebook_reason_select').value = '';
     document.getElementById('reject_rebook_reason_other').value = '';
     document.getElementById('reject_rebook_notes').value = '';
