@@ -64,6 +64,10 @@ class DashboardService
         try {
             $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending'")->fetchColumn();
         } catch (PDOException $e) { /* table not created yet: house requests only */ }
+        // Phase 7.7: Emergency Rebook requests waiting (own section in the same Rebooks tab, same badge).
+        try {
+            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM emergency_rebook_requests WHERE status = 'pending'")->fetchColumn();
+        } catch (PDOException $e) { /* migration not run yet */ }
         return $out;
     }
 

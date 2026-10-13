@@ -17,6 +17,7 @@ class SystemLogger
         'confirm_payment', 'reject_payment',
         'confirm_rebook', 'rebook', 'cancel_rebook', 'reject_rebook', 'rebook_failed', 'rebook_request',
         'cancel_booking', 'balance_paid', 'rebook_blocked',
+        'emergency_rebook_request', 'emergency_rebook_approve', 'emergency_rebook_reject', 'emergency_rebook_cancel',
         'upload_proof', 'upload', 'export', 'import',
         'settings_change', 'password_change', 'error'
     ];

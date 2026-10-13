@@ -10,6 +10,7 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 require_once 'includes/PaymentService.php';
+require_once 'includes/FeedbackService.php';   // Phase 7.9: one rating rule (UI + server)
 
 // ✨ TERMS: Load the terms gate
 require_once 'includes/TermsGate.php';
@@ -311,34 +312,23 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
 }
 
 // Handle per-booking feedback submission
+// Phase 7.9: owner + not cancelled + the stay has ended (check-out date AND time) — FeedbackService, the same rule as the Rate button.
+$fb_notice = $_SESSION['fb_notice'] ?? null; unset($_SESSION['fb_notice']);
 if(isset($_POST['submit_house_feedback']) && isset($_SESSION['user_id'])) {
     try {
-        $booking_id = $_POST['booking_id'];
-        $rating = $_POST['rating'];
-        $feedback = $_POST['feedback'];
-        $is_anonymous = isset($_POST['is_anonymous']) ? 1 : 0;
-        
-        $stmt = $pdo->prepare("UPDATE house_bookings SET feedback_rating = ?, feedback_text = ?, feedback_date = NOW(), feedback_is_anonymous = ? WHERE id = ?");
-        $stmt->execute([$rating, $feedback, $is_anonymous, $booking_id]);
-        
-        // ✅ NEW: Log per-booking feedback
+        $fb = FeedbackService::save($pdo, 'house', $_POST['booking_id'] ?? '', (int)$_SESSION['user_id'], $_POST['rating'] ?? '', $_POST['feedback'] ?? '', isset($_POST['is_anonymous']), 'create');
         if (class_exists('SystemLogger')) {
-            SystemLogger::log(
-                $pdo,
-                'create',
-                'review',
-                "Guest submitted house feedback — Rating: {$rating}/5",
-                $booking_id,
-                'house_booking',
-                null,
-                ['rating' => $rating, 'anonymous' => $is_anonymous]
-            );
+            SystemLogger::log($pdo, 'create', 'review', "Guest submitted house feedback — Rating: {$fb['rating']}/5", $fb['id'], 'house_booking', null,
+                              ['rating' => $fb['rating'], 'anonymous' => $fb['anonymous']]);
         }
-        
-        $success = "Thank you for your feedback!";
-        
-    } catch(Exception $e) {
-        $error = "Failed to submit feedback: " . $e->getMessage();
+        $_SESSION['fb_notice'] = ['ok', 'Thank you for your feedback!'];
+        header('Location: houses.php?feedback_saved=1');
+        exit();
+    } catch (InvalidArgumentException $e) {
+        $fb_notice = ['err', $e->getMessage()];
+    } catch (Throwable $e) {
+        error_log('house feedback failed: ' . $e->getMessage());
+        $fb_notice = ['err', 'Your feedback could not be saved right now. Please try again.'];
     }
 }
 
@@ -445,6 +435,13 @@ foreach($houses as $house) {
     $stmt = $pdo->prepare("SELECT block_date, reason, block_type FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND block_date >= CURDATE() ORDER BY block_date ASC");
     $stmt->execute([$house['id']]);
     $blocked_dates_map[$house['id']] = $stmt->fetchAll();
+    // Phase 7.9.1: flag HARD full-day blocks (owner blocks and orphan auto-blocks) — they are refused as a check-out day too,
+    // exactly like AvailabilityService::houseConflict(). Live booking markers keep the nights rule (the booking row decides).
+    try {
+        $hard = array_flip(AvailabilityService::houseHardBlockDates($pdo, $house['id'], date('Y-m-d'), date('Y-m-d', strtotime('+5 years'))));
+        foreach ($blocked_dates_map[$house['id']] as &$bdRow) $bdRow['hard'] = isset($hard[substr((string)$bdRow['block_date'], 0, 10)]);
+        unset($bdRow);
+    } catch (PDOException $e) { /* calendar hint only — the server check at submit is authoritative */ }
 }
 
 // Get user bookings
@@ -600,7 +597,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Transient Houses - Hundred Islands</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/design-system.css">
+    <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1372,6 +1369,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 
         .calendar-grid .day:hover:not(.disabled):not(.booked):not(.blocked):not(.past) { background: #eef2ff; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; border-radius: 8px; }
+        .calendar-grid .day.in-range { background: #dbeafe; color: #0B2447; }   /* Phase 7.9.3: nights between check-in and check-out (same look as packages.php) */
         .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
         .calendar-grid .day.blocked {
             background: #fecaca !important;
@@ -2398,6 +2396,11 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php include 'components/navbar.php'; ?>
 
 <!-- PAGE HERO -->
+<?php if (!empty($fb_notice)): ?>
+<div class="alert-overlay fb-notice">
+    <div class="alert-box <?php echo $fb_notice[0] === 'ok' ? 'success' : 'error'; ?>"><i class="fas <?php echo $fb_notice[0] === 'ok' ? 'fa-check-circle' : 'fa-exclamation-circle'; ?>"></i> <?php echo htmlspecialchars($fb_notice[1]); ?></div>
+</div>
+<?php endif; ?>
 <?php if (isset($error) && strpos((string)$error, 'Booking failed') === 0): ?>
 <div class="alert-overlay">
     <div class="alert-box error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error); ?></div>
@@ -2587,7 +2590,7 @@ $is_logged_in = isset($_SESSION['user_id']);
                                     </a>
                                 <?php endif; ?>
                                 
-                                <?php if(($booking['booking_status'] == 'completed' || PaymentService::isSecured($booking)) && empty($booking['feedback_text'])): ?>
+                                <?php if(FeedbackService::canRate($pdo, 'house', $booking)): /* Phase 7.9: only after check-out date+time */ ?>
                                     <button class="btn" style="padding: 4px 12px; background: #8b5cf6; color: white; border: none; border-radius: 6px; font-size: 11px; cursor: pointer;" onclick="openFeedbackModal(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['house_name']); ?>', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-star"></i> Rate
                                     </button>
@@ -3664,6 +3667,8 @@ function generateCalendar(month, year, bookedDates) {
         else if (isBooked) classes += ' booked';
         if (selectedStartDate && dateStr === selectedStartDate) classes += ' selected';
         if (selectedEndDate && dateStr === selectedEndDate) classes += ' selected';
+        // Phase 7.9.3 (visual only): dates strictly between check-in and check-out. Booked / blocked stay authoritative and never get the range look.
+        if (selectedStartDate && selectedEndDate && dateStr > selectedStartDate && dateStr < selectedEndDate && !isBooked && !isBlocked) classes += ' in-range';
         
         html += `<div class="${classes}" data-date="${dateStr}" onclick="selectDate('${dateStr}')">${day}</div>`;
     }
@@ -3708,6 +3713,11 @@ function selectDate(dateStr) {
         var bookedIn = parseDateYMD(currentBookedDates[j].check_in_date);
         var bookedOut = parseDateYMD(currentBookedDates[j].check_out_date);
         if (bookedIn && bookedOut && rangeStart < bookedOut && rangeEnd > bookedIn) {
+            conflict = currentBookedDates[j];
+            break;
+        }
+        // Phase 7.9.1: a hard (owner / unverified) block cannot be the check-out day either.
+        if (pickingCheckOut && currentBookedDates[j]._hard && bookedIn && rangeEnd.getTime() === bookedIn.getTime()) {
             conflict = currentBookedDates[j];
             break;
         }
@@ -3850,6 +3860,7 @@ function bookHouse(houseId, price, houseName) {
             check_in_date: bd.block_date,
             check_out_date: nx.getFullYear() + '-' + String(nx.getMonth() + 1).padStart(2, '0') + '-' + String(nx.getDate()).padStart(2, '0'),
             _is_blocked: true,
+            _hard: !!bd.hard,
             _reason: bd.reason || 'Blocked',
             _block_type: bd.block_type || 'walk_in'
         });

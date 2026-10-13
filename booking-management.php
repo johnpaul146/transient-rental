@@ -9,6 +9,8 @@ require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
 require_once 'includes/WalkInBookingService.php';
 require_once 'includes/RebookService.php';
+require_once 'includes/EmergencyRebookService.php';   // Phase 7.7
+require_once 'includes/emergency-ui.php';   // Phase 7.9: EmergencyRebookUI::notify() (post-commit Emergency e-mails)
 require_once 'includes/BookingFilters.php';   // read-only list filters (Phase 8.4a)
 
 // ✅ Load SystemLogger (for logout logging)
@@ -139,7 +141,7 @@ if (isset($_POST['admin_cancel_booking']) && !$is_admin) {
     denyBookingPermission('Only an administrator can cancel bookings.');
 }
 
-foreach (['confirm_rebook', 'reject_rebook', 'confirm_service_rebook', 'reject_service_rebook', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
+foreach (['confirm_rebook', 'reject_rebook', 'confirm_service_rebook', 'reject_service_rebook', 'approve_emergency_rebook', 'reject_emergency_rebook', 'confirm_payment', 'reject_payment', 'mark_balance_paid', 'create_walkin_booking'] as $bookingAction) {
     if (isset($_POST[$bookingAction]) && !$can_manage_booking) {
         denyBookingPermission();
     }
@@ -371,7 +373,7 @@ try {
     // Service status only: payment status is never changed here, so a completed
     // stay with a balance due stays visible under Outstanding Balances.
     // Secured past bookings -> completed; never-paid past bookings (no proof) -> expired; packages and parts included.
-    foreach (PaymentService::autoCompleteSql(RebookService::requestTableReady($pdo)) as $autoSql) { $pdo->exec($autoSql); }
+    foreach (PaymentService::autoCompleteSql(RebookService::requestTableReady($pdo), EmergencyRebookService::tableReady($pdo)) as $autoSql) { $pdo->exec($autoSql); }
 } catch (PDOException $e) {
     error_log("AUTO-COMPLETE ERROR: " . $e->getMessage());
 }
@@ -431,7 +433,8 @@ if (isset($_POST['create_walkin_booking']) && $can_manage_booking) {
 
         $res = WalkInBookingService::create($pdo, $_POST, (int)$_SESSION['user_id'], (string)$_SESSION['role']);
         echo json_encode(['ok' => true, 'reference' => $res['reference'], 'guest' => $res['guest_name'], 'total' => $res['total'],
-                          'type' => $res['type'], 'payment_message' => $res['payment']['message'], 'payment_recorded' => $res['payment']['recorded']]);
+                          'type' => $res['type'], 'payment_message' => $res['payment']['message'], 'payment_recorded' => $res['payment']['recorded'],
+                          'email_sent' => (($res['email']['status'] ?? '') === 'sent')]);
     } catch (InvalidArgumentException | AvailabilityConflictException $e) {
         if (!empty($nonce) && isset($_SESSION['wk_nonces'][$nonce])) unset($_SESSION['wk_nonces'][$nonce]); // allow a corrected retry
         echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
@@ -575,6 +578,62 @@ if (isset($_POST['reject_service_rebook']) && $can_manage_booking) {
         $error = "The rebook request could not be rejected right now (nothing was changed). Please try again.";
     } catch (Throwable $e) {
         $error = "Failed to reject rebook: " . $e->getMessage();
+    }
+}
+
+// ============================================================
+// Phase 7.7 — Approve / Reject an EMERGENCY Rebook request (admin + staff).
+// Approve re-checks everything inside EmergencyRebookService (one locked transaction; the only rules not re-applied are the
+// 2-rebook limit and the 7-day window). On any failure nothing changes and the request stays pending and reviewable.
+// ============================================================
+if (isset($_POST['approve_emergency_rebook']) && $can_manage_booking) {
+    try {
+        if (!$bm_rebook_csrf_ok()) throw new InvalidArgumentException('Your session expired. Please refresh the page and try again.');
+        $em_request_id = (int)($_POST['request_id'] ?? 0);
+        if ($em_request_id <= 0) throw new InvalidArgumentException('Invalid Emergency Rebook request.');
+        if (isDuplicateBookingRequest('approve_emergency_rebook', $em_request_id)) { header("Location: booking-management.php?tab=rebook"); exit(); }
+        $em_res = EmergencyRebookService::approve($pdo, $em_request_id, (int)$_SESSION['user_id'], (string)$_SESSION['role']);
+        if (class_exists('SystemLogger')) {
+            $em_old = RebookService::scheduleLines($em_res['type'], $em_res['request']['original']);
+            $em_new = RebookService::scheduleLines($em_res['type'], $em_res['request']['requested']);
+            $em_txt = function ($lines) { return implode('; ', array_map(function ($l) { return $l['label'] . ' ' . $l['text']; }, $lines)); };
+            // 'rebook' = the booking really moved (feeds "recent rebooks" and the previous-dates list)
+            SystemLogger::log($pdo, 'rebook', 'booking',
+                "Emergency Rebook approved for {$em_res['type']} booking '{$em_res['reference']}': " . $em_txt($em_old) . ' -> ' . $em_txt($em_new) . ' (payment carried forward, no new fee)',
+                $em_res['booking_id'], $em_res['type'] . '_booking',
+                ['old_date' => $em_res['old_date'], 'schedule' => $em_res['request']['original']],
+                ['new_date' => $em_res['new_date'], 'schedule' => $em_res['request']['requested'], 'request_id' => $em_request_id, 'rebook_count' => $em_res['rebook_count'], 'by' => (string)$_SESSION['role'], 'emergency' => true]);
+            EmergencyRebookService::log($pdo, 'approve', $em_res['request'], (string)$_SESSION['role'], ['old_date' => $em_res['old_date'], 'new_date' => $em_res['new_date']]);
+        }
+        EmergencyRebookUI::notify($pdo, 'approve', $em_request_id);   // Phase 7.9: guest e-mail, only after a committed approval
+        $success = "✅ Emergency Rebook approved for " . $em_res['reference'] . ". The new schedule is now in place; the payment and the normal rebook count are unchanged.";
+    } catch (AvailabilityConflictException $e) {
+        $error = "Cannot approve this Emergency Rebook — " . $e->getMessage() . " Nothing was changed: the booking keeps its current schedule and the request is still pending. You can reject it so the guest can choose again.";
+    } catch (PDOException $e) {
+        error_log('approve emergency rebook failed: ' . $e->getMessage());
+        $error = "The Emergency Rebook could not be approved right now (nothing was changed). Please try again.";
+    } catch (Throwable $e) {
+        $error = "Failed to approve Emergency Rebook: " . $e->getMessage();
+    }
+}
+
+if (isset($_POST['reject_emergency_rebook']) && $can_manage_booking) {
+    try {
+        if (!$bm_rebook_csrf_ok()) throw new InvalidArgumentException('Your session expired. Please refresh the page and try again.');
+        $em_request_id = (int)($_POST['request_id'] ?? 0);
+        if ($em_request_id <= 0) throw new InvalidArgumentException('Invalid Emergency Rebook request.');
+        $em_note = trim((string)($_POST['reject_reason'] ?? ''));
+        if ($em_note === '') throw new InvalidArgumentException('Please enter the reason for rejecting this Emergency Rebook request.');
+        if (isDuplicateBookingRequest('reject_emergency_rebook', $em_request_id)) { header("Location: booking-management.php?tab=rebook"); exit(); }
+        $em_req = EmergencyRebookService::reject($pdo, $em_request_id, (int)$_SESSION['user_id'], (string)$_SESSION['role'], $em_note);
+        EmergencyRebookService::log($pdo, 'reject', $em_req, (string)$_SESSION['role'], ['review_note' => mb_substr($em_note, 0, 500)]);
+        EmergencyRebookUI::notify($pdo, 'reject', $em_request_id);    // Phase 7.9: guest e-mail with the rejection reason (after commit)
+        $success = "✅ Emergency Rebook request rejected. " . $em_req['reference_number'] . " keeps its current schedule; the payment is unchanged.";
+    } catch (PDOException $e) {
+        error_log('reject emergency rebook failed: ' . $e->getMessage());
+        $error = "The Emergency Rebook request could not be rejected right now (nothing was changed). Please try again.";
+    } catch (Throwable $e) {
+        $error = "Failed to reject Emergency Rebook: " . $e->getMessage();
     }
 }
 
@@ -936,8 +995,9 @@ $food_bookings = $food_stmt->fetchAll();
 // ✅✅✅ GET PACKAGE BOOKINGS
 // ============================================================
 $package_bookings = [];
+$bm_pkg_select = '';
 try {
-    $pkg_query = "SELECT p.*, 
+    $bm_pkg_select = "SELECT p.*, 
                     COALESCE(u.$name_column, 'Unknown Guest') as guest_name, 
                     COALESCE(u.email, '') as email,
                     h.house_name, hb.reference_number as house_ref,
@@ -972,8 +1032,8 @@ try {
                   LEFT JOIN tour_bookings tb ON p.tour_booking_id = tb.id
                   LEFT JOIN tours t ON tb.tour_id = t.id
                   LEFT JOIN food_bookings fb ON p.food_booking_id = fb.id
-                  LEFT JOIN food_items f ON fb.food_id = f.id
-                  WHERE 1=1";
+                  LEFT JOIN food_items f ON fb.food_id = f.id";
+    $pkg_query = $bm_pkg_select . " WHERE 1=1";
 
     if ($status_filter == 'cancelled') {
         $pkg_query .= " AND p.booking_status = 'cancelled'";
@@ -1149,14 +1209,64 @@ $svc_pending = array_values(array_filter($svc_pending_all, function ($r) use ($b
 $rebook_pending_count += count($svc_pending);
 $rebook_pending_global += count($svc_pending_all);
 
+// Phase 7.7: EMERGENCY Rebook requests (all four services) — their own section in the Rebooks tab; they follow the same filters
+// and count in the Rebooks tab badge.
+$em_pending_all = EmergencyRebookService::pendingRequests($pdo);
+$em_pending = array_values(array_filter($em_pending_all, function ($r) use ($bm_filters, $search) {
+    if ($bm_filters['service'] !== 'all' && $bm_filters['service'] !== $r['booking_type']) return false;
+    if ($search !== '') {
+        $hay = mb_strtolower($r['reference_number'] . ' ' . $r['guest_name'] . ' ' . ($r['booking']['item_name'] ?? ''), 'UTF-8');
+        if (mb_strpos($hay, mb_strtolower($search, 'UTF-8'), 0, 'UTF-8') === false) return false;
+    }
+    return true;
+}));
+$rebook_pending_global += count($em_pending_all);
+
+// Phase 7.8: READ-ONLY full booking rows for the View button on every pending (normal + Emergency) rebook card. Same joins/columns as
+// the booking lists (guest, item names, contact, payment, and for a Package its House/Tour/Food components), loaded by id so
+// viewBooking() shows the real booking. Nothing here writes anything; the request/booking state is untouched.
+$bm_load_view_rows = function (string $type, array $ids) use ($pdo, $name_column, $bm_pkg_select, $annotateCancelledBy): array {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+    if (!$ids || !in_array($type, ['house', 'tour', 'food', 'package'], true)) return [];
+    if ($type === 'package' && empty($bm_pkg_select)) return [];
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $who = "COALESCE(u.$name_column, 'Unknown Guest') as guest_name, COALESCE(u.email, '') as email";
+    $join = "LEFT JOIN guests g ON b.guest_id = g.id LEFT JOIN users u ON g.user_id = u.id";
+    $sql = [
+        'house'   => "SELECT b.*, b.guest_names, h.house_name, $who FROM house_bookings b LEFT JOIN houses h ON b.house_id = h.id $join WHERE b.id IN ($ph)",
+        'tour'    => "SELECT b.*, t.tour_name, $who FROM tour_bookings b LEFT JOIN tours t ON b.tour_id = t.id $join WHERE b.id IN ($ph)",
+        'food'    => "SELECT b.*, f.name as food_name, $who FROM food_bookings b LEFT JOIN food_items f ON b.food_id = f.id $join WHERE b.id IN ($ph)",
+        'package' => ($bm_pkg_select ?? '') . " WHERE p.id IN ($ph)",
+    ][$type];
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($ids);
+        $rows = $annotateCancelledBy($type, $st->fetchAll());
+    } catch (PDOException $e) {
+        error_log('rebook view rows (' . $type . '): ' . $e->getMessage());
+        return [];
+    }
+    $out = [];
+    foreach ($rows as $r) $out[(int)$r['id']] = $r;
+    return $out;
+};
+$bm_view_ids = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+foreach ($svc_pending as $bmVr) $bm_view_ids[$bmVr['booking_type']][] = (int)$bmVr['booking_id'];
+foreach ($em_pending as $bmVr) { if (isset($bm_view_ids[$bmVr['booking_type']])) $bm_view_ids[$bmVr['booking_type']][] = (int)$bmVr['booking_id']; }
+$bm_view_rows = [];
+foreach ($bm_view_ids as $bmVt => $bmVi) $bm_view_rows[$bmVt] = $bm_load_view_rows($bmVt, $bmVi);
+
 // One list for the Rebooks tab (house + tour + food + package), newest request first: current vs requested schedule.
 $rebook_items = [];
 foreach ($pending_rebooks as $hb) {
     $hasPrev = !empty($hb['previous_check_in_date']) && !empty($hb['previous_check_out_date']);
+    // Phase 7.9.3: the OLD schedule shows the previous TIMES too. A request made before the migration (NULL previous times) falls back to the saved times, as before.
+    $hbPrevInT = !empty($hb['previous_check_in_time']) ? $hb['previous_check_in_time'] : $hb['check_in_time'];
+    $hbPrevOutT = !empty($hb['previous_check_out_time']) ? $hb['previous_check_out_time'] : $hb['check_out_time'];
     $rebook_items[] = [
         'kind' => 'house', 'type' => 'house', 'id' => (int)$hb['id'], 'ref' => (string)$hb['reference_number'], 'guest' => (string)$hb['guest_name'],
-        'item' => (string)($hb['house_name'] ?? ''), 'at' => $hb['rebooked_at'] ?: $hb['created_at'], 'row' => $hb,
-        'current' => $hasPrev ? RebookService::scheduleLines('package', ['house' => ['in' => $hb['previous_check_in_date'], 'in_time' => $hb['check_in_time'], 'out' => $hb['previous_check_out_date'], 'out_time' => $hb['check_out_time'], 'guests' => $hb['previous_number_of_guests'] ?? $hb['number_of_guests']]]) : [['label' => 'House', 'text' => '—']],
+        'item' => (string)($hb['house_name'] ?? ''), 'at' => $hb['rebooked_at'] ?: $hb['created_at'], 'row' => $hb, 'view' => $hb,
+        'current' => $hasPrev ? RebookService::scheduleLines('package', ['house' => ['in' => $hb['previous_check_in_date'], 'in_time' => $hbPrevInT, 'out' => $hb['previous_check_out_date'], 'out_time' => $hbPrevOutT, 'guests' => $hb['previous_number_of_guests'] ?? $hb['number_of_guests']]]) : [['label' => 'House', 'text' => '—']],
         'requested' => RebookService::scheduleLines('package', ['house' => ['in' => $hb['check_in_date'], 'in_time' => $hb['check_in_time'], 'out' => $hb['check_out_date'], 'out_time' => $hb['check_out_time'], 'guests' => $hb['number_of_guests']]]),
         'this_rebook' => max(1, (int)$hb['rebook_count']),
     ];
@@ -1165,6 +1275,7 @@ foreach ($svc_pending as $sr) {
     $rebook_items[] = [
         'kind' => 'service', 'type' => $sr['booking_type'], 'id' => (int)$sr['id'], 'ref' => (string)$sr['reference_number'], 'guest' => (string)$sr['guest_name'],
         'item' => (string)($sr['booking']['item_name'] ?? ''), 'at' => $sr['requested_at'], 'row' => $sr['booking'] ?: [],
+        'view' => $bm_view_rows[$sr['booking_type']][(int)$sr['booking_id']] ?? null,
         'current' => RebookService::scheduleLines($sr['booking_type'], $sr['original']),
         'requested' => RebookService::scheduleLines($sr['booking_type'], $sr['requested']),
         'this_rebook' => (int)($sr['booking']['rebook_count'] ?? 0) + 1, 'by' => (string)($sr['requested_role'] ?? ''),
@@ -1699,6 +1810,22 @@ function formatGuestNames($guest_names) {
         .rb-arrow { justify-content: center; transform: rotate(90deg); }
         .rb-actions > * { flex: 1 1 auto; justify-content: center; }
     }
+
+    /* Phase 7.7 — Emergency Rebook requests (orange accent) */
+    .rb-em-card { margin-top: 18px; border-top: 4px solid #ea580c; }
+    .rb-em-note { background: linear-gradient(135deg, #ffedd5, #fff7ed); border-color: #fb923c; color: #9a3412; }
+    .rb-em-note i { color: #ea580c; }
+    .rb-item.rb-em-item { border-left-color: #ea580c; }
+    .rb-em-tag { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; background: #ffedd5; color: #c2410c; border: 1px solid #fdba74; }
+    .rb-em-why { margin-top: 10px; font-size: 12.5px; color: #9a3412; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; padding: 8px 11px; overflow-wrap: anywhere; }
+    .rb-em-why i { color: #ea580c; margin-right: 4px; }
+    .rb-em-reason { margin-top: 10px; font-size: 13px; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 9px 11px; overflow-wrap: anywhere; word-break: break-word; }
+    .rb-em-new { background: #fff7ed; border-color: #fdba74; } .rb-em-new .rb-h { color: #c2410c; }
+    .rb-meta a { color: #0369a1; text-decoration: none; }
+    .confirm-modal.em-variant { border-top-color: #ea580c; }
+    .confirm-modal.em-variant .confirm-modal-icon { background: linear-gradient(135deg, #ffedd5, #fed7aa); color: #ea580c; }
+    .confirm-modal.em-variant .btn-confirm-submit { background: linear-gradient(135deg, #f97316, #ea580c); }
+    #emRejectModal .modal-content { width: calc(100% - 32px); }
 
     /* MODALS */
     .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center; }
@@ -2873,8 +3000,8 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                     <h2><i class="fas fa-clock" style="color:#f59e0b;"></i> Pending Rebooks (<?php echo (int)$rebook_pending_count; ?>)</h2>
                 </div>
 
-                <?php if($rebook_pending_global > $rebook_pending_count): ?>
-                <div class="bm-notice"><i class="fas fa-filter"></i> <?php echo (int)($rebook_pending_global - $rebook_pending_count); ?> more pending rebook(s) are hidden by the current filters. <a href="<?php echo $bm_url(['search' => '', 'service' => 'all', 'date' => '', 'from' => '', 'to' => '', 'quick' => '', 'status' => 'all']); ?>">Clear filters</a></div>
+                <?php if($rebook_pending_global > $rebook_pending_count + count($em_pending)): ?>
+                <div class="bm-notice"><i class="fas fa-filter"></i> <?php echo (int)($rebook_pending_global - $rebook_pending_count - count($em_pending)); ?> more pending rebook(s) are hidden by the current filters. <a href="<?php echo $bm_url(['search' => '', 'service' => 'all', 'date' => '', 'from' => '', 'to' => '', 'quick' => '', 'status' => 'all']); ?>">Clear filters</a></div>
                 <?php endif; ?>
                 <?php if(count($rebook_items) > 0): ?>
                 <div class="rebook-info-note">
@@ -2914,8 +3041,10 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                         </div>
                         <?php if($rbRow): ?><div class="rb-amount"><?php echo PaymentService::adminAmountCell($rbRow); ?></div><?php endif; ?>
                         <div class="rb-actions">
+                            <?php if(!empty($rbI['view'])): ?>
+                            <button class="btn-view-booking rb-view" type="button" onclick='viewBooking(<?php echo json_encode($rbI['type']); ?>, <?php echo htmlspecialchars(json_encode($rbI['view']), ENT_QUOTES, "UTF-8"); ?>)'><i class="fas fa-eye"></i> <?php echo $rbI['type'] === 'package' ? 'View Package' : 'View'; ?></button>
+                            <?php endif; ?>
                             <?php if($rbI['kind'] === 'house'): ?>
-                            <button class="btn-view-booking" type="button" onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($rbRow), ENT_QUOTES, "UTF-8"); ?>)'><i class="fas fa-eye"></i> View</button>
                             <button type="button" class="btn-sm btn-rebook-confirm rb-confirm" onclick="openConfirmModal('rebook', <?php echo (int)$rbI['id']; ?>, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbI['guest']), ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes($rbI['item']), ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-check-circle"></i> Confirm Rebook</button>
                             <button type="button" class="btn-sm btn-rebook-reject rb-reject" onclick="openRejectRebookModal(<?php echo (int)$rbI['id']; ?>, '<?php echo htmlspecialchars($rbI['ref'], ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-times"></i> Reject Rebook</button>
                             <?php else: ?>
@@ -2933,6 +3062,77 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 </div>
                 <?php endif; ?>
             </div>
+
+            <!-- Phase 7.7 — EMERGENCY REBOOK REQUESTS (Admin + Staff). Guest asked after the normal rebook closed (2-rebook limit
+                 and/or 7-day window). Approve re-checks everything except those two rules; Reject needs a reason. -->
+            <?php if (EmergencyRebookService::tableReady($pdo)): ?>
+            <div class="card rb-em-card" id="emergency-rebook-section">
+                <div class="card-header">
+                    <h2><i class="fas fa-exclamation-triangle" style="color:#ea580c;"></i> Emergency Rebook Requests (<?php echo count($em_pending); ?>)</h2>
+                </div>
+                <?php if(count($em_pending) > 0): ?>
+                <div class="rebook-info-note rb-em-note">
+                    <i class="fas fa-info-circle"></i>
+                    <span>These guests can no longer use the normal rebook. <strong>Approve</strong> re-checks availability, blocked dates, capacity and every other rule (only the 2-rebook limit and the 7-day window are waived). The payment stays as it is — no new fee, no refund.</span>
+                </div>
+                <div class="rb-list">
+                    <?php foreach($em_pending as $emR):
+                        $emType = $emR['booking_type'];
+                        $emIcon = ['house' => 'fa-home', 'tour' => 'fa-umbrella-beach', 'food' => 'fa-utensils', 'package' => 'fa-box-open'][$emType] ?? 'fa-tag';
+                        $emB = is_array($emR['booking'] ?? null) ? $emR['booking'] : null;
+                        $emRef = (string)$emR['reference_number'];
+                        $emRefJs = htmlspecialchars(addslashes($emRef), ENT_QUOTES, 'UTF-8');
+                        $emCurrent = RebookService::scheduleLines($emType, $emR['original']);
+                        $emNew = RebookService::scheduleLines($emType, $emR['requested']);
+                        $emTel = preg_replace('/[^0-9+]/', '', (string)$emR['contact_number']);
+                    ?>
+                    <article class="rb-item rb-em-item" data-rb-type="<?php echo htmlspecialchars($emType, ENT_QUOTES, 'UTF-8'); ?>" data-em-id="<?php echo (int)$emR['id']; ?>" data-rb-ref="<?php echo htmlspecialchars($emRef, ENT_QUOTES, 'UTF-8'); ?>">
+                        <div class="rb-top">
+                            <span class="rb-svc rb-svc-<?php echo htmlspecialchars($emType, ENT_QUOTES, 'UTF-8'); ?>"><i class="fas <?php echo $emIcon; ?>"></i> <?php echo htmlspecialchars(ucfirst($emType)); ?></span>
+                            <strong class="rb-ref"><?php echo htmlspecialchars($emRef); ?></strong>
+                            <span class="rb-em-tag"><i class="fas fa-exclamation-triangle"></i> Emergency</span>
+                            <span class="rebook-badge" title="Normal rebooks already used on this booking"><i class="fas fa-redo"></i> <?php echo (int)$emR['regular_rebook_count']; ?>/<?php echo RebookService::MAX_REBOOKS; ?> used</span>
+                        </div>
+                        <div class="rb-meta">
+                            <span><i class="fas fa-user"></i> <?php echo htmlspecialchars((string)$emR['guest_name']); ?></span>
+                            <?php if($emB && ($emB['item_name'] ?? '') !== ''): ?><span><i class="fas fa-tag"></i> <?php echo htmlspecialchars((string)$emB['item_name']); ?></span><?php endif; ?>
+                            <span><i class="fas fa-paper-plane"></i> Requested <?php echo formatDateTimeDisplay($emR['requested_at']); ?></span>
+                            <?php if($emTel !== ''): ?><span><i class="fas fa-phone"></i> <a href="tel:<?php echo htmlspecialchars($emTel, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars((string)$emR['contact_number']); ?></a></span><?php endif; ?>
+                            <?php if($emB): ?><span class="rb-pay"><?php echo PaymentService::adminBadge($emB); ?></span><?php endif; ?>
+                        </div>
+                        <div class="rb-em-why"><i class="fas fa-flag"></i> <strong>Why Emergency:</strong> <?php echo htmlspecialchars(EmergencyRebookService::ELIGIBILITY_LABELS[$emR['eligibility']] ?? (string)$emR['eligibility']); ?></div>
+                        <div class="rb-em-reason"><div class="rb-h">Guest's reason</div><?php echo nl2br(htmlspecialchars((string)$emR['reason'])); ?></div>
+                        <div class="rb-sched">
+                            <div class="rb-col">
+                                <div class="rb-h">Current</div>
+                                <?php foreach($emCurrent as $rbL): ?><div class="rb-line"><span><?php echo htmlspecialchars($rbL['label']); ?></span><?php echo htmlspecialchars($rbL['text']); ?></div><?php endforeach; ?>
+                            </div>
+                            <div class="rb-arrow" aria-hidden="true"><i class="fas fa-arrow-right"></i></div>
+                            <div class="rb-col rb-new rb-em-new">
+                                <div class="rb-h">Requested</div>
+                                <?php foreach($emNew as $rbL): ?><div class="rb-line"><span><?php echo htmlspecialchars($rbL['label']); ?></span><?php echo htmlspecialchars($rbL['text']); ?></div><?php endforeach; ?>
+                            </div>
+                        </div>
+                        <?php if($emB): ?><div class="rb-amount"><?php echo PaymentService::adminAmountCell($emB); ?></div><?php endif; ?>
+                        <div class="rb-actions">
+                            <?php $emView = $bm_view_rows[$emType][(int)$emR['booking_id']] ?? ($emType !== 'package' ? $emB : null); ?>
+                            <?php if(!empty($emView)): ?>
+                            <button class="btn-view-booking rb-view" type="button" onclick='viewBooking(<?php echo json_encode($emType); ?>, <?php echo htmlspecialchars(json_encode($emView), ENT_QUOTES, "UTF-8"); ?>)'><i class="fas fa-eye"></i> <?php echo $emType === 'package' ? 'View Package' : 'View'; ?></button>
+                            <?php endif; ?>
+                            <button type="button" class="btn-sm btn-rebook-confirm rb-confirm rb-em-approve" onclick="openEmApproveModal(<?php echo (int)$emR['id']; ?>, '<?php echo $emRefJs; ?>', '<?php echo htmlspecialchars(addslashes((string)$emR['guest_name']), ENT_QUOTES, 'UTF-8'); ?>', '<?php echo htmlspecialchars(addslashes(ucfirst($emType)), ENT_QUOTES, 'UTF-8'); ?>')"><i class="fas fa-check-circle"></i> Approve</button>
+                            <button type="button" class="btn-sm btn-rebook-reject rb-reject rb-em-reject" onclick="openEmRejectModal(<?php echo (int)$emR['id']; ?>, '<?php echo $emRefJs; ?>')"><i class="fas fa-times"></i> Reject</button>
+                        </div>
+                    </article>
+                    <?php endforeach; ?>
+                </div>
+                <?php else: ?>
+                <div style="text-align: center; padding: 28px 20px; color: #94a3b8;">
+                    <i class="fas fa-check-circle" style="display: block; font-size: 32px; margin-bottom: 8px; color: #10b981;"></i>
+                    <p>No pending Emergency Rebook requests.</p>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endif; /* Emergency table ready (Phase 7.7 migration run) */ ?>
         </div>
 
         <!-- ✅ HISTORY SECTION -->
@@ -3230,6 +3430,56 @@ style="<?php echo $is_row_pending_rebook ? 'background: #fffdf5;' : ''; ?>">    
                 <button type="submit" name="reject_rebook" id="rejectRebookSubmitBtn" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;">
                     <i class="fas fa-undo"></i> Reject Rebook
                 </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- EMERGENCY REBOOK: APPROVE MODAL (Phase 7.7) -->
+<div class="confirm-modal-overlay" id="emApproveModal" role="dialog" aria-modal="true" aria-labelledby="emApproveTitle">
+    <div class="confirm-modal em-variant">
+        <div class="confirm-modal-icon"><i class="fas fa-exclamation-triangle"></i></div>
+        <h3 id="emApproveTitle">Approve Emergency Rebook?</h3>
+        <p>The booking will move to the requested schedule only if everything is still available. If anything conflicts, nothing is changed and the request stays pending.</p>
+        <div class="confirm-ref-box">
+            <div class="ref-row"><span class="ref-label">Reference</span><span class="ref-value" id="emApproveRef">—</span></div>
+            <div class="ref-row"><span class="ref-label">Service</span><span class="ref-value" id="emApproveService" style="font-family: inherit;">—</span></div>
+            <div class="ref-row"><span class="ref-label">Guest</span><span class="ref-value" id="emApproveGuest" style="font-family: inherit;">—</span></div>
+        </div>
+        <div class="confirm-modal-warning">
+            <i class="fas fa-info-circle"></i>
+            <span>The payment stays as it is (no new fee, no refund). This does not count as a normal rebook.</span>
+        </div>
+        <form method="POST" id="emApproveForm">
+            <input type="hidden" name="request_id" id="emApproveRequestId" value="">
+            <input type="hidden" name="bm_rebook_csrf" value="<?php echo htmlspecialchars($bm_rebook_csrf, ENT_QUOTES, 'UTF-8'); ?>">
+            <div class="confirm-modal-actions">
+                <button type="button" class="btn-confirm-cancel" onclick="closeEmApproveModal()"><i class="fas fa-times"></i> Cancel</button>
+                <button type="submit" class="btn-confirm-submit" name="approve_emergency_rebook" value="1"><i class="fas fa-check-circle"></i> Approve</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- EMERGENCY REBOOK: REJECT MODAL (Phase 7.7) — a reason is required and is shown to the guest -->
+<div class="modal" id="emRejectModal" role="dialog" aria-modal="true" aria-labelledby="emRejectTitle">
+    <div class="modal-content" style="max-width: 520px;">
+        <div class="modal-header" style="border-bottom: 2px solid #fee2e2;">
+            <h3 style="color: #991b1b;"><i class="fas fa-times-circle" style="color: #ef4444;"></i> <span id="emRejectTitle">Reject Emergency Rebook?</span></h3>
+            <button class="close" type="button" onclick="closeEmRejectModal()" aria-label="Close">&times;</button>
+        </div>
+        <form method="POST" id="emRejectForm">
+            <input type="hidden" name="request_id" id="emRejectRequestId" value="">
+            <input type="hidden" name="bm_rebook_csrf" value="<?php echo htmlspecialchars($bm_rebook_csrf, ENT_QUOTES, 'UTF-8'); ?>">
+            <div style="margin-bottom: 15px;">
+                <label for="emRejectReason" style="display: block; margin-bottom: 6px; font-weight: 600; color: #1e293b; font-size: 13px;">
+                    <i class="fas fa-comment-alt" style="color: #ef4444;"></i> Reason for rejection <span style="color: #dc2626;">*</span> <span style="color:#94a3b8; font-weight:500;">(the guest will see this)</span>
+                </label>
+                <textarea name="reject_reason" id="emRejectReason" rows="4" required minlength="3" maxlength="500" placeholder="Explain why this request cannot be approved..." style="width: 100%; padding: 10px 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 14px; font-family: inherit; resize: vertical;"></textarea>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
+                <button type="button" onclick="closeEmRejectModal()" style="flex: 1 1 120px; padding: 12px; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;"><i class="fas fa-times"></i> Cancel</button>
+                <button type="submit" name="reject_emergency_rebook" value="1" style="flex: 1 1 120px; padding: 12px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; border: none; border-radius: 10px; font-weight: 700; cursor: pointer;"><i class="fas fa-times-circle"></i> Reject Request</button>
             </div>
         </form>
     </div>
@@ -3570,6 +3820,36 @@ function toggleRejectOther() {
 /* ============================================================
    REJECT REBOOK MODAL
    ============================================================ */
+/* ============================================================
+   EMERGENCY REBOOK (Phase 7.7) — approve / reject modals
+   ============================================================ */
+function openEmApproveModal(requestId, reference, guest, service) {
+    document.getElementById('emApproveRequestId').value = requestId;
+    document.getElementById('emApproveRef').textContent = reference;
+    document.getElementById('emApproveGuest').textContent = guest;
+    document.getElementById('emApproveService').textContent = service;
+    document.getElementById('emApproveModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+function closeEmApproveModal() {
+    var m = document.getElementById('emApproveModal');
+    if (m) m.classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+function openEmRejectModal(requestId, reference) {
+    document.getElementById('emRejectRequestId').value = requestId;
+    document.getElementById('emRejectReason').value = '';
+    document.getElementById('emRejectTitle').textContent = 'Reject Emergency Rebook — ' + reference + '?';
+    document.getElementById('emRejectModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+    setTimeout(function () { document.getElementById('emRejectReason').focus(); }, 50);
+}
+function closeEmRejectModal() {
+    var m = document.getElementById('emRejectModal');
+    if (m) m.classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
 function openRejectRebookModal(bookingId, reference, requestId) {
     // requestId = a tour / food / package rebook request (Phase 7.6); without it this is a house rebook.
     document.getElementById('reject_rebook_booking_id').value = requestId ? '' : bookingId;
@@ -4274,12 +4554,16 @@ document.addEventListener('keydown', function(e) {
         closeConfirmModal();
         closeRejectModal();
         closeRejectRebookModal();
+        closeEmApproveModal();
+        closeEmRejectModal();
         closeAdminCancelModal();
     }
 });
 
 window.onclick = function(event) {
-    if (event.target.classList.contains('modal')) {
+    // Modals marked data-static-backdrop (Create Walk-in Booking) close only through their own X / Cancel buttons,
+    // so an accidental click outside never throws away a half-filled form.
+    if (event.target.classList.contains('modal') && !event.target.hasAttribute('data-static-backdrop')) {
         event.target.classList.remove('show');
         document.body.style.overflow = 'auto';
     }
@@ -4316,6 +4600,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (confirmModal) confirmModal.addEventListener('click', function(e) { if (e.target === this) closeConfirmModal(); });
     var rejectRebookModal = document.getElementById('rejectRebookModal');
     if (rejectRebookModal) rejectRebookModal.addEventListener('click', function(e) { if (e.target === this) closeRejectRebookModal(); });
+    var emApproveModal = document.getElementById('emApproveModal');
+    if (emApproveModal) emApproveModal.addEventListener('click', function(e) { if (e.target === this) closeEmApproveModal(); });
     var adminCancelModal = document.getElementById('adminCancelModal');
     if (adminCancelModal) adminCancelModal.addEventListener('click', function(e) { if (e.target === this) closeAdminCancelModal(); });
 

@@ -3093,14 +3093,67 @@ body .site-footer .site-footer__links a {
   .hero { padding-top: 104px; }
 }
 
-/* Terms & Privacy modal: keep header legible and give the text more room on short screens */
-.terms-modal-header h3 { color: #FFFFFF !important; }
+/* Terms & Privacy modal: keep every header variant legible.
+   Phase 7.9 covered .terms-modal-header only; House uses .booking-terms-header.
+   Both families must also beat the global h1-h6/p !important rules. */
+.terms-modal-header,
+.booking-terms-header {
+  background: linear-gradient(135deg, #0B2447 0%, #0B3D91 55%, #1C5F93 100%) !important;
+  color: #FFFFFF !important;
+}
+.terms-modal-header > h3,
+.booking-terms-header > h3,
+.terms-modal-header #termsModalTitle,
+.booking-terms-header #bookingTermsModalTitle {
+  color: #FFFFFF !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.30);
+}
+.terms-modal-header > p,
+.booking-terms-header > p,
+.terms-modal-header #termsModalSubtitle,
+.booking-terms-header #bookingTermsModalSubtitle {
+  color: #FFFFFF !important;
+  opacity: 1 !important;
+  font-weight: 500;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.30);
+}
+.terms-modal-header .terms-modal-icon,
+.booking-terms-header .booking-terms-icon { color: #F4B400 !important; }
+.terms-modal-header .terms-modal-close,
+.booking-terms-header .booking-terms-close,
+.terms-modal-header .terms-modal-close i,
+.booking-terms-header .booking-terms-close i { color: #FFFFFF !important; }
+.terms-modal-header a,
+.booking-terms-header a,
+.terms-modal-header a:hover,
+.booking-terms-header a:hover,
+.terms-modal-header a:focus-visible,
+.booking-terms-header a:focus-visible { color: #FFFFFF !important; text-decoration: underline; }
+.terms-modal-header a:focus-visible,
+.booking-terms-header a:focus-visible,
+.terms-modal-close:focus-visible,
+.booking-terms-close:focus-visible { outline: 2px solid #F4B400; outline-offset: 2px; }
+.terms-section-title,
+.terms-section-title span { color: #0B2447 !important; }
+.terms-section-body { color: #334155 !important; }
+.terms-divider span { color: #475569 !important; }
+.terms-checkbox-label,
+.terms-checkbox-label .terms-checkbox-text,
+.terms-checkbox-label strong { color: #1e293b !important; }
+p.terms-modal-footer-note,
+.terms-modal-footer-note { color: #475569 !important; }
+.terms-scroll-hint { color: #92400e !important; }
+.terms-scroll-hint.done { color: #065f46 !important; }
 
 @media (max-height: 520px) {
-  .terms-modal-header { padding: 10px 16px !important; }
+  .terms-modal-header,
+  .booking-terms-header { padding: 10px 16px !important; }
   .terms-modal-header .terms-modal-icon,
-  .terms-modal-header p { display: none; }
-  .terms-modal-header h3 { font-size: 16px !important; margin: 0 !important; }
+  .booking-terms-header .booking-terms-icon,
+  .terms-modal-header p,
+  .booking-terms-header p { display: none; }
+  .terms-modal-header h3,
+  .booking-terms-header h3 { font-size: 16px !important; margin: 0 !important; }
   .terms-modal-footer-note { display: none; }
 }
 
@@ -3151,3 +3204,15 @@ body .calendar-grid > * { min-width: 0; }
 body :is(h1, h2, h3, h4, h5, h6, p, label, li, .stat-label, [class*="title"], [class*="name"], [class*="desc"], [class*="label"], [class*="value"], [class*="badge"], .badge):not(td *, th *, .navbar *, .nav-drawer *) {
   overflow-wrap: anywhere;
 }
+
+/* Phase 7.9: per-booking rating stars (Rate Your Stay / Rate Your Tour / Rate Your Experience / Edit Feedback).
+   The JS already toggles .active on stars 1..N but no rule coloured it, so the stars never turned gold. */
+.rating-stars { display: flex; justify-content: center; gap: 6px; font-size: 32px; line-height: 1; margin-bottom: 6px; }
+.rating-stars i { color: #cbd5e1 !important; cursor: pointer; padding: 4px; transition: color .15s ease, transform .15s ease; -webkit-tap-highlight-color: transparent; }
+.rating-stars i.active { color: #f59e0b !important; }
+@media (hover: hover) {
+  .rating-stars:has(i:hover) i { color: #fbbf24 !important; }     /* hover preview: stars up to the pointer */
+  .rating-stars i:hover ~ i { color: #cbd5e1 !important; }
+  .rating-stars i:hover { transform: scale(1.1); }
+}
+@media (max-width: 360px) { .rating-stars { font-size: 28px; gap: 2px; } }

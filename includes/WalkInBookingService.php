@@ -36,6 +36,7 @@
 
 require_once __DIR__ . '/AvailabilityService.php';
 require_once __DIR__ . '/PaymentService.php';
+require_once __DIR__ . '/InputRules.php';
 if (file_exists(__DIR__ . '/SystemLogger.php')) require_once __DIR__ . '/SystemLogger.php';
 
 class WalkInBookingService {
@@ -76,25 +77,17 @@ class WalkInBookingService {
 
     // ------------------------------------------------------------- validation
 
+    /** Shared person-name rule (see InputRules). Returns an error message or null. */
     public static function validateName($name) {
-        $name = trim((string)$name);
-        if ($name === '') return 'Guest full name is required.';
-        if (mb_strlen($name) < 2) return 'Guest name is too short.';
-        if (mb_strlen($name) > 60) return 'Guest name must not exceed 60 characters.';
-        if (preg_match('/[0-9]/', $name)) return 'Guest name cannot contain numbers.';
-        if (!preg_match("/^[a-zA-ZÀ-ÿñÑ\s\-'.]+$/u", $name)) return "Guest name can only contain letters, spaces, hyphens (-), apostrophes (') and periods (.).";
-        return null;
+        $e = InputRules::nameError($name, true);
+        return $e === null ? null : ($e === 'Name is required.' ? 'Guest full name is required.' : $e);
     }
 
-    /** '09xx…', '9xx…', '+639xx…', '639xx…' -> '+639XXXXXXXXX' (PH mobile, same format as online bookings). */
+    /** Strict PH mobile number -> '+639XXXXXXXXX'. Letters/symbols are rejected, never stripped. */
     public static function normalizePhone($raw) {
-        $d = preg_replace('/[^0-9]/', '', (string)$raw);
-        if (strpos($d, '63') === 0 && strlen($d) === 12) $d = substr($d, 2);
-        if (strpos($d, '0') === 0) $d = substr($d, 1);
-        if (!preg_match('/^9[0-9]{9}$/', $d)) {
-            throw new InvalidArgumentException('Contact number must be a valid PH mobile number (e.g. 09123456789).');
-        }
-        return '+63' . $d;
+        $n = InputRules::normalizePhone($raw);
+        if ($n === null) throw new InvalidArgumentException(InputRules::PHONE_MESSAGE);
+        return $n;
     }
 
     private static function cleanDate($v, $label) {
@@ -161,7 +154,7 @@ class WalkInBookingService {
             return ['id' => (int)$g['id'], 'name' => $g['full_name'], 'contact' => $g['contact_number'], 'created' => false];
         }
 
-        $name = trim((string)($in['wg_name'] ?? ''));
+        $name = InputRules::cleanName($in['wg_name'] ?? '');
         if (($e = self::validateName($name)) !== null) throw new InvalidArgumentException($e);
         $contact = self::normalizePhone($in['wg_contact'] ?? '');
 
@@ -181,10 +174,13 @@ class WalkInBookingService {
             throw new InvalidArgumentException("A guest named {$name} with this contact number already exists. Use “Search existing guest” to book for them.");
         }
 
-        $emName = trim((string)($in['wg_emergency_name'] ?? ''));
-        if ($emName !== '' && !preg_match("/^[a-zA-ZÀ-ÿñÑ\s\-'.]+$/u", $emName)) throw new InvalidArgumentException('Emergency contact name can only contain letters, spaces, hyphens, apostrophes and periods.');
+        $emName = InputRules::cleanName($in['wg_emergency_name'] ?? '');
+        if (($e = InputRules::nameError($emName, false)) !== null) throw new InvalidArgumentException('Emergency contact name: ' . $e);
         $emNumber = trim((string)($in['wg_emergency_number'] ?? ''));
-        if ($emNumber !== '') $emNumber = self::normalizePhone($emNumber);
+        if ($emNumber !== '') {
+            if (($e = InputRules::phoneError($emNumber, false)) !== null) throw new InvalidArgumentException('Emergency contact number: ' . $e);
+            $emNumber = InputRules::normalizePhone($emNumber);
+        }
 
         $username = null;
         for ($i = 0; $i < 5; $i++) {
@@ -233,7 +229,7 @@ class WalkInBookingService {
 
     /** 'blocked' when the conflict is an owner/auto block, otherwise 'booked' (an existing reservation). */
     private static function availKind($message) {
-        return strpos((string)$message, ' is blocked') !== false ? 'blocked' : 'booked';
+        return (strpos((string)$message, ' is blocked') !== false || strpos((string)$message, ' is not available.') !== false) ? 'blocked' : 'booked';   // Phase 7.9.1: an orphan auto-block reads "is not available." and is a blocked date
     }
 
     /** The house/tour/food row must exist and be bookable (same status rules planHouse/planTour/planFood apply). */
@@ -373,14 +369,20 @@ class WalkInBookingService {
         }
 
         $nights = (int)(new DateTime($checkIn))->diff(new DateTime($checkOut))->days;
-        $names = array_values(array_filter(array_map('trim', explode("\n", (string)($in['guest_names'] ?? '')))));
-        if ($names) {
-            if (count($names) !== $pax) throw new InvalidArgumentException('Guest names: enter exactly ' . $pax . ' name(s) (one per line), or leave it empty.');
-            foreach ($names as $n) {
-                if (($e = self::validateName($n)) !== null) throw new InvalidArgumentException("Guest names: $e ($n)");
+        // Same rule as the online House/Package forms: exactly one valid name per guest. The lead guest's
+        // name is NOT silently substituted for missing names.
+        $names = [];
+        foreach (preg_split('/\R/u', (string)($in['guest_names'] ?? '')) as $line) {
+            $line = InputRules::cleanName($line);
+            if ($line !== '') $names[] = $line;
+        }
+        if (count($names) !== $pax) {
+            throw new InvalidArgumentException('Guest names: enter exactly ' . $pax . ' name' . ($pax === 1 ? '' : 's') . ' (one per line) to match the number of guests — you entered ' . count($names) . '.');
+        }
+        foreach ($names as $i => $n) {
+            if (($e = InputRules::nameError($n, true)) !== null) {
+                throw new InvalidArgumentException('Guest name #' . ($i + 1) . ': ' . $e);
             }
-        } else {
-            $names = [$guest['name']];
         }
         return ['type' => 'house', 'row' => $h, 'name' => $h['house_name'], 'price' => round((float)$h['price_per_night'] * $nights, 2),
                 'check_in' => $checkIn, 'check_out' => $checkOut, 'nights' => $nights, 'pax' => $pax,
@@ -627,8 +629,51 @@ class WalkInBookingService {
             }
         }
 
+        // E-mail the guest (only after everything above is committed). Never throws, never affects the booking/payment.
+        $email = self::notifyGuest($pdo, $type, $bookingId, (int)$guest['id'], $reference, $payment);
+
         return ['type' => $type, 'id' => $bookingId, 'reference' => $reference, 'total' => $total,
                 'guest_id' => $guest['id'], 'guest_name' => $guest['name'], 'guest_created' => $guest['created'],
-                'payment' => $payment];
+                'payment' => $payment, 'email' => $email];
+    }
+
+    /**
+     * Booking confirmation (+ payment confirmation when a fee was just recorded) through the existing
+     * EmailNotifications. A Package is ONE booking -> ONE confirmation (no child-service e-mails).
+     * Skipped silently when the guest has no real address (blank or @walkin.invalid placeholder).
+     * Any failure is logged (no credentials) and swallowed: the booking is already committed.
+     *
+     * @return array ['status' => 'sent'|'partial'|'skipped'|'failed', 'booking_sent' => bool, 'payment_sent' => bool, 'to' => ?string]
+     */
+    private static function notifyGuest(PDO $pdo, $type, $bookingId, $guestId, $reference, array $payment) {
+        $out = ['status' => 'skipped', 'booking_sent' => false, 'payment_sent' => false, 'to' => null];
+        try {
+            $st = $pdo->prepare('SELECT u.email FROM guests g JOIN users u ON u.id = g.user_id WHERE g.id = ?');
+            $st->execute([$guestId]);
+            $to = trim((string)$st->fetchColumn());
+            if ($to === '' || self::isPlaceholderEmail($to) || !filter_var($to, FILTER_VALIDATE_EMAIL)) return $out;
+            $out['to'] = $to;
+
+            if (!class_exists('EmailNotifications', false)) require_once __DIR__ . '/EmailNotifications.php';
+            $feeRecorded = !empty($payment['recorded']);
+            $note = $feeRecorded
+                ? '💳 <strong>Reservation fee received:</strong> Your reservation fee was paid at our counter. A separate payment confirmation is included. The remaining balance is settled on arrival.'
+                : '💳 <strong>Reservation fee:</strong> This walk-in booking is saved as pending. Please pay the reservation fee at our counter to secure your booking.';
+
+            $out['booking_sent'] = (bool)EmailNotifications::sendBookingConfirmation($bookingId, $type, $pdo, ['note_html' => $note]);
+            if (!$out['booking_sent']) error_log("WalkIn booking e-mail not sent ($reference): " . EmailNotifications::$lastError);
+
+            if ($feeRecorded) {
+                $out['payment_sent'] = (bool)EmailNotifications::sendPaymentConfirmation($bookingId, $type, $pdo);
+                if (!$out['payment_sent']) error_log("WalkIn payment e-mail not sent ($reference): " . EmailNotifications::$lastError);
+            }
+            $need = $feeRecorded ? 2 : 1;
+            $got = (int)$out['booking_sent'] + (int)$out['payment_sent'];
+            $out['status'] = $got === $need ? 'sent' : ($got > 0 ? 'partial' : 'failed');
+        } catch (Throwable $e) {
+            error_log("WalkIn e-mail failed ($reference): " . get_class($e) . ' ' . $e->getMessage());
+            $out['status'] = 'failed';
+        }
+        return $out;
     }
 }

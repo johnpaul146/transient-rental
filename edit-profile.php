@@ -90,6 +90,184 @@ $stmt = $pdo->prepare("SELECT * FROM guests WHERE user_id = ?");
 $stmt->execute([$_SESSION['user_id']]);
 $guest = $stmt->fetch();
 
+// Phase 7.9: site logo from the same setting the other guest pages use (site_content.site_settings.logo_path),
+// then the default upload; the icon stays as the fallback when no logo file exists.
+$ep_logo = '';
+try {
+    $lst = $pdo->prepare("SELECT content_value FROM site_content WHERE section_name = 'site_settings' AND content_key = 'logo_path' LIMIT 1");
+    $lst->execute();
+    $ep_logo = trim((string)$lst->fetchColumn());
+} catch (PDOException $e) { $ep_logo = ''; }
+foreach ([$ep_logo, 'uploads/logos/logo.png'] as $ep_cand) {
+    $ep_logo = '';
+    if ($ep_cand !== '' && strpos($ep_cand, '..') === false && is_file($ep_cand)) { $ep_logo = $ep_cand; break; }
+}
+
+// ============================================================
+// Phase 7.9: GUEST PASSWORD CHANGE = current password + e-mail OTP.
+// Same architecture as admin-profile.php (6-digit code in users.reset_token / reset_token_expires, the NEW password
+// hash parked in the session until the code is verified, the existing MailConfig mailer), hardened for guests:
+//   CSRF · the code is bound to this session, this account and the e-mail it was sent to (a code issued anywhere else,
+//   e.g. by forgot-password, is not accepted here) · 15-minute expiry · 5 wrong tries max · 60 s resend cooldown and
+//   5 sends per hour · single use (cleared on success) · nothing changes until the code is verified.
+// The OTP always goes to the address saved on the account (never to an e-mail typed in the form).
+// ============================================================
+if (empty($_SESSION['ep_csrf'])) $_SESSION['ep_csrf'] = bin2hex(random_bytes(16));
+$ep_csrf = (string)$_SESSION['ep_csrf'];
+const EP_OTP_TTL = 900;
+const EP_OTP_MAX_TRIES = 5;
+const EP_OTP_COOLDOWN = 60;
+const EP_OTP_MAX_SENDS_PER_HOUR = 5;
+
+function ep_mask_email($email) {
+    $email = (string)$email;
+    $at = strpos($email, '@');
+    if ($at === false) return '***';
+    $name = substr($email, 0, $at);
+    return substr($name, 0, 1) . str_repeat('*', max(2, strlen($name) - 1)) . substr($email, $at);
+}
+
+if (isset($_POST['pw_action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $epOut = function ($ok, $msg, array $extra = []) { echo json_encode(['ok' => (bool)$ok, 'message' => $msg] + $extra); exit(); };
+    $epClear = function (PDO $pdo, $uid) {
+        // forget this session's pending change and the code we issued (only if it is still ours)
+        $p = $_SESSION['ep_pw'] ?? null;
+        unset($_SESSION['ep_pw']);
+        if ($p && (int)$p['uid'] === (int)$uid && !empty($p['otp_plain_hash'])) {
+            $r = $pdo->prepare("SELECT reset_token FROM users WHERE id = ?");
+            $r->execute([(int)$uid]);
+            $tok = (string)$r->fetchColumn();
+            if ($tok !== '' && password_verify($tok, $p['otp_plain_hash'])) {
+                $pdo->prepare("UPDATE users SET reset_token = NULL, reset_token_expires = NULL WHERE id = ? AND reset_token = ?")->execute([(int)$uid, $tok]);
+            }
+        }
+    };
+    try {
+        if (!hash_equals($ep_csrf, (string)($_POST['csrf'] ?? ''))) $epOut(false, 'Your session expired. Please refresh the page and try again.');
+        $uid = (int)$_SESSION['user_id'];
+        $st = $pdo->prepare("SELECT id, username, fullname, email, password FROM users WHERE id = ?");
+        $st->execute([$uid]);
+        $acct = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$acct) $epOut(false, 'Account not found. Please sign in again.');
+        $act = (string)$_POST['pw_action'];
+        $pend = $_SESSION['ep_pw'] ?? null;
+        if ($pend && (int)$pend['uid'] !== $uid) { unset($_SESSION['ep_pw']); $pend = null; }
+
+        if ($act === 'cancel') {
+            $epClear($pdo, $uid);
+            $epOut(true, 'Password change cancelled. Your password was not changed.');
+        }
+
+        if ($act === 'send' || $act === 'resend') {
+            $now = time();
+            $sends = array_values(array_filter((array)($_SESSION['ep_pw_sends'] ?? []), function ($t) use ($now) { return $now - (int)$t < 3600; }));
+            if ($pend && $now - (int)$pend['sent_at'] < EP_OTP_COOLDOWN) {
+                $wait = EP_OTP_COOLDOWN - ($now - (int)$pend['sent_at']);
+                $epOut(false, 'Please wait ' . $wait . ' seconds before requesting another code.', ['retry_in' => $wait]);
+            }
+            if (count($sends) >= EP_OTP_MAX_SENDS_PER_HOUR) $epOut(false, 'Too many code requests. Please try again later.');
+
+            if ($act === 'resend') {
+                if (!$pend || $now > (int)$pend['expires']) { unset($_SESSION['ep_pw']); $epOut(false, 'Your password change has expired. Please start again.', ['restart' => true]); }
+                if (strcasecmp((string)$pend['email'], (string)$acct['email']) !== 0) { $epClear($pdo, $uid); $epOut(false, 'Your account e-mail changed. Please start the password change again.', ['restart' => true]); }
+                $newHash = $pend['hash'];
+            } else {
+                $current = (string)($_POST['current_password'] ?? '');
+                $new     = (string)($_POST['new_password'] ?? '');
+                $confirm = (string)($_POST['confirm_password'] ?? '');
+                if ($current === '') $epOut(false, 'Please enter your current password.', ['field' => 'current_password']);
+                if (!password_verify($current, (string)$acct['password'])) {
+                    if (class_exists('SystemLogger')) SystemLogger::log($pdo, 'password_change', 'auth', "Guest password change refused: wrong current password", $uid, 'user', null, ['page' => 'edit-profile.php', 'step' => 'current_password'], 'failed');
+                    $epOut(false, 'Your current password is incorrect.', ['field' => 'current_password']);
+                }
+                if ($new === '') $epOut(false, 'Please enter a new password.', ['field' => 'new_password']);
+                $pwErrors = validatePassword($new);
+                if ($pwErrors) $epOut(false, implode(' ', array_map(function ($x) { return rtrim($x, '.') . '.'; }, $pwErrors)), ['field' => 'new_password']);
+                if ($new !== $confirm) $epOut(false, 'The new passwords do not match.', ['field' => 'confirm_password']);
+                if (password_verify($new, (string)$acct['password'])) $epOut(false, 'The new password must be different from your current password.', ['field' => 'new_password']);
+                $newHash = password_hash($new, PASSWORD_DEFAULT);
+            }
+
+            $to = trim((string)$acct['email']);
+            if ($to === '' || !filter_var($to, FILTER_VALIDATE_EMAIL) || preg_match('/@walkin\.invalid$/i', $to)) {
+                $epOut(false, 'Your account has no e-mail address we can send a code to. Please contact us.');
+            }
+            $otp = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            $expiresAt = $now + EP_OTP_TTL;
+            $pdo->prepare("UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?")
+                ->execute([$otp, date('Y-m-d H:i:s', $expiresAt), $uid]);
+            $_SESSION['ep_pw'] = ['uid' => $uid, 'hash' => $newHash, 'otp_plain_hash' => password_hash($otp, PASSWORD_DEFAULT),
+                                  'email' => $to, 'expires' => $expiresAt, 'tries' => 0, 'sent_at' => $now];
+            $sends[] = $now;
+            $_SESSION['ep_pw_sends'] = $sends;
+
+            $sent = false;
+            try {
+                require_once 'config/mail_config.php';
+                $mail = MailConfig::getInstance()->getMailer();
+                $mail->clearAddresses();
+                $nm = (string)($acct['fullname'] ?: $acct['username']);
+                $mail->addAddress($to, $nm);
+                $mail->Subject = '🔐 Password Change Code — Transient House & Tours';
+                $mail->Body = '<html><body style="font-family:Arial,sans-serif;background:#f5f7fa;padding:20px;">'
+                    . '<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">'
+                    . '<h2 style="color:#0B2447;margin:0 0 12px;">🔐 Password Change Request</h2>'
+                    . '<p style="color:#475569;font-size:14px;">Hi <strong>' . htmlspecialchars($nm) . '</strong>,</p>'
+                    . '<p style="color:#475569;font-size:14px;">Use this code to confirm the password change on your Transient House &amp; Tours account:</p>'
+                    . '<div style="background:#f0f7fb;padding:22px;text-align:center;font-size:34px;font-weight:bold;letter-spacing:10px;color:#0B2447;border-radius:10px;margin:22px 0;border:2px dashed #4DA6D9;">' . $otp . '</div>'
+                    . '<p style="background:#fef3c7;padding:12px 16px;border-radius:8px;color:#92400e;font-size:13px;"><strong>This code expires in 15 minutes.</strong> Your password changes only after you enter it.</p>'
+                    . '<p style="color:#475569;font-size:13px;">If you did not request this, ignore this e-mail and consider changing your password.</p>'
+                    . '</div></body></html>';
+                $mail->AltBody = "Password change code: $otp\nThis code expires in 15 minutes. Your password changes only after you enter it.\nIf you did not request this, ignore this e-mail.";
+                $sent = (bool)$mail->send();
+            } catch (Throwable $mx) {
+                error_log('Guest password OTP mail failed for user ' . $uid . ': ' . get_class($mx));
+                $sent = false;
+            }
+            if (!$sent) {
+                $epClear($pdo, $uid);
+                $epOut(false, 'We could not send the verification code right now. Please try again in a few minutes. Your password was not changed.');
+            }
+            if (class_exists('SystemLogger')) SystemLogger::log($pdo, 'password_change', 'auth', "Guest password change: verification code sent" . ($act === 'resend' ? ' (resend)' : ''), $uid, 'user', null, ['page' => 'edit-profile.php', 'step' => 'code_sent']);
+            $epOut(true, 'We sent a 6-digit code to ' . ep_mask_email($to) . '. It expires in 15 minutes.', ['stage' => 'otp_sent', 'cooldown' => EP_OTP_COOLDOWN, 'to' => ep_mask_email($to)]);
+        }
+
+        if ($act === 'verify') {
+            if (!$pend) $epOut(false, 'There is no password change waiting. Please start again.', ['restart' => true]);
+            if (time() > (int)$pend['expires']) { $epClear($pdo, $uid); $epOut(false, 'This code has expired. Please start the password change again.', ['restart' => true]); }
+            if (strcasecmp((string)$pend['email'], (string)$acct['email']) !== 0) { $epClear($pdo, $uid); $epOut(false, 'Your account e-mail changed. Please start the password change again.', ['restart' => true]); }
+            $otp = preg_replace('/\s+/', '', (string)($_POST['otp_code'] ?? ''));
+            if (!preg_match('/^\d{6}$/', $otp)) $epOut(false, 'Enter the 6-digit code from your e-mail.');
+            if ((int)$pend['tries'] >= EP_OTP_MAX_TRIES) { $epClear($pdo, $uid); $epOut(false, 'Too many incorrect codes. Please start the password change again.', ['restart' => true]); }
+            $r = $pdo->prepare("SELECT reset_token, reset_token_expires FROM users WHERE id = ?");
+            $r->execute([$uid]);
+            $row = $r->fetch(PDO::FETCH_ASSOC);
+            $good = $row && (string)$row['reset_token'] !== '' && hash_equals((string)$row['reset_token'], $otp)
+                    && strtotime((string)$row['reset_token_expires']) >= time() && password_verify($otp, (string)$pend['otp_plain_hash']);
+            if (!$good) {
+                $_SESSION['ep_pw']['tries'] = (int)$pend['tries'] + 1;
+                $left = EP_OTP_MAX_TRIES - (int)$_SESSION['ep_pw']['tries'];
+                if (class_exists('SystemLogger')) SystemLogger::log($pdo, 'password_change', 'auth', "Guest password change: incorrect verification code", $uid, 'user', null, ['page' => 'edit-profile.php', 'step' => 'verify', 'tries' => (int)$_SESSION['ep_pw']['tries']], 'failed');
+                if ($left <= 0) { $epClear($pdo, $uid); $epOut(false, 'Too many incorrect codes. Please start the password change again.', ['restart' => true]); }
+                $epOut(false, 'That code is not correct. ' . $left . ' attempt' . ($left === 1 ? '' : 's') . ' left.');
+            }
+            // single use: the code is consumed in the same statement that saves the new password
+            $up = $pdo->prepare("UPDATE users SET password = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ? AND reset_token = ?");
+            $up->execute([$pend['hash'], $uid, $otp]);
+            if ($up->rowCount() !== 1) { $epClear($pdo, $uid); $epOut(false, 'This code is no longer valid. Please start the password change again.', ['restart' => true]); }
+            unset($_SESSION['ep_pw']);
+            if (class_exists('SystemLogger')) SystemLogger::log($pdo, 'password_change', 'profile', "Guest changed own password (OTP verified)", $uid, 'user', null, ['page' => 'edit-profile.php', 'step' => 'changed']);
+            $epOut(true, 'Your password has been changed.', ['stage' => 'done']);
+        }
+        $epOut(false, 'Unknown request.');
+    } catch (Throwable $e) {
+        error_log('Guest password change failed: ' . get_class($e) . ' ' . $e->getMessage());
+        $epOut(false, 'Something went wrong. Your password was not changed. Please try again.');
+    }
+}
+
 // ============================================
 // PHOTO UPLOAD - Using profile/user_{id}/ folder
 // ============================================
@@ -230,11 +408,11 @@ function encodeJson($value) {
 if(isset($_POST['update_profile'])) {
     try {
         $user_id = $_SESSION['user_id'];
+        if (!hash_equals($ep_csrf, (string)($_POST['ep_csrf'] ?? ''))) throw new Exception('Your session expired. Please refresh the page and try again.');
 
         // ✅ NEW: Snapshot old values BEFORE update — for detailed logging
         $old_user = [
-            'email'    => $user['email'] ?? null,
-            'password' => $user['password'] ?? null,
+            'email'    => $user['email'] ?? null,   // Phase 7.9: the password hash is no longer copied into the audit log
         ];
         $old_guest = $guest ? [
             'full_name'          => $guest['full_name'] ?? null,
@@ -269,23 +447,9 @@ if(isset($_POST['update_profile'])) {
         $stmt = $pdo->prepare("UPDATE users SET email = ? WHERE id = ?");
         $stmt->execute([$_POST['email'], $user_id]);
 
-        // Update password with validation
+        // Phase 7.9: the password is never changed by this form any more — only through the current-password + e-mail OTP
+        // flow above (pw_action). Any password fields posted here are ignored.
         $password_changed = false;
-        if(!empty($_POST['new_password'])) {
-            $passwordErrors = validatePassword($_POST['new_password']);
-            if (!empty($passwordErrors)) {
-                throw new Exception(implode("<br>", $passwordErrors));
-            }
-
-            if($_POST['new_password'] == $_POST['confirm_password']) {
-                // Always store a password_hash() hash, never the plain password
-                $stmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
-                $stmt->execute([password_hash($_POST['new_password'], PASSWORD_DEFAULT), $user_id]);
-                $password_changed = true;
-            } else {
-                throw new Exception("Passwords do not match!");
-            }
-        }
 
         // Handle profile photo (ID photo is READ-ONLY)
         $profile_photo = $guest['profile_photo'] ?? null;
@@ -443,7 +607,7 @@ if(isset($_POST['update_profile'])) {
         exit();
 
     } catch(Exception $e) {
-        $pdo->rollBack();
+        if ($pdo->inTransaction()) $pdo->rollBack();   // validation errors are thrown before the transaction starts
         $error = $e->getMessage();
     }
 }
@@ -581,6 +745,23 @@ function splitPhoneForForm($fullPhone) {
             color: white;
             font-size: 24px;
             border: 2px solid #4DA6D9;
+        }
+
+        .logo-wrapper .logo-image {
+            height: 50px;
+            width: 50px;
+            border-radius: 12px;
+            object-fit: cover;
+            background: #fff;
+            border: 2px solid #4DA6D9;
+            flex-shrink: 0;
+            display: block;
+        }
+        @media (max-width: 600px) {
+            .logo-wrapper { gap: 10px; }
+            .logo-wrapper .logo-image, .logo-wrapper .logo-icon { height: 40px; width: 40px; border-radius: 10px; }
+            .brand-text .brand-name { font-size: 16px !important; }
+            .brand-text .brand-tagline { font-size: 10px !important; }
         }
 
         .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
@@ -1131,6 +1312,34 @@ function splitPhoneForForm($fullPhone) {
             .photo-actions .btn-photo { width: 100%; justify-content: center; }
             .checkbox-group { padding: 12px; }
         }
+        /* Phase 7.9: guest password change with e-mail OTP */
+        .pw-steps { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0; margin: 4px 0 10px; font-size: 12.5px; color: #64748b; }
+        .pw-steps li { display: inline-flex; align-items: center; gap: 6px; }
+        .pw-steps li span { width: 20px; height: 20px; border-radius: 50%; background: #e2e8f0; color: #475569; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+        .pw-steps li.on { color: #0B3D91; font-weight: 600; } .pw-steps li.on span { background: #0B3D91; color: #fff; }
+        .pw-steps li.done { color: #047857; } .pw-steps li.done span { background: #10b981; color: #fff; }
+        .pw-msg { font-size: 13px; line-height: 1.5; margin: 0 0 10px; padding: 0; border-radius: 10px; overflow-wrap: anywhere; }
+        .pw-msg:empty { display: none; }
+        .pw-msg.err { color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; padding: 10px 12px; }
+        .pw-msg.ok { color: #065f46; background: #ecfdf5; border: 1px solid #a7f3d0; padding: 10px 12px; }
+        .pw-msg.info { color: #1e40af; background: #eff6ff; border: 1px solid #bfdbfe; padding: 10px 12px; }
+        .btn-pw { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 18px; border: none; border-radius: 10px; background: #0B3D91; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; max-width: 100%; }
+        .btn-pw:hover:not(:disabled) { background: #0B2447; } .btn-pw:disabled { opacity: .6; cursor: not-allowed; }
+        .form-control.pw-bad { border-color: #dc2626 !important; background: #fef2f2; }
+        .ep-otp { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, .55); z-index: 10000; align-items: center; justify-content: center; padding: 16px; }
+        .ep-otp.show { display: flex; }
+        .ep-otp-box { background: #fff; border-radius: 16px; width: 100%; max-width: 420px; padding: 22px; box-shadow: 0 20px 60px rgba(0,0,0,.3); max-height: 92vh; overflow-y: auto; }
+        .ep-otp-box h3 { margin: 0 0 6px; color: #0B2447; font-size: 18px; display: flex; align-items: center; gap: 8px; }
+        .ep-otp-box p { color: #475569; font-size: 13.5px; margin: 0 0 12px; line-height: 1.5; overflow-wrap: anywhere; }
+        .ep-otp-input { width: 100%; text-align: center; font-size: 26px; letter-spacing: 10px; font-weight: 700; font-family: 'Courier New', monospace; padding: 12px; border: 2px solid #cbd5e1; border-radius: 10px; box-sizing: border-box; }
+        .ep-otp-input:focus { outline: none; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77,166,217,.15); }
+        .ep-otp-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+        .ep-otp-actions button { flex: 1 1 140px; min-height: 44px; border-radius: 10px; font-weight: 600; font-size: 14px; cursor: pointer; border: 1px solid #cbd5e1; background: #f8fafc; color: #0B2447; }
+        .ep-otp-actions .go { background: #10b981; border-color: #10b981; color: #fff; }
+        .ep-otp-actions button:disabled { opacity: .6; cursor: not-allowed; }
+        .ep-otp-links { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; }
+        .ep-otp-links button { background: none; border: none; color: #0B3D91; font-weight: 600; cursor: pointer; padding: 6px 0; font-size: 13px; }
+        .ep-otp-links button:disabled { color: #94a3b8; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -1139,7 +1348,11 @@ function splitPhoneForForm($fullPhone) {
 <div class="header">
     <div class="header-content">
         <a href="index.php" class="logo-wrapper">
-            <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
+            <?php if ($ep_logo !== ''): ?>
+                <img class="logo-image" src="<?php echo htmlspecialchars($ep_logo, ENT_QUOTES, 'UTF-8'); ?>?v=<?php echo (int)@filemtime($ep_logo); ?>" alt="Transient House &amp; Tours logo">
+            <?php else: ?>
+                <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
+            <?php endif; ?>
             <div class="brand-text">
                 <span class="brand-name">Transient House & Tours</span>
                 <span class="brand-tagline">Your Home Away From Home</span>
@@ -1170,6 +1383,7 @@ function splitPhoneForForm($fullPhone) {
         <?php endif; ?>
 
         <form method="POST" enctype="multipart/form-data" id="editProfileForm">
+            <input type="hidden" name="ep_csrf" value="<?php echo htmlspecialchars($ep_csrf); ?>">
 
             <!-- ============================================ -->
             <!-- PROFILE PHOTO SECTION -->
@@ -1405,14 +1619,26 @@ function splitPhoneForForm($fullPhone) {
                 </div>
 
                 <div class="sub-heading"><i class="fas fa-key"></i> Change Password <span style="font-weight:500;color:#5b6b7e;font-size:12.5px;">(optional)</span></div>
-                <p class="sub-note">Leave both password fields blank to keep your current password.</p>
+                <p class="sub-note">Leave the password fields blank to keep your current password. To change it, enter your current password and the new one, then verify with the code we e-mail to your registered address. Saving your profile never changes the password.</p>
+
+                <!-- Phase 7.9: password fields have no "name" — they are never posted with the profile form; pwSend() sends them separately -->
+                <div class="form-group">
+                    <label for="current_password"><i class="fas fa-key"></i> Current Password</label>
+                    <div class="password-wrapper">
+                        <input type="password" id="current_password" class="form-control" autocomplete="current-password"
+                               placeholder="Enter your current password">
+                        <button type="button" class="toggle-password" onclick="togglePasswordVisibility('current_password', this)" aria-label="Toggle password visibility">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
 
                 <div class="form-row">
                     <!-- New Password -->
                     <div class="form-group">
-                        <label><i class="fas fa-lock"></i> New Password</label>
+                        <label for="new_password"><i class="fas fa-lock"></i> New Password</label>
                         <div class="password-wrapper">
-                            <input type="password" name="new_password" id="new_password" class="form-control"
+                            <input type="password" id="new_password" class="form-control" autocomplete="new-password"
                                    placeholder="Enter new password">
                             <button type="button" class="toggle-password" onclick="togglePasswordVisibility('new_password', this)" aria-label="Toggle password visibility">
                                 <i class="fas fa-eye"></i>
@@ -1433,9 +1659,9 @@ function splitPhoneForForm($fullPhone) {
 
                     <!-- Confirm Password -->
                     <div class="form-group">
-                        <label><i class="fas fa-lock"></i> Confirm Password</label>
+                        <label for="confirm_password"><i class="fas fa-lock"></i> Confirm Password</label>
                         <div class="password-wrapper">
-                            <input type="password" name="confirm_password" id="confirm_password" class="form-control"
+                            <input type="password" id="confirm_password" class="form-control" autocomplete="new-password"
                                    placeholder="Confirm new password">
                             <button type="button" class="toggle-password" onclick="togglePasswordVisibility('confirm_password', this)" aria-label="Toggle password visibility">
                                 <i class="fas fa-eye"></i>
@@ -1444,6 +1670,17 @@ function splitPhoneForForm($fullPhone) {
                         <div id="confirmPasswordFeedback" class="confirm-feedback"></div>
                     </div>
                 </div>
+
+                <ol class="pw-steps" id="pwSteps" aria-label="Password change progress">
+                    <li data-step="1"><span>1</span> Verify current password</li>
+                    <li data-step="2"><span>2</span> Code sent to your e-mail</li>
+                    <li data-step="3"><span>3</span> Enter the code</li>
+                    <li data-step="4"><span>4</span> Password changed</li>
+                </ol>
+                <div class="pw-msg" id="pwMsg" role="status" aria-live="polite"></div>
+                <button type="button" class="btn-pw" id="pwSendBtn" onclick="pwSend()">
+                    <i class="fas fa-paper-plane"></i> Change Password — Send Code
+                </button>
             </div>
 
             <!-- ============================================ -->
@@ -1593,6 +1830,23 @@ function splitPhoneForForm($fullPhone) {
             </div>
 
         </form>
+    </div>
+</div>
+
+<!-- Phase 7.9: password-change OTP (no alert(); the code itself is never shown on the page) -->
+<div class="ep-otp" id="epOtp" role="dialog" aria-modal="true" aria-labelledby="epOtpTitle">
+    <div class="ep-otp-box">
+        <h3 id="epOtpTitle"><i class="fas fa-shield-alt" style="color:#4DA6D9;"></i> Enter the verification code</h3>
+        <p id="epOtpTo">We sent a 6-digit code to your registered e-mail.</p>
+        <input type="text" id="epOtpCode" class="ep-otp-input" maxlength="6" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" aria-label="6-digit code">
+        <div class="pw-msg" id="epOtpMsg" role="status" aria-live="polite" style="margin-top:10px;"></div>
+        <div class="ep-otp-actions">
+            <button type="button" class="go" id="epOtpVerify" onclick="pwVerify()"><i class="fas fa-check-circle"></i> Verify &amp; Change</button>
+        </div>
+        <div class="ep-otp-links">
+            <button type="button" id="epOtpResend" onclick="pwResend()">Resend code</button>
+            <button type="button" id="epOtpCancel" onclick="pwCancel()">Cancel password change</button>
+        </div>
     </div>
 </div>
 
@@ -1968,9 +2222,14 @@ document.addEventListener('DOMContentLoaded', function() {
 // ============================================
 document.getElementById('editProfileForm').addEventListener('submit', function(e) {
     const fullName = document.getElementById('full_name').value.trim();
-    const password = document.querySelector('input[name="new_password"]').value;
-    const confirm = document.querySelector('input[name="confirm_password"]').value;
     const contact = document.querySelector('input[name="contact"]');
+    // Phase 7.9: the password is changed only through "Send Code" + OTP. Don't let a typed password look saved.
+    if (pwFieldsTouched()) {
+        e.preventDefault();
+        pwSay('err', 'Your password has not been changed. Click "Change Password — Send Code" to finish, or clear the password fields to save the rest of your profile.');
+        document.getElementById('pwSteps').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return false;
+    }
 
     // ✅ Validate full name
     if (!fullName) {
@@ -2008,31 +2267,119 @@ document.getElementById('editProfileForm').addEventListener('submit', function(e
         }
     }
 
-    if(password && password.length < 8) {
-        e.preventDefault();
-        alert('Password must be at least 8 characters long.');
-        return false;
-    }
-
-    if(password && !/[A-Z]/.test(password)) {
-        e.preventDefault();
-        alert('Password must contain at least one uppercase letter (A-Z).');
-        return false;
-    }
-
-    if(password && !/[0-9]/.test(password)) {
-        e.preventDefault();
-        alert('Password must contain at least one number (0-9).');
-        return false;
-    }
-
-    if(password && password !== confirm) {
-        e.preventDefault();
-        alert('Passwords do not match!');
-        return false;
-    }
-
     return true;
+});
+
+// ============================================
+// Phase 7.9: PASSWORD CHANGE — current password + e-mail OTP (server: pw_action in this file)
+// ============================================
+var EP_CSRF = <?php echo json_encode($ep_csrf); ?>;
+var pwTimer = null;
+function pwEl(id) { return document.getElementById(id); }
+function pwFieldsTouched() { return ['current_password', 'new_password', 'confirm_password'].some(function (id) { return pwEl(id) && pwEl(id).value !== ''; }); }
+function pwSay(kind, text, box) { var m = pwEl(box || 'pwMsg'); m.className = 'pw-msg' + (text ? ' ' + kind : ''); m.textContent = text || ''; }
+function pwStage(n) {
+    document.querySelectorAll('#pwSteps li').forEach(function (li) {
+        var s = +li.getAttribute('data-step');
+        li.className = s < n ? 'done' : (s === n ? 'on' : '');
+        if (n === 4 && s === 4) li.className = 'done';
+    });
+}
+function pwMark(field) {
+    ['current_password', 'new_password', 'confirm_password'].forEach(function (id) { pwEl(id).classList.toggle('pw-bad', id === field); });
+    if (field && pwEl(field)) pwEl(field).focus();
+}
+function pwPost(data) {
+    var fd = new FormData();
+    fd.append('csrf', EP_CSRF);
+    Object.keys(data).forEach(function (k) { fd.append(k, data[k]); });
+    return fetch('edit-profile.php', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.text(); })
+        .then(function (t) { try { return JSON.parse(t); } catch (x) { return { ok: false, message: 'Unexpected response. Please refresh the page and try again.' }; } })
+        .catch(function () { return { ok: false, message: 'Network problem. Please check your connection and try again.' }; });
+}
+function pwOpenOtp(text) {
+    pwEl('epOtpTo').textContent = text;
+    pwEl('epOtpCode').value = '';
+    pwSay('', '', 'epOtpMsg');
+    pwEl('epOtp').classList.add('show');
+    document.body.style.overflow = 'hidden';
+    setTimeout(function () { pwEl('epOtpCode').focus(); }, 50);
+}
+function pwCloseOtp() { pwEl('epOtp').classList.remove('show'); document.body.style.overflow = ''; }
+function pwCooldown(sec) {
+    var b = pwEl('epOtpResend'), left = sec;
+    clearInterval(pwTimer);
+    b.disabled = true; b.textContent = 'Resend code (' + left + 's)';
+    pwTimer = setInterval(function () {
+        left--;
+        if (left <= 0) { clearInterval(pwTimer); b.disabled = false; b.textContent = 'Resend code'; }
+        else b.textContent = 'Resend code (' + left + 's)';
+    }, 1000);
+}
+function pwReset(msgKind, msg) {
+    pwCloseOtp(); clearInterval(pwTimer); pwStage(0);
+    pwEl('pwSendBtn').disabled = false;
+    if (msg) pwSay(msgKind, msg);
+}
+function pwSend() {
+    var cur = pwEl('current_password').value, nw = pwEl('new_password').value, cf = pwEl('confirm_password').value;
+    pwMark(null);
+    if (!cur) { pwSay('err', 'Please enter your current password.'); pwMark('current_password'); return; }
+    if (nw.length < 8 || !/[A-Z]/.test(nw) || !/[0-9]/.test(nw)) { pwSay('err', 'The new password needs at least 8 characters, 1 uppercase letter and 1 number.'); pwMark('new_password'); return; }
+    if (nw !== cf) { pwSay('err', 'The new passwords do not match.'); pwMark('confirm_password'); return; }
+    var btn = pwEl('pwSendBtn');
+    btn.disabled = true; pwStage(1); pwSay('info', 'Checking your current password…');
+    pwPost({ pw_action: 'send', current_password: cur, new_password: nw, confirm_password: cf }).then(function (j) {
+        if (!j.ok) { btn.disabled = false; pwStage(0); pwSay('err', j.message || 'Could not start the password change.'); if (j.field) pwMark(j.field); return; }
+        pwStage(3);
+        pwSay('info', j.message);
+        pwOpenOtp(j.message);
+        pwCooldown(j.cooldown || 60);
+    });
+}
+function pwVerify() {
+    var code = pwEl('epOtpCode').value.replace(/\s+/g, '');
+    if (!/^\d{6}$/.test(code)) { pwSay('err', 'Enter the 6-digit code from your e-mail.', 'epOtpMsg'); return; }
+    var vb = pwEl('epOtpVerify'); vb.disabled = true;
+    pwSay('info', 'Checking the code…', 'epOtpMsg');
+    pwPost({ pw_action: 'verify', otp_code: code }).then(function (j) {
+        vb.disabled = false;
+        if (j.ok) {
+            ['current_password', 'new_password', 'confirm_password'].forEach(function (id) { pwEl(id).value = ''; });
+            var fb = pwEl('confirmPasswordFeedback'); if (fb) fb.textContent = '';
+            pwReset('ok', 'Your password has been changed. Use the new password the next time you sign in.');
+            pwStage(4); pwEl('pwSendBtn').disabled = false;
+            return;
+        }
+        if (j.restart) { pwReset('err', j.message); return; }
+        pwSay('err', j.message || 'That code is not correct.', 'epOtpMsg');
+    });
+}
+function pwResend() {
+    var b = pwEl('epOtpResend'); b.disabled = true;
+    pwSay('info', 'Sending a new code…', 'epOtpMsg');
+    pwPost({ pw_action: 'resend' }).then(function (j) {
+        if (j.ok) { pwSay('ok', 'A new code was sent. The previous code no longer works.', 'epOtpMsg'); pwEl('epOtpTo').textContent = j.message; pwCooldown(j.cooldown || 60); return; }
+        if (j.restart) { pwReset('err', j.message); return; }
+        pwSay('err', j.message || 'Could not send a new code.', 'epOtpMsg');
+        if (j.retry_in) pwCooldown(j.retry_in); else b.disabled = false;
+    });
+}
+function pwCancel() {
+    pwPost({ pw_action: 'cancel' }).then(function () { pwReset('info', 'Password change cancelled. Your password was not changed.'); });
+}
+document.addEventListener('DOMContentLoaded', function () {
+    var c = pwEl('epOtpCode');
+    if (c) {
+        c.addEventListener('input', function () { this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6); });
+        c.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); pwVerify(); } });
+    }
+    ['current_password', 'new_password', 'confirm_password'].forEach(function (id) {
+        var el = pwEl(id); if (!el) return;
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); pwSend(); } });   // never submits the profile form
+        el.addEventListener('input', function () { el.classList.remove('pw-bad'); });
+    });
 });
 
 // Auto-hide alerts after 5 seconds

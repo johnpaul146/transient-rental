@@ -9,6 +9,7 @@ if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
 }
 
+require_once 'includes/booking-terms.php';   // Phase 7.7: booking Terms modal for Food
 // ✨ TERMS: Load the terms gate
 require_once 'includes/PaymentService.php';
 require_once 'includes/TermsGate.php';
@@ -132,6 +133,7 @@ if (isset($_SESSION['flash_feedback_success'])) {
 if (isset($_POST['order_food']) && isset($_SESSION['user_id'])) {
     try {
         $pdo->beginTransaction();
+        if (!BookingTerms::acknowledged()) { throw new Exception(BookingTerms::MISSING_MESSAGE); }   // Phase 7.7: Terms must be accepted (server-side)
 
         $guest_stmt = $pdo->prepare("SELECT id, full_name, contact_number FROM guests WHERE user_id = ?");
         $guest_stmt->execute([$_SESSION['user_id']]);
@@ -551,7 +553,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Food Menu - Transient House & Tours</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/design-system.css">
+    <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         /* ============================================================ */
@@ -1945,6 +1947,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         </div>
         <div class="modal-body" style="padding: 25px; max-height: 80vh; overflow-y: auto;">
             <form method="POST" action="food.php" id="foodOrderForm">
+                <?php echo BookingTerms::field(); ?>
                 <input type="hidden" name="food_id" id="food_order_id">
                 <input type="hidden" name="food_name" id="food_order_name">
 
@@ -2352,6 +2355,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php endif; ?>
 
 <!-- FOOTER -->
+<?php BookingTerms::render($pdo); ?>
 <?php include 'components/footer.php'; ?>
 
 <!-- TERMS & PRIVACY MODAL -->
@@ -3398,7 +3402,10 @@ document.addEventListener('DOMContentLoaded', function() {
             var winMsg = foodDeliveryWindowMessage();
             if (winMsg) { e.preventDefault(); alert(winMsg); return false; }
 
-            return true;
+            // Phase 7.7: show the Terms first; the order is only submitted after the guest accepts.
+            e.preventDefault();
+            BookingTerms.gate(this, 'order_food');
+            return false;
         });
     }
 });

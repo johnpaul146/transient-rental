@@ -5,9 +5,18 @@
  * HOUSE  A stay occupies the NIGHTS from check-in up to (not including)
  *        check-out. Check-out is 12:00 PM and check-in 2:00 PM, so a new guest
  *        may check in on the day the previous guest checks out.
- *          overlap  = existing.check_in < new.check_out AND existing.check_out > new.check_in
- *          blocked  = block_date >= new.check_in AND block_date < new.check_out
- *        Confirming a stay blocks only its nights (never the check-out day).
+ *          overlap  = existing.check_in < new.check_out AND existing.check_out > new.check_in   (exact datetimes, live bookings)
+ *          blocked  = see houseBlockRows() below: owner / unverified blocks are HARD full-day blocks
+ *                     (block_date between new.check_in AND new.check_out, both ends included)
+ *        Confirming a stay marks only its nights (never the check-out day).
+ *        blocked_dates rows are NOT all alike (Phase 7.9.1, houseBlockRows()):
+ *          - LIVE auto-block ("Auto-blocked from booking #REF" and REF is a holding booking of this house): only a
+ *            calendar marker. The booking's own exact check-in/check-out datetimes decide (the overlap rule above).
+ *          - MANUAL / OWNER block (any other row): a HARD FULL-DAY block. A stay may not check in on it, sleep on it
+ *            or check out on it.
+ *          - ORPHAN auto-block (REF is not a live booking of this house): fails SAFE as a hard full-day block. It is never
+ *            ignored and never deleted here; the encounter is written to the PHP error log for Admin diagnosis.
+ *          - HELD marker (REF is a pending rebook that still reserves its old nights): keeps the old nights rule.
  * TOUR   One boat per date: a confirmed/completed booking or a blocked date
  *        on that date is a conflict.
  * FOOD   Orders are not exclusive; only a blocked date for the item conflicts.
@@ -98,7 +107,7 @@ class AvailabilityService {
                 return 'Already reserved from ' . self::fmt($b['check_in_date']) . ' to ' . self::fmt($b['check_out_date']) . ' (booking ' . $b['reference_number'] . ').';
             }
         }
-        return self::blockedConflict($pdo, 'house', $houseId, $in, $out, $ownRefs, true);
+        return self::houseBlockConflict($pdo, $houseId, $in, $out, $ownRefs);
     }
 
     /** 'HH:MM' or 'HH:MM:SS' -> 'HH:MM:SS' (no validation; see houseStayTimes). */
@@ -267,7 +276,120 @@ class AvailabilityService {
         return self::blockedConflict($pdo, 'food', $foodId, $date, $date, $ownRefs, false);
     }
 
-    /** $halfOpen: house nights [from, to); otherwise the single/inclusive range. */
+    // ------------------------------------------------------------------
+    // HOUSE blocked_dates — Phase 7.9.1. One classification used by the server check AND the calendars.
+    // ------------------------------------------------------------------
+
+    const AUTO_REASON_PREFIX = 'Auto-blocked from booking #';
+    const BLOCK_MANUAL = 'manual';     // owner/staff block: hard full-day
+    const BLOCK_ORPHAN = 'orphan';     // auto-block with no live booking behind it: hard full-day (fail safe)
+    const BLOCK_LIVE   = 'live';       // marker of a holding booking: that booking's exact times decide
+    const BLOCK_HELD   = 'held';       // marker of a pending rebook that still reserves its old nights: nights rule
+
+    /** The booking reference inside an auto-block reason, or null when the reason is not an auto-block (manual block). */
+    public static function autoReasonRef($reason) {
+        $reason = (string)$reason;
+        if (strncmp($reason, self::AUTO_REASON_PREFIX, strlen(self::AUTO_REASON_PREFIX)) !== 0) return null;
+        $ref = trim(substr($reason, strlen(self::AUTO_REASON_PREFIX)));
+        return $ref === '' ? null : $ref;
+    }
+
+    /** Hard full-day kinds: the calendar date itself is unusable for check-in, overnight AND check-out. */
+    public static function isHardBlock($kind) {
+        return $kind === self::BLOCK_MANUAL || $kind === self::BLOCK_ORPHAN;
+    }
+
+    /**
+     * Every blocked_dates row of a house with $from <= block_date <= $to (both inclusive), classified.
+     * Rows whose reason is one of $ownRefs' auto-blocks are left out (a booking never blocks itself).
+     * Returns [['date' => 'Y-m-d', 'reason' => ?string, 'block_type' => ?string, 'kind' => BLOCK_*, 'ref' => ?string], ...] by date.
+     * Read-only; works with or without a surrounding transaction (under lockItem() it sees the locked state).
+     */
+    public static function houseBlockRows(PDO $pdo, $houseId, $from, $to, array $ownRefs = []) {
+        $own = array_values(array_unique(array_map([self::class, 'autoReason'], array_filter($ownRefs))));
+        $ownSql = $own ? ' AND (reason IS NULL OR reason NOT IN (' . implode(',', array_fill(0, count($own), '?')) . '))' : '';
+        $st = $pdo->prepare("SELECT block_date, reason, block_type FROM blocked_dates
+                              WHERE item_type = 'house' AND item_id = ? AND block_date BETWEEN ? AND ? $ownSql ORDER BY block_date, id");
+        $st->execute(array_merge([(int)$houseId, $from, $to], $own));
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) return [];
+        $refs = [];
+        foreach ($rows as $r) { if (($ref = self::autoReasonRef($r['reason'])) !== null) $refs[$ref] = true; }
+        $bookings = [];
+        if ($refs) {
+            $keys = array_keys($refs);
+            $bs = $pdo->prepare("SELECT reference_number, booking_status, check_in_date, check_out_date, previous_check_in_date, previous_check_out_date,
+                                        rebooked_at, rebook_confirmed_at, rebook_count
+                                   FROM house_bookings WHERE house_id = ? AND reference_number IN (" . implode(',', array_fill(0, count($keys), '?')) . ")");
+            $bs->execute(array_merge([(int)$houseId], $keys));
+            foreach ($bs->fetchAll(PDO::FETCH_ASSOC) as $b) $bookings[(string)$b['reference_number']] = $b;
+        }
+        $out = [];
+        foreach ($rows as $r) {
+            $d = substr((string)$r['block_date'], 0, 10);
+            $ref = self::autoReasonRef($r['reason']);
+            $kind = self::BLOCK_MANUAL;
+            if ($ref !== null) $kind = self::classifyAutoBlock($d, $bookings[$ref] ?? null);
+            $out[] = ['date' => $d, 'reason' => $r['reason'], 'block_type' => $r['block_type'], 'kind' => $kind, 'ref' => $ref];
+        }
+        return $out;
+    }
+
+    /** LIVE / HELD / ORPHAN for one auto-block date given the booking it names (null = no such booking at this house). */
+    private static function classifyAutoBlock($date, $b) {
+        if (!$b) return self::BLOCK_ORPHAN;
+        $status = (string)$b['booking_status'];
+        $in = substr((string)$b['check_in_date'], 0, 10); $out = substr((string)$b['check_out_date'], 0, 10);
+        if (in_array($status, self::HOLDING_STATUSES, true)) {
+            return ($date >= $in && $date < $out) ? self::BLOCK_LIVE : self::BLOCK_ORPHAN;   // a marker outside the booking's nights is stale
+        }
+        if ($status === 'pending') {
+            // A pending rebook request keeps its OLD nights reserved until the owner decides (previous_* = the old stay).
+            $pIn = !empty($b['previous_check_in_date']) ? substr((string)$b['previous_check_in_date'], 0, 10) : $in;
+            $pOut = !empty($b['previous_check_out_date']) ? substr((string)$b['previous_check_out_date'], 0, 10) : $out;
+            if ($date >= $pIn && $date < $pOut) return self::BLOCK_HELD;
+        }
+        return self::BLOCK_ORPHAN;   // cancelled / rejected / moved on: a leftover marker, never trusted, never ignored
+    }
+
+    /** House conflict from blocked_dates for the stay [$in, $out]: hard blocks on ANY day of it (check-out day included), held markers on its nights. */
+    private static function houseBlockConflict(PDO $pdo, $houseId, $in, $out, array $ownRefs) {
+        foreach (self::houseBlockRows($pdo, $houseId, $in, $out, $ownRefs) as $r) {
+            $d = $r['date'];
+            if ($r['kind'] === self::BLOCK_LIVE) continue;                   // the booking row itself already decided (exact times)
+            if ($r['kind'] === self::BLOCK_HELD) {
+                if ($d >= $in && $d < $out) return self::fmt($d) . ' is blocked (Pending rebook).';
+                continue;
+            }
+            if ($r['kind'] === self::BLOCK_ORPHAN) {
+                static $logged = [];
+                $key = (int)$houseId . '|' . $d . '|' . (string)$r['ref'];
+                if (empty($logged[$key])) {
+                    $logged[$key] = true;
+                    error_log('[AvailabilityService] Orphan auto-block treated as a hard block: house ' . (int)$houseId . ' ' . $d . ' reason "' . (string)$r['reason'] . '" (no live booking with that reference at this house). Review in Blocked Dates; nothing was deleted.');
+                }
+                return self::fmt($d) . ' is not available.';
+            }
+            $why = ucwords(str_replace('_', ' ', (string)$r['block_type']));
+            $reason = trim((string)$r['reason']);
+            return self::fmt($d) . ' is blocked' . ($why !== '' ? ' (' . $why . ($reason !== '' ? ': ' . $reason : '') . ')' : '') . '.';
+        }
+        return null;
+    }
+
+    /**
+     * Phase 7.9.1 — for calendars: the HARD full-day dates (manual + orphan) of a house in [$from, $to].
+     * A stay [in, out] is invalid when any of these falls on in..out inclusive — exactly houseConflict()'s rule.
+     */
+    public static function houseHardBlockDates(PDO $pdo, $houseId, $from, $to, array $ownRefs = []) {
+        $dates = [];
+        foreach (self::houseBlockRows($pdo, $houseId, $from, $to, $ownRefs) as $r) {
+            if (self::isHardBlock($r['kind'])) $dates[$r['date']] = true;
+        }
+        return array_keys($dates);
+    }
+
+    /** tour/food (one date). House blocks go through houseBlockConflict(); $halfOpen is kept for compatibility. */
     private static function blockedConflict(PDO $pdo, $type, $itemId, $from, $to, array $ownRefs, $halfOpen) {
         $own = array_values(array_unique(array_map([self::class, 'autoReason'], array_filter($ownRefs))));
         $ownSql = '';
@@ -306,7 +428,8 @@ class AvailabilityService {
     /**
      * Dates a house is unavailable, for calendars: each range is
      * {check_in_date, check_out_date} meaning the nights [in, out).
-     * A blocked date D is returned as the one-night range [D, D+1).
+     * A blocked date D is returned as the one-night range [D, D+1); manual / orphan blocks also carry 'hard' => true
+     * (the whole day is unusable, check-out included).
      */
     public static function houseOccupiedRanges(PDO $pdo, $houseId, $excludeId = null, $ownRef = null) {
         $holding = "'" . implode("','", self::HOLDING_STATUSES) . "'";
@@ -314,13 +437,14 @@ class AvailabilityService {
                               WHERE house_id = ? AND booking_status IN ($holding) AND id <> ? AND check_out_date >= CURDATE()");
         $st->execute([(int)$houseId, (int)$excludeId]);
         $ranges = $st->fetchAll(PDO::FETCH_ASSOC);
-        $sql = "SELECT block_date FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND block_date >= CURDATE()";
-        $params = [(int)$houseId];
-        if ($ownRef) { $sql .= ' AND (reason IS NULL OR reason <> ?)'; $params[] = self::autoReason($ownRef); }
-        $st = $pdo->prepare($sql);
-        $st->execute($params);
-        foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $d) {
-            $ranges[] = ['check_in_date' => $d, 'check_out_date' => date('Y-m-d', strtotime($d . ' +1 day'))];
+        // Phase 7.9.1: blocked dates are classified. Live markers duplicate their booking row (already a range above);
+        // HARD blocks (manual / orphan) are returned with 'hard' => true so a calendar can refuse them as a check-out day too.
+        $far = date('Y-m-d', strtotime('+5 years'));
+        foreach (self::houseBlockRows($pdo, $houseId, date('Y-m-d'), $far, $ownRef ? [$ownRef] : []) as $r) {
+            if ($r['kind'] === self::BLOCK_LIVE) continue;
+            $range = ['check_in_date' => $r['date'], 'check_out_date' => date('Y-m-d', strtotime($r['date'] . ' +1 day'))];
+            if (self::isHardBlock($r['kind'])) $range['hard'] = true;
+            $ranges[] = $range;
         }
         return $ranges;
     }

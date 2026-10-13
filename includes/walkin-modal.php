@@ -11,6 +11,7 @@
 if (empty($can_manage_booking)) return;
 
 if (empty($_SESSION['wk_csrf'])) $_SESSION['wk_csrf'] = bin2hex(random_bytes(16));
+require_once __DIR__ . '/InputRules.php';   // shared name/phone rules (same patterns as the server)
 
 $wk_data = ['houses' => [], 'tours' => [], 'foods' => []];
 try {
@@ -78,6 +79,9 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     .wk-field input.wk-locked { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; }
     .wk-stay-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 9px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 10px; overflow-wrap: anywhere; } .wk-field small.wk-stay-warn, .wk-stay-warn { display: block; margin-top: 4px; font-size: 12px; color: #b91c1c !important; font-weight: 600; }
     .wk-lock-note { display: block; margin-top: 4px; font-size: 11px; color: #94a3b8; }
+    .wk-fmsg { display: none; color: #b91c1c; font-size: 12px; font-weight: 600; margin-top: 4px; line-height: 1.4; overflow-wrap: anywhere; } .wk-fmsg.show { display: block; }
+    .wk-fmsg.wk-count { color: #64748b; font-weight: 500; display: block; } .wk-fmsg.wk-count.bad { color: #b91c1c; font-weight: 600; } .wk-fmsg.wk-count.good { color: #15803d; }
+    .wk-field input.wk-invalid, .wk-field textarea.wk-invalid { border-color: #dc2626; background: #fef2f2; }
     .wk-field input:focus, .wk-field select:focus, .wk-field textarea:focus { outline: none; border-color: #4DA6D9; background: #fff; }
     .wk-seg { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
     .wk-seg button { flex: 1; min-width: 140px; padding: 10px; border-radius: 10px; border: 2px solid #e2e8f0; background: #fff; font-weight: 700; color: #475569; cursor: pointer; }
@@ -129,7 +133,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     @media (max-width: 600px) { .wk-d { height: 42px; } .wk-row { grid-template-columns: 1fr; } .wk-types { grid-template-columns: repeat(2, 1fr); } #walkinModal .modal-content { width: 100%; max-height: 100vh; height: 100vh; border-radius: 0; } .wk-head, .wk-body, .wk-foot { padding-left: 14px; padding-right: 14px; } .wk-steps { padding: 10px 14px 0; } .wk-btn { flex: 1; } }
 </style>
 
-<div class="modal" id="walkinModal" aria-hidden="true">
+<div class="modal" id="walkinModal" aria-hidden="true" data-static-backdrop="1"><!-- Phase 7.9: outside clicks do nothing; X / Cancel close it -->
     <div class="modal-content" role="dialog" aria-labelledby="wkTitle">
         <div class="wk-head">
             <h3 id="wkTitle"><i class="fas fa-user-plus" style="color:#4DA6D9;"></i> Create Walk-in Booking</h3>
@@ -160,11 +164,11 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     </div>
                     <div id="wkNew">
                         <div class="wk-row">
-                            <div class="wk-field"><label>Full name <span class="req">*</span></label><input type="text" name="wg_name" maxlength="60" placeholder="e.g. Juan Dela Cruz"></div>
-                            <div class="wk-field"><label>Contact number <span class="req">*</span></label><input type="tel" name="wg_contact" maxlength="20" inputmode="tel" placeholder="09123456789"></div>
+                            <div class="wk-field"><label>Full name <span class="req">*</span></label><input type="text" name="wg_name" maxlength="60" placeholder="e.g. Juan Dela Cruz" aria-describedby="wkm_wg_name"><div class="wk-fmsg" id="wkm_wg_name" role="alert"></div></div>
+                            <div class="wk-field"><label>Contact number <span class="req">*</span></label><input type="tel" name="wg_contact" maxlength="20" inputmode="tel" placeholder="09123456789" aria-describedby="wkm_wg_contact"><div class="wk-fmsg" id="wkm_wg_contact" role="alert"></div></div>
                         </div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>E-mail <small>(optional — leave empty if none)</small></label><input type="email" name="wg_email" maxlength="100"></div>
+                            <div class="wk-field"><label>E-mail <small>(optional — leave empty if none)</small></label><input type="email" name="wg_email" maxlength="100" aria-describedby="wkm_wg_email"><div class="wk-fmsg" id="wkm_wg_email" role="alert"></div></div>
                             <div class="wk-field"><label>Address <small>(optional)</small></label><input type="text" name="wg_address" maxlength="500"></div>
                         </div>
                         <div class="wk-row">
@@ -173,8 +177,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                             <div class="wk-field"><label>ID number <small>(optional)</small></label><input type="text" name="wg_id_number" maxlength="100"></div>
                         </div>
                         <div class="wk-row">
-                            <div class="wk-field"><label>Emergency contact name <small>(optional)</small></label><input type="text" name="wg_emergency_name" maxlength="100"></div>
-                            <div class="wk-field"><label>Emergency contact number <small>(optional)</small></label><input type="tel" name="wg_emergency_number" maxlength="20" inputmode="tel"></div>
+                            <div class="wk-field"><label>Emergency contact name <small>(optional)</small></label><input type="text" name="wg_emergency_name" maxlength="60" aria-describedby="wkm_wg_emergency_name"><div class="wk-fmsg" id="wkm_wg_emergency_name" role="alert"></div></div>
+                            <div class="wk-field"><label>Emergency contact number <small>(optional)</small></label><input type="tel" name="wg_emergency_number" maxlength="20" inputmode="tel" aria-describedby="wkm_wg_emergency_number"><div class="wk-fmsg" id="wkm_wg_emergency_number" role="alert"></div></div>
                         </div>
                         <small style="color:#64748b;">No account, password, OTP or ID upload is needed. The guest is saved as a walk-in guest.</small>
                     </div>
@@ -207,7 +211,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                             <div class="wk-field"><label><i class="fas fa-lock"></i> Check-out time <small>(automatic)</small></label><input type="time" name="check_out_time" id="wkOutTime" value="14:00" readonly tabindex="-1" aria-readonly="true" class="wk-locked"><small class="wk-lock-note">Checkout time follows the check-in time.</small></div>
                         </div>
                         <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkHouseCap"></small></label><input type="number" name="guests" id="wkPax" min="1" value="1"></div>
-                        <div class="wk-field"><label>Guest names <small>(optional · one per line · must match the number of guests)</small></label><textarea name="guest_names" rows="2"></textarea></div>
+                        <div class="wk-field"><label>Guest names <span class="req">*</span> <small>— one per line, exactly match the number of guests</small></label><textarea name="guest_names" id="wkNames" rows="3" placeholder="One full name per line" aria-describedby="wkm_guest_names"></textarea><div class="wk-fmsg wk-count" id="wkm_guest_names" role="status" aria-live="polite"></div></div>
                     </div>
 
                     <div class="wk-sec wk-hide" id="wkSecTour"><h4><i class="fas fa-ship"></i> Tour / Boat</h4>
@@ -675,17 +679,91 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         setErr('');
         if (n === 2) calsRefresh(true);          // fresh data every time the booking step is shown
     }
-    function validPhone(v) { var d = String(v).replace(/[^0-9]/g, ''); if (d.indexOf('63') === 0 && d.length === 12) d = d.slice(2); if (d.charAt(0) === '0') d = d.slice(1); return /^9[0-9]{9}$/.test(d); }
+    // ---------- shared field rules (same patterns as includes/InputRules.php; the server re-validates everything)
+    var NAME_RE = new RegExp(<?php echo json_encode(InputRules::NAME_REGEX_JS, JSON_UNESCAPED_UNICODE); ?>, 'u');
+    var PHONE_TYPED_RE = new RegExp(<?php echo json_encode(InputRules::PHONE_TYPED_REGEX_JS); ?>);
+    var NAME_MSG = <?php echo json_encode(InputRules::NAME_MESSAGE); ?>, PHONE_MSG = <?php echo json_encode(InputRules::PHONE_MESSAGE); ?>;
+    function cleanName(v) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); }
+    // returns '' when valid
+    function nameErr(v, required, emptyMsg) {
+        var n = cleanName(v);
+        if (n === '') return required ? (emptyMsg || 'Name is required.') : '';
+        if (n.length < <?php echo (int)InputRules::NAME_MIN; ?>) return 'Name is too short.';
+        if (n.length > <?php echo (int)InputRules::NAME_MAX; ?>) return 'Name must not exceed <?php echo (int)InputRules::NAME_MAX; ?> characters.';
+        return NAME_RE.test(n) ? '' : NAME_MSG;
+    }
+    // Letters/symbols are rejected, never stripped. Only digits, a leading +, spaces and hyphens may be typed.
+    function validPhone(v) {
+        v = String(v).trim(); if (!PHONE_TYPED_RE.test(v)) return false;
+        var d = v.replace(/[^0-9]/g, ''); if (d.indexOf('63') === 0 && d.length === 12) d = d.slice(2); if (d.charAt(0) === '0') d = d.slice(1); return /^9[0-9]{9}$/.test(d);
+    }
+    function phoneErr(v, required) { v = String(v).trim(); if (v === '') return required ? PHONE_MSG : ''; return validPhone(v) ? '' : PHONE_MSG; }
+    function emailErr(v) { v = String(v).trim(); return (v === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) ? '' : 'Enter a valid e-mail address, or leave it empty.'; }
+
+    var G1 = [
+        { n: 'wg_name',             f: function () { return nameErr(val('wg_name'), true, 'Full name is required.'); }, label: 'Full name' },
+        { n: 'wg_contact',          f: function () { return phoneErr(val('wg_contact'), true); }, label: 'Contact number' },
+        { n: 'wg_email',            f: function () { return emailErr(val('wg_email')); }, label: 'E-mail' },
+        { n: 'wg_emergency_name',   f: function () { return nameErr(val('wg_emergency_name'), false); }, label: 'Emergency contact name' },
+        { n: 'wg_emergency_number', f: function () { return phoneErr(val('wg_emergency_number'), false); }, label: 'Emergency contact number' }
+    ];
+    function showFieldMsg(n, msg) {
+        var el = form.elements[n], m = $('wkm_' + n); if (!el || !m) return;
+        m.textContent = msg || ''; m.classList.toggle('show', !!msg);
+        el.classList.toggle('wk-invalid', !!msg); if (msg) el.setAttribute('aria-invalid', 'true'); else el.removeAttribute('aria-invalid');
+    }
+    // revealEmpty=false: while typing, an empty required field is not yet an error
+    function checkField(g, revealEmpty) {
+        var msg = g.f(); if (msg && !revealEmpty && val(g.n) === '') msg = '';
+        showFieldMsg(g.n, msg); return msg;
+    }
+    G1.forEach(function (g) {
+        var el = form.elements[g.n]; if (!el) return;
+        el.addEventListener('input', function () { checkField(g, false); syncGuestBanner(); });
+        el.addEventListener('blur', function () { checkField(g, false); });
+    });
+    // once every step-1 field is valid again, drop the red banner left by the last Next click
+    function syncGuestBanner() {
+        if (S.step !== 1 || !$('wkErr').classList.contains('show')) return;
+        if (!G1.some(function (g) { return g.f() !== ''; })) setErr('');
+    }
+    // returns the first error (also marks every invalid field); focus=true moves focus to it
+    function checkGuestFields(focus) {
+        var first = '', firstEl = null;
+        G1.forEach(function (g) { var m = checkField(g, true); if (m && !first) { first = (m.indexOf(g.label) === 0 ? m : g.label + ': ' + m); firstEl = form.elements[g.n]; } });
+        if (focus && firstEl) { try { firstEl.focus(); } catch (x) {} }
+        return first;
+    }
+
+    // ---------- House guest names: exactly one valid name per guest
+    function nameLines() { return String(($('wkNames') || {}).value || '').split(/\r\n|\r|\n/).map(cleanName).filter(function (x) { return x !== ''; }); }
+    function guestNamesState() {
+        var pax = parseInt(val('guests'), 10), lines = nameLines();
+        if (!pax || pax < 1) return { err: '', info: 'Enter the number of guests first.', count: lines.length };
+        for (var i = 0; i < lines.length; i++) { var e = nameErr(lines[i], true); if (e) return { err: 'Guest name #' + (i + 1) + ': ' + e, count: lines.length, pax: pax }; }
+        if (lines.length !== pax) return { err: 'Guest names: enter exactly ' + pax + ' name' + (pax === 1 ? '' : 's') + ' (one per line) to match the number of guests — you entered ' + lines.length + '.', count: lines.length, pax: pax };
+        return { err: '', count: lines.length, pax: pax };
+    }
+    function refreshNames(reveal) {
+        var m = $('wkm_guest_names'), t = $('wkNames'); if (!m || !t) return '';
+        var st = guestNamesState(), touched = reveal || String(t.value).trim() !== '';
+        m.className = 'wk-fmsg wk-count';
+        if (st.info) { m.textContent = st.info; }
+        else if (st.err && touched) { m.textContent = st.err; m.classList.add('bad'); }
+        else { m.textContent = st.count + ' of ' + st.pax + ' name' + (st.pax === 1 ? '' : 's') + ' entered' + (st.err ? '' : ' ✓'); if (!st.err) m.classList.add('good'); }
+        t.classList.toggle('wk-invalid', !!(st.err && touched)); if (st.err && touched) t.setAttribute('aria-invalid', 'true'); else t.removeAttribute('aria-invalid');
+        return st.err || '';
+    }
+    ['input', 'change'].forEach(function (ev) {
+        $('wkNames').addEventListener(ev, function () { refreshNames(false); });
+        $('wkPax').addEventListener(ev, function () { refreshNames(false); });
+    });
+    $('wkNames').addEventListener('blur', function () { refreshNames(true); });
+    function clearFieldMsgs() { G1.forEach(function (g) { showFieldMsg(g.n, ''); }); refreshNames(false); }
     function validate(n) {
         if (n === 1) {
             if (S.mode === 'existing') return $('wkGuestId').value ? '' : 'Search and select a guest, or switch to “New walk-in guest”.';
-            var nm = val('wg_name');
-            if (!nm) return 'Guest full name is required.';
-            if (/[0-9]/.test(nm) || !/^[A-Za-zÀ-ÿñÑ\s\-'.]+$/.test(nm) || nm.length < 2) return 'Guest name can only contain letters, spaces, hyphens, apostrophes and periods.';
-            if (!val('wg_contact')) return 'Contact number is required.';
-            if (!validPhone(val('wg_contact'))) return 'Enter a valid PH mobile number (e.g. 09123456789).';
-            if (val('wg_emergency_number') && !validPhone(val('wg_emergency_number'))) return 'Emergency contact number is not a valid PH mobile number.';
-            return '';
+            return checkGuestFields(true);
         }
         if (n === 2) {
             if (!S.type) return 'Choose a booking type.';
@@ -699,6 +777,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     if (val('check_in') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
                     if (nights() < 1) return 'Check-out must be after check-in.';
                     var px = parseInt(val('guests'), 10); if (!px || px < 1) return 'Enter the number of guests.'; if (px > h.capacity) return h.name + ' fits up to ' + h.capacity + ' guests.';
+                    var gnErr = refreshNames(true); if (gnErr) { try { $('wkNames').focus(); } catch (x) {} return gnErr; }
                 } else if (k === 'tour') {
                     var t = find(DATA.tours, val('tour_id')); if (!t) return 'Choose a boat/tour.';
                     if (!val('tour_date')) return 'Select the tour date.'; if (val('tour_date') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
@@ -762,7 +841,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                 var j; try { j = JSON.parse(t); } catch (x) { throw new Error('Unexpected server response. Please check Booking Management before retrying.'); }
                 if (!j.ok) throw new Error(j.error || 'Could not create the booking.');
                 $('wkRef').textContent = j.reference;
-                $('wkDoneMsg').innerHTML = esc(j.guest) + ' · ' + peso(j.total) + '<br>' + esc(j.payment_message || '');
+                $('wkDoneMsg').innerHTML = esc(j.guest) + ' · ' + peso(j.total) + '<br>' + esc(j.payment_message || '') + (j.email_sent ? '<br><span style="color:#15803d;"><i class="fas fa-envelope"></i> Confirmation e-mail sent to the guest.</span>' : '');
                 S.done = true; showStep('done');
             })
             .catch(function (err) { setErr(err.message || 'Something went wrong.'); btn.disabled = false; btn.textContent = 'Create Booking'; calsRefresh(true); })
@@ -774,7 +853,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         form.reset(); calsReset(); wkSyncOut(); S.type = ''; S.chosen = null; S.done = false; $('wkGuestId').value = ''; $('wkChosen').classList.add('wk-hide'); $('wkResults').classList.add('wk-hide');
         $('wkNonce').value = newNonce(); $('wkSizeWrap').classList.add('wk-hide'); $('wkAddrWrap').classList.add('wk-hide'); $('wkAddrAuto').classList.add('wk-hide'); $('wkGcashWrap').classList.add('wk-hide');
         q('#wkPay label').forEach(function (l, i) { l.classList.toggle('on', i === 0); });
-        wkMode('new'); syncSections(); wkSyncWindow(); showStep(1);
+        wkMode('new'); syncSections(); wkSyncWindow(); clearFieldMsgs(); showStep(1);
     }
     window.wkOpen = function () { wkReset(); $('walkinModal').classList.add('show'); $('walkinModal').setAttribute('aria-hidden', 'false'); document.body.style.overflow = 'hidden'; };
     window.wkClose = function () {

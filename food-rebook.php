@@ -15,6 +15,7 @@ require_once 'includes/TermsGate.php';
 TermsGate::enforceGuest($pdo);
 require_once 'includes/PaymentService.php';
 require_once 'includes/RebookService.php';
+require_once 'includes/emergency-ui.php';   // Phase 7.7 Emergency Rebook
 if (file_exists('includes/SystemLogger.php')) require_once 'includes/SystemLogger.php';
 
 if (!isset($_SESSION['user_id'])) { header('Location: index.php'); exit(); }
@@ -76,6 +77,19 @@ $csrf = (string)$_SESSION['food_rebook_csrf'];
 $blockReason = RebookService::serviceBlockReason('food', $order);
 // Phase 7.6: one request at a time — while one waits for Admin/Staff, the page shows it instead of the calendar.
 $pending = RebookService::pendingRequest($pdo, 'food', $order_pk);
+// ---- Phase 7.7 Emergency Rebook (guest only). Same page, same calendar, same validation: ONLY the 2-rebook limit and the 7-day window are lifted.
+$emPending = EmergencyRebookService::pendingRequest($pdo, 'food', $order_pk);
+$emergency = !$isAssist && ($emPending || EmergencyRebookUI::wanted($isAssist));
+$emEl = EmergencyRebookService::eligibility('food', $order);
+$emOffer = !$isAssist && !$pending && !$emPending && $emEl['eligible'] && EmergencyRebookService::tableReady($pdo);   // show the Emergency link on the normal screen
+$emContact = '';
+if ($emergency) {
+    if (!EmergencyRebookService::tableReady($pdo)) $blockReason = 'Emergency Rebook is not available right now.';
+    elseif ($pending) $blockReason = RebookService::PENDING_MESSAGE;                  // a normal rebook request is waiting: never both
+    else $blockReason = ($emEl['eligible'] || $emPending) ? null : $emEl['message'];
+    $pending = $emPending;                                                              // show the Emergency request while it waits
+    $emContact = EmergencyRebookUI::contactFor($pdo, $guest_id);
+}
 $curSchedule = RebookService::currentSchedule('food', $order);
 $timeChoices = RebookService::timeChoices('food', $curSchedule['time']);
 $gs = function ($k) { return isset($_GET[$k]) && is_string($_GET[$k]) ? $_GET[$k] : ''; };
@@ -133,6 +147,12 @@ if (isset($_POST['rebook_food'])) {
     $pending = RebookService::pendingRequest($pdo, 'food', $order_pk);
 }
 
+if ($emergency && isset($_POST['emergency_rebook']) && !$isAssist) {
+    $error = EmergencyRebookUI::handlePost($pdo, 'food', $order_pk, $guest_id, $csrf);          // redirects to the dashboard on success
+    $emPending = EmergencyRebookService::pendingRequest($pdo, 'food', $order_pk);
+    if ($emPending) $pending = $emPending;
+}
+
 $remaining = RebookService::remaining($order);
 $daysLeft = RebookService::daysLeft($order);
 $deadline = RebookService::deadline($order);
@@ -158,6 +178,7 @@ function pr_dt($d, $t = null) { return date('M j, Y', strtotime($d)) . ($t ? ' �
 <title>Rebook Food - <?php echo htmlspecialchars($site_name); ?></title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<?php echo EmergencyRebookUI::css(); ?>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;line-height:1.5}
@@ -233,11 +254,13 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <div class="pr-wrap">
     <div class="pr-title">
         <i class="fas fa-redo-alt"></i>
-        <h1>Rebook Food <small>Ref: <?php echo htmlspecialchars($order['reference_number']); ?><?php if ($isAssist && $guestLabel !== ''): ?> · Guest: <?php echo htmlspecialchars($guestLabel); ?><?php endif; ?></small></h1>
+        <h1><?php echo $emergency ? 'Emergency Rebook — Food' : 'Rebook Food'; ?> <small>Ref: <?php echo htmlspecialchars($order['reference_number']); ?><?php if ($isAssist && $guestLabel !== ''): ?> · Guest: <?php echo htmlspecialchars($guestLabel); ?><?php endif; ?></small></h1>
     </div>
 
     <?php if ($error !== ''): ?><div class="pr-alert err"><i class="fas fa-exclamation-circle"></i><span><?php echo htmlspecialchars($error); ?></span></div><?php endif; ?>
     <?php if ($blockReason !== null): ?><div class="pr-alert info"><i class="fas fa-info-circle"></i><span><?php echo htmlspecialchars($blockReason); ?></span></div><?php endif; ?>
+    <?php if ($emOffer && !$emergency): ?><div style="margin-bottom:14px;"><?php echo EmergencyRebookUI::link('food-rebook.php', $order_pk); ?></div><?php endif; ?>
+    <?php if ($emergency && $blockReason === null): echo EmergencyRebookUI::banner('food', $emPending ? $emPending['eligibility'] : $emEl['reason']); endif; ?>
 
     <div class="pr-grid">
         <div>
@@ -262,6 +285,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <div class="pr-stat <?php echo $daysLeft <= 2 ? 'warn' : ''; ?>"><b><?php echo $daysLeft; ?></b><small>Day(s) left</small></div>
                     <div class="pr-stat"><b><?php echo $deadline ? htmlspecialchars(date('M j', strtotime($deadline))) : '—'; ?></b><small>Deadline</small></div>
                 </div>
+                <?php if ($emergency): ?>
+                <ul class="pr-rules">
+                    <li><i class="fas fa-exclamation-triangle" style="color:#ea580c"></i><span><strong>Emergency Rebook</strong> is only for bookings whose normal rebook is closed (limit reached or 7-day window passed).</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Choose a new <strong>date and time</strong>, give your <strong>reason</strong> and a contact number.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Your payment is <strong>carried forward</strong>: no new reservation fee and price unchanged.</span></li>
+                    <li><i class="fas fa-hourglass-half" style="color:#ea580c"></i><span><strong>This is a request.</strong> It still requires Admin/Staff approval and availability; it does not guarantee rescheduling. Until then you keep your current schedule, and you can cancel it from the dashboard.</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Availability is checked now and again at approval; if the new schedule was taken meanwhile, nothing changes.</span></li>
+                </ul>
+                <?php else: ?>
                 <ul class="pr-rules">
                     <li><i class="fas fa-check-circle"></i><span>Choose a new <strong>date and time</strong>. Item, size, quantity, pickup/delivery and price stay the same.</span></li>
                     <?php if (($order['fulfillment_method'] ?? '') === 'delivery'): ?><li><i class="fas fa-check-circle"></i><span><strong>Delivery</strong> must stay inside your confirmed house stay, at the same unit (<?php echo htmlspecialchars((string)$order['delivery_address']); ?>). Dates outside the stay are not available.</span></li><?php endif; ?>
@@ -270,12 +302,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <li><i class="fas fa-hourglass-half" style="color:#f59e0b"></i><span><strong>This is a request.</strong> Admin/Staff confirm it in Booking Management. Until then <?php echo $isAssist ? 'the guest keeps the' : 'you keep your'; ?> current schedule, and it can be cancelled from the dashboard.</span></li>
                     <li><i class="fas fa-check-circle"></i><span>Availability is checked now and again when the request is confirmed; if the new schedule was taken meanwhile, nothing changes.</span></li>
                 </ul>
+                <?php endif; ?>
             </div>
         </div>
 
         <div class="pr-card">
             <h2><i class="fas fa-calendar-alt"></i> Choose the new date and time</h2>
-            <?php if ($pending): $pLines = RebookService::scheduleLines('food', $pending['requested']); ?>
+            <?php if ($pending && $emergency): ?>
+            <?php echo EmergencyRebookUI::pendingBox('food', $pending, 'profile.php'); ?>
+            <?php elseif ($pending): $pLines = RebookService::scheduleLines('food', $pending['requested']); ?>
             <div class="pr-pending"><b><i class="fas fa-hourglass-half"></i> Pending rebook — waiting for admin confirmation</b>
                 <?php foreach ($pLines as $pl): ?><div class="row">Requested <?php echo htmlspecialchars($pl['label']); ?>: <strong><?php echo htmlspecialchars($pl['text']); ?></strong></div><?php endforeach; ?>
                 <div class="row" style="font-size:13px;">Requested on <?php echo htmlspecialchars(date('M j, Y g:i A', strtotime($pending['requested_at']))); ?>. <?php echo $isAssist ? 'Confirm or reject it in the Rebooks tab.' : 'You can cancel it from your dashboard.'; ?></div>
@@ -291,7 +326,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             <div class="cal-note" id="calNote">Pick a date, then a time. Unavailable dates are greyed out — tap one to see why.</div>
             <div class="pr-preview" id="preview"></div>
             <form method="POST" id="rebookForm">
-                <input type="hidden" name="rebook_food" value="1">
+                <input type="hidden" name="<?php echo $emergency ? 'emergency_rebook' : 'rebook_food'; ?>" value="1">
                 <input type="hidden" name="id" value="<?php echo (int)$order_pk; ?>">
                 <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($csrf); ?>">
                 <input type="hidden" name="new_date" id="newDate" value="">
@@ -303,8 +338,9 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> Submit Rebook Request</button>
-                <p class="pr-hint">The request waits for Admin/Staff confirmation. <?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment stays as it is.</p>
+                <?php if ($emergency) echo EmergencyRebookUI::fields($emContact); ?>
+                <button type="submit" class="pr-btn<?php echo $emergency ? ' em-btn' : ''; ?>" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> <?php echo $emergency ? 'Submit Emergency Request' : 'Submit Rebook Request'; ?></button>
+                <p class="pr-hint"><?php echo $emergency ? 'This is an Emergency Rebook request and still requires Admin/Staff approval. ' : 'The request waits for Admin/Staff confirmation. '; ?> <?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment stays as it is.</p>
             </form>
             <?php else: ?>
             <p style="font-size:14px;color:#64748b;">This food order cannot be rebooked right now.</p>
@@ -314,10 +350,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 </div>
 
 <?php if ($blockReason === null && $startDate && !$pending): ?>
-<?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
+<?php $rbcEmergency = $emergency; require __DIR__ . '/includes/rebook-confirm.php'; ?>
+<?php if ($emergency) echo EmergencyRebookUI::js(); ?>
 <script>
 (function () {
-    var PAGE = 'food-rebook.php', BID = <?php echo (int)$order_pk; ?>;
+    var PAGE = 'food-rebook.php', BID = <?php echo (int)$order_pk; ?>, EMQ = <?php echo $emergency ? "'&emergency=1'" : "''"; ?>;
     var CURRENT = <?php echo json_encode($startDate); ?>;
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
@@ -352,7 +389,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         var ym = y + '-' + pad(m + 1), my = ++token;
         if (cache[ym]) { draw(cache[ym]); return; }
         draw(null);
-        fetch(PAGE + '?id=' + BID + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
+        fetch(PAGE + '?id=' + BID + EMQ + '&ajax=month&ym=' + ym, { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (j) { if (j.days) { cache[ym] = j.days; if (my === token) draw(j.days); } else { note.textContent = j.error || 'Could not load availability.'; } })
             .catch(function () { note.textContent = 'Could not load availability. Please refresh.'; });
@@ -364,7 +401,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         last = null; btn.disabled = true; prev.style.display = 'none';
         if (!ds) return;
         note.textContent = 'Checking ' + fd(ds) + (tm ? ' at ' + ft(tm) : '') + '…';
-        fetch(PAGE + '?id=' + BID + '&ajax=preview&date=' + encodeURIComponent(ds) + '&time=' + encodeURIComponent(tm), { credentials: 'same-origin' })
+        fetch(PAGE + '?id=' + BID + EMQ + '&ajax=preview&date=' + encodeURIComponent(ds) + '&time=' + encodeURIComponent(tm), { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (j) {
                 if (my !== ptoken) return;
@@ -394,7 +431,9 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     document.getElementById('rebookForm').addEventListener('submit', function (e) {
         if (!hidden.value || !last || btn.disabled) { e.preventDefault(); return; }
         var rows = (last.requested || []).map(function (r, i) { return { label: r.label, from: (last.current[i] || {}).text || '', to: r.text }; });
-        if (!RebookConfirm.gate(e, rows)) return;          // first click opens the confirmation; the confirmed submit continues
+        var em = null;
+        if (window.EmergencyForm) { em = EmergencyForm.check(); if (!em.ok) { e.preventDefault(); return; } }
+        if (!RebookConfirm.gate(e, rows, em ? em.reason : '')) return;          // first click opens the confirmation; the confirmed submit continues
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';
     });
     load();

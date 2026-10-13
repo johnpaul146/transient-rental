@@ -50,8 +50,10 @@ class RebookService {
     /**
      * Why a tour/food/package booking cannot be rebooked, or null if it can.
      * $booking is the row as stored (for packages: the package_bookings row).
+     * $ignoreLimitWindow (Phase 7.7, Emergency Rebook eligibility ONLY): skips exactly two rules — the 2-rebook limit and
+     * the 7-day window. Every other rule (status, paid credit, package child, passed date) still applies.
      */
-    public static function serviceBlockReason($type, array $booking) {
+    public static function serviceBlockReason($type, array $booking, $ignoreLimitWindow = false) {
         if (!in_array($type, self::SERVICE_TYPES, true)) return 'Unknown booking type.';
         if ($type !== 'package' && !empty($booking['package_id'])) return 'This item is part of a package. Rebook the whole package instead.';
         // Same rule for every service: confirmed or cancelled WITH money received; never completed.
@@ -59,8 +61,10 @@ class RebookService {
             return 'Only confirmed bookings, or paid bookings that were cancelled, can be rebooked (completed bookings cannot).';
         }
         if ((float)($booking['amount_paid'] ?? 0) <= 0) return 'Only bookings with a paid reservation fee can be rebooked.';
-        if (self::remaining($booking) <= 0) return 'This booking has already been rebooked ' . self::MAX_REBOOKS . ' times (maximum).';
-        if (self::daysLeft($booking) <= 0) return 'Rebooking is only possible within ' . self::WINDOW_DAYS . ' days from booking date.';
+        if (!$ignoreLimitWindow) {
+            if (self::remaining($booking) <= 0) return 'This booking has already been rebooked ' . self::MAX_REBOOKS . ' times (maximum).';
+            if (self::daysLeft($booking) <= 0) return 'Rebooking is only possible within ' . self::WINDOW_DAYS . ' days from booking date.';
+        }
         // A confirmed tour whose date has already passed has taken place; only a cancelled-with-credit one may move.
         if ($type === 'tour' && ($booking['booking_status'] ?? '') !== 'cancelled'
             && !empty($booking['booking_date']) && $booking['booking_date'] < date('Y-m-d')) {
@@ -116,7 +120,7 @@ class RebookService {
         return $err;
     }
 
-    private static function lockBooking(PDO $pdo, $table, $id) {
+    public static function lockBooking(PDO $pdo, $table, $id) {
         $st = $pdo->prepare("SELECT * FROM `$table` WHERE id = ? FOR UPDATE");
         $st->execute([(int)$id]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
@@ -162,12 +166,12 @@ class RebookService {
 
     // ------------------------------------------------------------------
     // HOUSE — guest REQUESTS a rebook (rebook.php). Rules unchanged: 2 per booking, 7-day window,
-    // same number of nights, check-in/check-out TIMES stay exactly as saved on the booking (the guest never
-    // edits a time), payment carried forward, status 'pending' until confirmHouseRebook() above.
+    // same number of nights, the guest may change the check-in TIME (check-out time follows it, never edited
+    // separately — Phase 7.9.3), payment carried forward, status 'pending' until confirmHouseRebook() above.
     // ------------------------------------------------------------------
 
     /** Why this house booking cannot be rebooked right now, or null if it can. $b = the house_bookings row. */
-    public static function houseBlockReason(array $b) {
+    public static function houseBlockReason(array $b, $ignoreLimitWindow = false) {   // $ignoreLimitWindow: Emergency Rebook eligibility only (Phase 7.7)
         if (!empty($b['original_booking_id'])) return 'This is an old rebooking record.';
         if (!empty($b['package_id'])) return 'This house is part of a package. Rebook the whole package instead.';
         if (($b['booking_status'] ?? '') === 'pending' && !empty($b['rebooked_at']) && empty($b['rebook_confirmed_at'])) {
@@ -177,6 +181,7 @@ class RebookService {
             return 'Only confirmed bookings or paid cancelled reservations can be rebooked (completed stays cannot).';
         }
         if (PaymentService::amounts($b)['paid'] <= 0) return 'Only bookings with a paid reservation fee can be rebooked.';
+        if ($ignoreLimitWindow) return null;
         $count = (int)($b['rebook_count'] ?? 0);
         if ($count >= self::MAX_REBOOKS) {
             return 'You have already rebooked this booking ' . $count . ' time(s). Maximum of ' . self::MAX_REBOOKS . ' rebooks allowed per booking.';
@@ -209,6 +214,46 @@ class RebookService {
         return ['in' => $t($b['check_in_time'] ?? '', '14:00:00'), 'out' => $t($b['check_out_time'] ?? '', '12:00:00')];
     }
 
+    /**
+     * Phase 7.9.3 — are the two history columns (previous_check_in_time / previous_check_out_time) there? They let a pending
+     * rebook that changed the TIME be undone exactly. Until the migration has run, only the date can be changed (as before).
+     */
+    private static $houseTimeCols = null;
+    public static function houseTimeColumnsReady(PDO $pdo) {
+        if (self::$houseTimeCols !== null) return self::$houseTimeCols;
+        try {
+            $n = 0;
+            foreach ($pdo->query("SHOW COLUMNS FROM house_bookings")->fetchAll(PDO::FETCH_ASSOC) as $c) {
+                if (in_array($c['Field'], ['previous_check_in_time', 'previous_check_out_time'], true)) $n++;
+            }
+            self::$houseTimeCols = ($n === 2);
+        } catch (PDOException $e) { self::$houseTimeCols = false; }
+        return self::$houseTimeCols;
+    }
+
+    const TIME_INVALID_MESSAGE = 'Please choose a valid check-in time.';
+    const TIME_UNAVAILABLE_MESSAGE = 'Changing the check-in time is not available yet. Please keep your current check-in time.';
+
+    /**
+     * The check-in / check-out TIMES a House rebook would use. $time = what the guest chose ('HH:MM', or null = not sent = keep the
+     * saved CHECK-IN time). Check-out time is NEVER taken from the browser and has NO legacy exception (Phase 7.9.3.1): it ALWAYS equals
+     * the requested check-in time (AvailabilityService::houseStayTimes). A legacy 14:00 -> 12:00 booking therefore becomes 14:00 -> 14:00.
+     * Returns ['in','out','changed' => bool]; 'changed' = the requested times differ from the saved ones (check-in OR check-out time),
+     * which is what needs the previous_*_time columns. Throws InvalidArgumentException (guest-safe) for an empty or malformed time.
+     */
+    public static function houseRequestTimes(array $b, $time) {
+        $cur = self::houseTimes($b);
+        if ($time === null) $in = $cur['in'];
+        else {
+            if (!is_string($time) && !is_numeric($time)) throw new InvalidArgumentException(self::TIME_INVALID_MESSAGE);
+            try { $t = AvailabilityService::houseStayTimes((string)$time); }
+            catch (InvalidArgumentException $e) { throw new InvalidArgumentException(self::TIME_INVALID_MESSAGE); }
+            $in = $t['in'];
+        }
+        $out = $in;
+        return ['in' => $in, 'out' => $out, 'changed' => ($in !== $cur['in'] || $out !== $cur['out'])];
+    }
+
     /** Number of nights of the booking as saved (this is the LOCKED stay length). */
     public static function houseNights(array $b) {
         return (int)(new DateTime(substr((string)$b['check_out_date'], 0, 10)))->diff(new DateTime(substr((string)$b['check_in_date'], 0, 10)))->days;
@@ -227,28 +272,92 @@ class RebookService {
         return $msg;
     }
 
-    const SAME_DATE_MESSAGE = 'Please choose a different check-in date.';
+    const SAME_DATE_MESSAGE = 'Please choose a different check-in date or time.';
 
     /**
      * Would a stay starting on $newIn work? Same checks requestHouseRebook() makes (no locks — display only; the
      * real check runs again inside the transaction). The check-out DATE is always check-in + the original nights.
      * Returns ['ok' => bool, 'message' => string, 'plan' => ['in','out','in_time','out_time','nights','old_in','old_out']|null].
      */
-    public static function houseDateCheck(PDO $pdo, array $b, $newIn) {
-        try { $new = self::parseDate($newIn); }
+    public static function houseDateCheck(PDO $pdo, array $b, $newIn, $time = null) {
+        try { $new = self::parseDate($newIn); $times = self::houseRequestTimes($b, $time); }
         catch (InvalidArgumentException $e) { return ['ok' => false, 'message' => $e->getMessage(), 'plan' => null]; }
         $nights = self::houseNights($b);
-        $times = self::houseTimes($b);
         $in = $new->format('Y-m-d');
         $out = (clone $new)->modify('+' . $nights . ' days')->format('Y-m-d');
         $plan = ['in' => $in, 'out' => $out, 'in_time' => $times['in'], 'out_time' => $times['out'], 'nights' => $nights,
                  'old_in' => substr((string)$b['check_in_date'], 0, 10), 'old_out' => substr((string)$b['check_out_date'], 0, 10)];
         if ($nights < 1) return ['ok' => false, 'message' => 'This booking has no stay length to move.', 'plan' => $plan];
-        if ($in === $plan['old_in']) return ['ok' => false, 'message' => self::SAME_DATE_MESSAGE, 'plan' => $plan];
+        if ($in === $plan['old_in'] && !$times['changed']) return ['ok' => false, 'message' => self::SAME_DATE_MESSAGE, 'plan' => $plan];
+        if ($times['changed'] && !self::houseTimeColumnsReady($pdo)) return ['ok' => false, 'message' => self::TIME_UNAVAILABLE_MESSAGE, 'plan' => $plan];
+        if ($pe = self::pastTimeError('Check-in', $in, $times['in'])) return ['ok' => false, 'message' => $pe, 'plan' => $plan];
         $m = AvailabilityService::houseConflict($pdo, $b['house_id'], $in, $out, [$b['id']], [$b['reference_number']], $times['in'], $times['out']);
-        if ($m) return ['ok' => false, 'message' => self::houseSafeMessage($m), 'plan' => $plan];
+        if ($m) {
+            $kind = self::houseStartKind($pdo, $b['house_id'], $in, $times['in'], [$b['id']], [$b['reference_number']], $nights);
+            return ['ok' => false, 'message' => self::startKindMessage($kind, $nights, self::houseSafeMessage($m)), 'plan' => $plan, 'kind' => $kind];
+        }
         return ['ok' => true, 'message' => '', 'plan' => $plan];
     }
+
+    /**
+     * Phase 7.9 — calendar meaning only (read-only, no rule change). When a fixed-length stay cannot start on $in, say WHY:
+     *   'hard'  = the night of $in itself is taken (a holding booking overlaps [in+time, in+1 day+time)) or can never be part of a
+     *             stay (the date, or the day after it, is a hard owner/orphan block — a stay sleeping that night must check out on
+     *             or after the next day) — no stay at this check-in time can include that night;
+     *   'start' = that night is free, but the whole N-night stay from $in would run into a later booking/block. Such a day can
+     *             still lie INSIDE a valid stay that starts earlier (exact-time turnover), so it must not look "booked".
+     * Uses the same AvailabilityService::houseConflict() as every booking path; nothing here decides availability.
+     */
+    public static function houseStartKind(PDO $pdo, $houseId, $in, $time, array $excludeIds, array $ownRefs, $nights) {
+        if ((int)$nights <= 1) return 'hard';
+        try { $next = (new DateTime($in))->modify('+1 day')->format('Y-m-d'); } catch (Exception $e) { return 'hard'; }
+        return AvailabilityService::houseConflict($pdo, $houseId, $in, $next, $excludeIds, $ownRefs, $time, $time) === null ? 'start' : 'hard';
+    }
+
+    /** Guest-facing reason for a day that cannot be a check-in. */
+    public static function startKindMessage($kind, $nights, $why) {
+        if ($kind !== 'start') return $why;
+        return 'This date is free, but a ' . (int)$nights . '-night stay starting here would overlap another reservation. ' . $why;
+    }
+
+    /**
+     * THE validation for a House rebook, without any side effect (Phase 7.7: used by Emergency Rebook request + approval; the
+     * normal flow keeps its own inline copy above). Same rules as requestHouseRebook(): future date within 12 months, same
+     * number of nights, saved check-in/out times, guests 1..capacity, a different check-in date, and availability (exact
+     * datetime overlap, owner blocks). $lock = true locks the house first (approval). It does NOT look at the rebook limit
+     * or window — callers decide eligibility. Returns ['ok','message','schedule','changed'].
+     */
+    public static function planHouse(PDO $pdo, array $b, $newIn, $guests, $lock = false, $time = null) {
+        try { $new = self::parseDate($newIn); $times = self::houseRequestTimes($b, $time); }
+        catch (InvalidArgumentException $e) { return self::planFail($e->getMessage()); }
+        $v = self::houseView($pdo, $b);
+        $gRaw = trim((string)$guests);
+        if (!preg_match('/^[1-9]\d{0,3}$/', $gRaw)) return self::planFail('Please enter the number of guests.');
+        $g = (int)$gRaw;
+        if ($v['capacity'] > 0 && $g > $v['capacity']) return self::planFail('This house accommodates up to ' . $v['capacity'] . ' guests.');
+        $nights = self::houseNights($b);
+        if ($nights < 1) return self::planFail('This booking has no stay length to move.');
+        $in = $new->format('Y-m-d');
+        $out = (clone $new)->modify('+' . $nights . ' days')->format('Y-m-d');
+        $s = ['house_id' => (int)$b['house_id'], 'in' => $in, 'in_time' => $times['in'], 'out' => $out, 'out_time' => $times['out'], 'nights' => $nights, 'guests' => $g];
+        if ($in === substr((string)$b['check_in_date'], 0, 10) && !$times['changed']) return self::planFail(self::SAME_DATE_MESSAGE, $s);
+        if ($times['changed'] && !self::houseTimeColumnsReady($pdo)) return self::planFail(self::TIME_UNAVAILABLE_MESSAGE, $s);
+        if ($pe = self::pastTimeError('Check-in', $in, $times['in'])) return self::planFail($pe, $s);
+        if ($lock) AvailabilityService::lockItem($pdo, 'house', $b['house_id']);
+        $m = AvailabilityService::houseConflict($pdo, $b['house_id'], $in, $out, [$b['id']], [$b['reference_number']], $times['in'], $times['out']);
+        if ($m) return self::planFail(self::houseSafeMessage($m), $s);
+        return ['ok' => true, 'message' => '', 'schedule' => $s, 'changed' => true];
+    }
+
+    /** Is an Emergency Rebook request (Phase 7.7) waiting for this booking? Safe when the table does not exist yet. */
+    public static function emergencyPending(PDO $pdo, $type, $bookingId, $lock = false) {
+        try {
+            $st = $pdo->prepare("SELECT id FROM emergency_rebook_requests WHERE booking_type = ? AND booking_id = ? AND status = 'pending' LIMIT 1" . ($lock ? ' FOR UPDATE' : ''));
+            $st->execute([(string)$type, (int)$bookingId]);
+            return (bool)$st->fetchColumn();
+        } catch (PDOException $e) { return false; }
+    }
+    const EMERGENCY_PENDING_MESSAGE = 'An Emergency Rebook request for this booking is already waiting for Admin/Staff approval.';
 
     /**
      * Guest requests new dates for a house booking. Everything is decided HERE from the saved booking: the nights,
@@ -258,13 +367,14 @@ class RebookService {
      * Returns ['reference','house_name','old_in','old_out','new_in','new_out','nights','guests','total','rebook_count'].
      * Throws AvailabilityConflictException / RuntimeException / InvalidArgumentException (guest-safe messages).
      */
-    public static function requestHouseRebook(PDO $pdo, $bookingId, $guestId, $newIn, $guests) {
+    public static function requestHouseRebook(PDO $pdo, $bookingId, $guestId, $newIn, $guests, $time = null) {
         $new = self::parseDate($newIn);
         $pdo->beginTransaction();
         try {
             $b = self::lockBooking($pdo, 'house_bookings', $bookingId);
             if ((int)$b['guest_id'] !== (int)$guestId) throw new RuntimeException('Booking not found.');
             if ($why = self::houseBlockReason($b)) throw new RuntimeException($why);
+            if (self::emergencyPending($pdo, 'house', $b['id'], true)) throw new RuntimeException(self::EMERGENCY_PENDING_MESSAGE);   // Phase 7.7: never both at once
             $v = self::houseView($pdo, $b);
             $guests = (int)$guests;
             if ($guests < 1) throw new InvalidArgumentException('Please enter the number of guests.');
@@ -272,10 +382,14 @@ class RebookService {
 
             $nights = self::houseNights($b);
             if ($nights < 1) throw new RuntimeException('This booking has no stay length to move.');
-            $times = self::houseTimes($b);
+            $cur = self::houseTimes($b);                      // the schedule as it is NOW (kept in previous_* for a restore)
+            $times = self::houseRequestTimes($b, $time);      // Phase 7.9.3: the guest may change the check-in TIME; check-out time follows it
             $in = $new->format('Y-m-d');
-            // Choosing the stay's current check-in date is not a rebook: nothing is changed, nothing is counted.
-            if ($in === substr((string)$b['check_in_date'], 0, 10)) throw new InvalidArgumentException(self::SAME_DATE_MESSAGE);
+            // Choosing the stay's current check-in date AND time is not a rebook: nothing is changed, nothing is counted.
+            if ($in === substr((string)$b['check_in_date'], 0, 10) && !$times['changed']) throw new InvalidArgumentException(self::SAME_DATE_MESSAGE);
+            $timeCols = self::houseTimeColumnsReady($pdo);
+            if ($times['changed'] && !$timeCols) throw new InvalidArgumentException(self::TIME_UNAVAILABLE_MESSAGE);
+            if ($pe = self::pastTimeError('Check-in', $in, $times['in'])) throw new InvalidArgumentException($pe);
             $out = (clone $new)->modify('+' . $nights . ' days')->format('Y-m-d');
             AvailabilityService::lockItem($pdo, 'house', $b['house_id']);
             $m = AvailabilityService::houseConflict($pdo, $b['house_id'], $in, $out, [$b['id']], [$b['reference_number']], $times['in'], $times['out']);
@@ -284,19 +398,26 @@ class RebookService {
             // House price is per NIGHT; guests never multiply it and the nights never change, so the total stays the same.
             $ppn = $nights > 0 ? $b['total_amount'] / $nights : $b['total_amount'];
             $total = round($ppn * $nights, 2);
+            // With the history columns the previous TIMES are saved too (so a reject / guest cancel restores them exactly) and the new
+            // times are written; without them (migration not run) the times are left alone and only the date can have changed.
+            $timeSet = $timeCols ? "previous_check_in_time = ?, previous_check_out_time = ?, check_in_time = ?, check_out_time = ?," : '';
             $up = $pdo->prepare("UPDATE house_bookings SET
                     previous_check_in_date = ?, previous_check_out_date = ?, previous_number_of_guests = ?,
                     previous_total_amount = ?, previous_booking_status = ?,
+                    $timeSet
                     check_in_date = ?, check_out_date = ?, number_of_guests = ?, total_amount = ?,
                     booking_status = 'pending', rebook_count = COALESCE(rebook_count, 0) + 1,
                     rebooked_at = NOW(), rebook_confirmed_at = NULL
                   WHERE id = ? AND guest_id = ? AND booking_status IN ('confirmed','cancelled')");
-            $up->execute([$b['check_in_date'], $b['check_out_date'], $b['number_of_guests'], $b['total_amount'], $b['booking_status'],
-                          $in, $out, $guests, $total, (int)$b['id'], (int)$b['guest_id']]);
+            $args = [$b['check_in_date'], $b['check_out_date'], $b['number_of_guests'], $b['total_amount'], $b['booking_status']];
+            if ($timeCols) { $args[] = $cur['in']; $args[] = $cur['out']; $args[] = $times['in']; $args[] = $times['out']; }
+            array_push($args, $in, $out, $guests, $total, (int)$b['id'], (int)$b['guest_id']);
+            $up->execute($args);
             if ($up->rowCount() !== 1) throw new RuntimeException('This booking changed while you were rebooking. Please refresh and try again.');
             $pdo->commit();
             return ['reference' => $b['reference_number'], 'house_name' => $v['house_name'], 'old_in' => $b['check_in_date'], 'old_out' => $b['check_out_date'],
                     'old_guests' => $b['number_of_guests'], 'old_total' => $b['total_amount'],
+                    'old_in_time' => $cur['in'], 'old_out_time' => $cur['out'], 'new_in_time' => $times['in'], 'new_out_time' => $times['out'],
                     'new_in' => $in, 'new_out' => $out, 'nights' => $nights, 'guests' => $guests, 'total' => $total, 'rebook_count' => (int)($b['rebook_count'] ?? 0) + 1];
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
@@ -341,7 +462,13 @@ class RebookService {
                 ? $b['previous_booking_status'] : 'confirmed';
             if ($reblock) AvailabilityService::releaseForBooking($pdo, 'house', $b['house_id'], $b['reference_number']);
             if ($hasBackup) {
+                // Phase 7.9.3: the saved previous TIMES come back with the dates. A request made before the migration has NULL there
+                // (it could not change a time), so COALESCE keeps the time the row already has — exactly what that request needs.
+                $timeCols = self::houseTimeColumnsReady($pdo);
+                $timeRestore = $timeCols ? "check_in_time = COALESCE(previous_check_in_time, check_in_time), check_out_time = COALESCE(previous_check_out_time, check_out_time),
+                        previous_check_in_time = NULL, previous_check_out_time = NULL," : '';
                 $up = $pdo->prepare("UPDATE house_bookings SET check_in_date = previous_check_in_date, check_out_date = previous_check_out_date,
+                        $timeRestore
                         number_of_guests = previous_number_of_guests, total_amount = previous_total_amount,
                         previous_check_in_date = NULL, previous_check_out_date = NULL, previous_number_of_guests = NULL, previous_total_amount = NULL,
                         booking_status = ?, previous_booking_status = NULL, rebook_count = GREATEST(0, rebook_count - 1),
@@ -436,6 +563,11 @@ class RebookService {
 
     /** The schedule a booking has NOW (what a request would change). */
     public static function currentSchedule($type, array $b, $parts = null) {
+        if ($type === 'house') {
+            $t = self::houseTimes($b);
+            return ['house_id' => (int)$b['house_id'], 'in' => substr((string)$b['check_in_date'], 0, 10), 'in_time' => $t['in'],
+                    'out' => substr((string)$b['check_out_date'], 0, 10), 'out_time' => $t['out'], 'nights' => self::houseNights($b), 'guests' => (int)$b['number_of_guests']];
+        }
         if ($type === 'tour') {
             return ['tour_id' => (int)$b['tour_id'], 'date' => substr((string)$b['booking_date'], 0, 10), 'time' => self::normTime($b['preferred_time'] ?? '')];
         }
@@ -465,7 +597,7 @@ class RebookService {
     }
 
     /** A stored requested schedule -> plan() input (used by Confirm). */
-    private static function inputFromSchedule($type, array $s) {
+    public static function inputFromSchedule($type, array $s) {
         if ($type !== 'package') return ['date' => (string)($s['date'] ?? ''), 'time' => (string)($s['time'] ?? '')];
         $in = [];
         if (!empty($s['house'])) $in['house'] = ['date' => $s['house']['in'], 'time' => $s['house']['in_time'], 'guests' => (string)$s['house']['guests']];
@@ -619,6 +751,7 @@ class RebookService {
     /** First day of a schedule (for logs / the dashboard's "recent rebooks"). */
     public static function scheduleStart($type, $s) {
         if (!is_array($s)) return null;
+        if ($type === 'house') return $s['in'] ?? null;
         if ($type !== 'package') return $s['date'] ?? null;
         $d = array_filter([$s['house']['in'] ?? null, $s['tour']['date'] ?? null, $s['food']['date'] ?? null]);
         return $d ? min($d) : null;
@@ -633,6 +766,8 @@ class RebookService {
     /** Human lines for a schedule: [['label' => 'Tour', 'text' => 'Nov 6, 2026 · 8:00 AM'], ...] (no HTML). */
     public static function scheduleLines($type, $s) {
         if (!is_array($s)) return [];
+        if ($type === 'house') return [['label' => 'House', 'text' => self::fmtDt($s['in'] ?? '', $s['in_time'] ?? '') . ' to ' . self::fmtDt($s['out'] ?? '', $s['out_time'] ?? '')
+            . (isset($s['guests']) ? ' · ' . (int)$s['guests'] . ' guest' . ((int)$s['guests'] === 1 ? '' : 's') : '')]];
         if ($type === 'tour') return [['label' => 'Tour', 'text' => self::fmtDt($s['date'] ?? '', $s['time'] ?? '')]];
         if ($type === 'food') return [['label' => 'Food' . (($s['method'] ?? '') === 'delivery' ? ' (delivery)' : ' (pickup)'), 'text' => self::fmtDt($s['date'] ?? '', $s['time'] ?? '')]];
         $out = [];
@@ -727,6 +862,7 @@ class RebookService {
             if ($why = self::serviceBlockReason($type, $b)) throw new RuntimeException($why);
             $parts = $type === 'package' ? PaymentService::lockPackageParts($pdo, $b) : null;
             if (self::pendingRequest($pdo, $type, $b['id'], true)) throw new RuntimeException(self::PENDING_MESSAGE);   // 2. the request
+            if (self::emergencyPending($pdo, $type, $b['id'], true)) throw new RuntimeException(self::EMERGENCY_PENDING_MESSAGE);   // Phase 7.7: never both at once
             $r = self::plan($pdo, $type, $b, $in, $parts, false);
             if (!$r['ok']) throw new InvalidArgumentException($r['message']);
             $orig = self::currentSchedule($type, $b, $parts);
@@ -813,12 +949,17 @@ class RebookService {
         }
     }
 
-    /** Inside confirmServiceRebook's transaction: write the new schedule. Money fields are never touched. */
-    private static function applySchedule(PDO $pdo, $type, array $b, $parts, array $cur, array $new, $userId) {
+    /**
+     * Inside a locked transaction (confirmServiceRebook / Emergency approval): write the new schedule. Money fields are never
+     * touched. $countRebook = false (Emergency Rebook, Phase 7.7): the normal `rebook_count` is left exactly as it is —
+     * Emergency approvals are recorded in `emergency_rebook_requests` — but `rebooked_at` still records the change.
+     */
+    public static function applySchedule(PDO $pdo, $type, array $b, $parts, array $cur, array $new, $userId, $countRebook = true) {
+        $inc = $countRebook ? 'rebook_count = rebook_count + 1, ' : '';
         $wasCancelled = ($b['booking_status'] ?? '') === 'cancelled';
         if ($type === 'tour') {
             $pdo->prepare("UPDATE tour_bookings SET booking_date = ?, preferred_time = ?, booking_status = 'confirmed', cancelled_at = NULL, cancellation_reason = NULL,
-                                  rebook_count = rebook_count + 1, rebooked_at = NOW() WHERE id = ?")
+                                  $inc rebooked_at = NOW() WHERE id = ?")
                 ->execute([$new['date'], $new['time'], (int)$b['id']]);
             AvailabilityService::releaseForBooking($pdo, 'tour', $b['tour_id'], $b['reference_number']);
             AvailabilityService::blockForBooking($pdo, 'tour', $b['tour_id'], $new['date'], null, $b['reference_number'], $userId ?: null);
@@ -826,7 +967,7 @@ class RebookService {
         }
         if ($type === 'food') {
             $pdo->prepare("UPDATE food_bookings SET preferred_date = ?, preferred_time = ?, booking_status = 'confirmed', cancelled_at = NULL, cancellation_reason = NULL,
-                                  rebook_count = rebook_count + 1, rebooked_at = NOW() WHERE id = ?")
+                                  $inc rebooked_at = NOW() WHERE id = ?")
                 ->execute([$new['date'], $new['time'], (int)$b['id']]);
             return;
         }
@@ -853,7 +994,7 @@ class RebookService {
                 ->execute([$new['food']['date'], $new['food']['time'], (int)$f['id']]);
         }
         $pdo->prepare("UPDATE package_bookings SET booking_status = 'confirmed', cancelled_at = NULL, cancellation_reason = NULL,
-                              rebook_count = rebook_count + 1, rebooked_at = NOW(), updated_at = NOW() WHERE id = ?")
+                              $inc rebooked_at = NOW(), updated_at = NOW() WHERE id = ?")
             ->execute([(int)$b['id']]);
         PaymentService::syncPackageComponents($pdo, (int)$b['id']);   // parts mirror the package payment state
     }
@@ -928,7 +1069,9 @@ class RebookService {
             try { $st = AvailabilityService::houseStayTimes($time); } catch (InvalidArgumentException $e) { return ['ok' => false, 'message' => 'Invalid check-in time.']; }
             $out = (new DateTime($date))->modify('+' . $nights . ' days')->format('Y-m-d');
             $m = AvailabilityService::houseConflict($pdo, $h['house_id'], $date, $out, [$h['id']], [$h['reference_number']], $st['in'], $st['out']);
-            return $m ? ['ok' => false, 'message' => self::safeMessage($m)] : ['ok' => true, 'message' => ''];
+            if (!$m) return ['ok' => true, 'message' => ''];
+            $kind = self::houseStartKind($pdo, $h['house_id'], $date, $st['in'], [$h['id']], [$h['reference_number']], $nights);   // Phase 7.9: calendar meaning only
+            return ['ok' => false, 'message' => self::startKindMessage($kind, $nights, self::safeMessage($m)), 'kind' => $kind];
         }
         if (($part === 'tour' || $part === 'food') && ($x = $parts[$part])) {
             if (($h = $parts['house']) && ($w = self::packageWindowFor($h, $ctx))) {

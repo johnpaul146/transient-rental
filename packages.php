@@ -858,6 +858,7 @@ foreach ($tours as $t) {
 
 // --- HOUSE BOOKED DATES ---
 $house_booked_dates = [];
+$house_hard_dates = [];
 foreach ($houses as $h) {
     if (!is_array($h) || !isset($h['id'])) continue;
     try {
@@ -880,8 +881,11 @@ foreach ($houses as $h) {
         $bst->execute([$h['id']]);
         foreach ($bst->fetchAll(PDO::FETCH_COLUMN) as $bd) $dates[] = $bd;
         $house_booked_dates[$h['id']] = array_values(array_unique($dates));
+        // Phase 7.9.1: HARD full-day blocks (owner blocks and orphan auto-blocks) cannot be a check-out day either (same rule as houseConflict()).
+        $house_hard_dates[$h['id']] = AvailabilityService::houseHardBlockDates($pdo, $h['id'], date('Y-m-d'), date('Y-m-d', strtotime('+5 years')));
     } catch (PDOException $e) {
         $house_booked_dates[$h['id']] = [];
+        $house_hard_dates[$h['id']] = [];
     }
 }
 
@@ -1056,7 +1060,7 @@ $cart_data_js = [
     <title>Build Your Package - <?php echo htmlspecialchars($site_name); ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/design-system.css">
+    <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -3286,6 +3290,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
 
 <script>
 const HOUSE_BOOKED_DATES = <?php echo json_encode($house_booked_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const HOUSE_HARD_DATES = <?php echo json_encode($house_hard_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const TOUR_BOOKED_DATES  = <?php echo json_encode($tour_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const FOOD_BOOKED_DATES  = <?php echo json_encode($food_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 // House stay window (null when the package has no house). The server enforces it; this only guides the pickers.
@@ -3832,6 +3837,7 @@ var houseCalYear = new Date().getFullYear();
 var houseSelectedStart = null;
 var houseSelectedEnd = null;
 var houseCurrentBooked = [];
+var houseCurrentHard = [];   // Phase 7.9.1: hard full-day blocks (also refused as a check-out day)
 var currentHousePrice = 0;
 var currentHouseCapacity = 20;
 
@@ -3849,6 +3855,7 @@ function selectHouse(el) {
     document.getElementById('houseForm').style.display = 'block';
 
     houseCurrentBooked = HOUSE_BOOKED_DATES[id] || [];
+    houseCurrentHard = (typeof HOUSE_HARD_DATES !== 'undefined' && HOUSE_HARD_DATES[id]) || [];
     houseSelectedStart = null;
     houseSelectedEnd = null;
     document.getElementById('h_check_in').value = '';
@@ -3989,6 +3996,7 @@ function selectHouseDate(el) {
         if (houseCurrentBooked.indexOf(dStr) !== -1) { conflictDate = dStr; break; }
     }
     if (conflictDate) { alert('❌ Your stay range includes a booked date (' + conflictDate + '). Please choose different dates.'); return; }
+    if (houseCurrentHard.indexOf(date) !== -1) { alert('❌ ' + formatDateDisplay(date) + ' is not available, so it cannot be your check-out day. Please choose different dates.'); return; }
 
     houseSelectedEnd = date;
     document.getElementById('h_check_out').value = date;

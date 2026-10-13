@@ -606,19 +606,22 @@ class PaymentService {
      * $skipPendingRebooks (Phase 7.6; true once the `rebook_requests` table exists): a tour / food / package whose
      * rebook request is still waiting for Admin/Staff is not completed while it waits — its saved date may pass
      * before the request is decided, and completing it would make the approved move impossible.
+     * $skipPendingEmergency (Phase 7.7; true once `emergency_rebook_requests` exists): the same protection for a booking
+     * (house, tour, food or package) whose Emergency Rebook request is still waiting.
      */
-    public static function autoCompleteSql($skipPendingRebooks = false) {
+    public static function autoCompleteSql($skipPendingRebooks = false, $skipPendingEmergency = false) {
         $r = "'" . self::EXPIRED_REASON . "'";
         $noProof = "(payment_proof IS NULL OR payment_proof = '')";
         $standalone = "(package_id IS NULL OR package_id = 0)";
-        $waiting = function ($type, $col) use ($skipPendingRebooks) {
-            return $skipPendingRebooks
-                ? " AND NOT EXISTS (SELECT 1 FROM rebook_requests rr WHERE rr.booking_type = '$type' AND rr.booking_id = $col AND rr.status = 'pending')"
-                : '';
+        $waiting = function ($type, $col, $normal = true) use ($skipPendingRebooks, $skipPendingEmergency) {
+            $x = '';
+            if ($normal && $skipPendingRebooks) $x .= " AND NOT EXISTS (SELECT 1 FROM rebook_requests rr WHERE rr.booking_type = '$type' AND rr.booking_id = $col AND rr.status = 'pending')";
+            if ($skipPendingEmergency) $x .= " AND NOT EXISTS (SELECT 1 FROM emergency_rebook_requests er WHERE er.booking_type = '$type' AND er.booking_id = $col AND er.status = 'pending')";
+            return $x;
         };
         $sql = [];
         foreach ([
-            ['house_bookings', 'check_out_date < CURDATE()', ' AND original_booking_id IS NULL'],
+            ['house_bookings', 'check_out_date < CURDATE()', ' AND original_booking_id IS NULL' . $waiting('house', 'house_bookings.id', false)],
             ['tour_bookings',  'booking_date < CURDATE()', $waiting('tour', 'tour_bookings.id')],
             ['food_bookings',  'preferred_date IS NOT NULL AND preferred_date < CURDATE()', $waiting('food', 'food_bookings.id')],
         ] as $d) {

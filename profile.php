@@ -22,7 +22,10 @@ TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest 
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
+require_once 'includes/FeedbackService.php';   // Phase 7.9: one rating rule (UI + server)
+require_once 'includes/emergency-ui.php';   // Phase 7.9: EmergencyRebookUI::notify() (post-commit Emergency e-mails)
 require_once 'includes/RebookService.php';
+require_once 'includes/EmergencyRebookService.php';   // Phase 7.7
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -171,8 +174,11 @@ function getIDPhoto($guest) {
     }
     return null;
 }
-function canGiveFeedback($booking) {
-    return $booking['booking_status'] == 'completed' && empty($booking['feedback_text']);
+// Phase 7.9: the Rate button follows FeedbackService (House: after check-out date+time, Tour: after the scheduled time,
+// Food/Package: completed; never cancelled; hidden when the rating cannot be stored). The server applies the same rule.
+function canGiveFeedback($booking, $type = 'house') {
+    global $pdo;
+    return FeedbackService::canRate($pdo, $type, $booking);
 }
 function hasFeedback($booking) {
     return !empty($booking['feedback_text']);
@@ -281,29 +287,85 @@ function servicePendingRequest($type, array $row) {
     return $GLOBALS['profile_svc_pending'][$type][(int)($row['id'] ?? 0)] ?? null;
 }
 
-/** Status label for a tour / food / package row: "Pending Rebook" while a request waits, otherwise the usual label. */
-function serviceStatusLabel($type, array $row) {
-    if (servicePendingRequest($type, $row)) return '<span class="badge badge-warning"><i class="fas fa-redo"></i> Pending Rebook</span>';
-    return getBookingStatusLabel($row['booking_status'] ?? '', $row['payment_status'] ?? null);
+/**
+ * Phase 7.7 — Emergency Rebook (guest side). The guest's waiting Emergency requests and recently rejected ones,
+ * [type][booking_id] => row (house, tour, food, package). Filled once after the booking lists are loaded.
+ */
+$GLOBALS['profile_em_ready'] = false;
+$GLOBALS['profile_em_pending'] = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+$GLOBALS['profile_em_rejected'] = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+function emergencyRequest($type, array $row) {
+    return $GLOBALS['profile_em_pending'][$type][(int)($row['id'] ?? 0)] ?? null;
+}
+/** Is the Emergency button offered? Only when the booking is otherwise eligible but the normal rebook is closed (limit / 7-day window). */
+function emergencyOffered($type, array $row) {
+    if (empty($GLOBALS['profile_em_ready']) || emergencyRequest($type, $row)) return false;
+    if ($type !== 'house' && servicePendingRequest($type, $row)) return false;                 // a normal request is waiting: never both
+    return EmergencyRebookService::eligibility($type, $row)['eligible'];
+}
+function emergencyPageUrl($type, array $row) {
+    $id = (int)$row['id'];
+    return $type === 'house' ? 'rebook.php?booking_id=' . $id . '&emergency=1' : ['tour' => 'tour-rebook.php', 'food' => 'food-rebook.php', 'package' => 'package-rebook.php'][$type] . '?id=' . $id . '&emergency=1';
+}
+/** STATUS area for an Emergency request: waiting note, or the (safe) result of a recent rejection. '' otherwise. */
+function emergencyStatusBlock($type, array $row) {
+    if ($req = emergencyRequest($type, $row)) {
+        $txt = implode(' · ', array_map(function ($l) { return $l['label'] . ': ' . $l['text']; }, RebookService::scheduleLines($type, $req['requested'])));
+        return '<span class="badge badge-emergency"><i class="fas fa-exclamation-triangle"></i> Emergency Rebook Pending</span>'
+             . '<div class="rebook-pending-badge svc-status-wait em-wait" title="' . htmlspecialchars('Requested ' . $txt, ENT_QUOTES, 'UTF-8') . '"><i class="fas fa-hourglass-half"></i> Waiting for admin/staff approval</div>';
+    }
+    if ($rej = ($GLOBALS['profile_em_rejected'][$type][(int)($row['id'] ?? 0)] ?? null)) {
+        $why = trim((string)($rej['review_note'] ?? ''));
+        return '<div class="em-rejected-note"><i class="fas fa-times-circle"></i> Emergency Rebook request was not approved'
+             . ($why !== '' ? ': ' . htmlspecialchars($why) : '') . '. Your current schedule is unchanged.</div>';
+    }
+    return '';
+}
+/** ACTION area: Cancel Emergency Request while pending; the red/orange Request Emergency Rebook button when offered. */
+function emergencyRebookButton($type, array $row, $mobile) {
+    if ($req = emergencyRequest($type, $row)) {
+        $onclick = 'cancelEmergencyRebook(' . (int)$req['id'] . ', ' . htmlspecialchars(json_encode((string)$row['reference_number']), ENT_QUOTES, 'UTF-8') . ')';
+        return $mobile ? '<button type="button" class="btn-card-action btn-cancel-rebook-mobile" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Emergency Request</button>'
+                       : '<button type="button" class="btn-cancel-rebook" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Emergency Request</button>';
+    }
+    if (!emergencyOffered($type, $row)) return '';
+    $cls = $mobile ? 'btn-card-action btn-emergency-rebook-mobile' : 'btn-emergency-rebook';
+    return '<a href="' . htmlspecialchars(emergencyPageUrl($type, $row)) . '" class="' . $cls . '"><i class="fas fa-exclamation-triangle"></i> Request Emergency Rebook</a>';
 }
 
-/** While a request waits: "Waiting for admin confirmation" + the requested schedule + Cancel Rebook (no second Rebook button). */
+/** Status label for a tour / food / package row: "Pending Rebook" while a request waits, otherwise the usual label. */
+function serviceStatusLabel($type, array $row) {
+    if ($req = servicePendingRequest($type, $row)) return '<span class="badge badge-warning"><i class="fas fa-redo"></i> Pending Rebook</span>' . serviceWaitingNote($type, $req);
+    if (emergencyRequest($type, $row)) return emergencyStatusBlock($type, $row);
+    return getBookingStatusLabel($row['booking_status'] ?? '', $row['payment_status'] ?? null) . emergencyStatusBlock($type, $row);
+}
+
+/** "Waiting for admin confirmation" — lives in the STATUS area (same markup House uses); the requested schedule is the tooltip. */
+function serviceWaitingNote($type, array $req) {
+    $txt = implode(' · ', array_map(function ($l) { return $l['label'] . ': ' . $l['text']; }, RebookService::scheduleLines($type, $req['requested'])));
+    return '<div class="rebook-pending-badge svc-status-wait" title="' . htmlspecialchars('Requested ' . $txt, ENT_QUOTES, 'UTF-8') . '"><i class="fas fa-hourglass-half"></i> Waiting for admin confirmation</div>';
+}
+
+/** Mobile cards: a Status row under the card header while a request waits (nothing otherwise). */
+function serviceStatusRow($type, array $row) {
+    if (emergencyRequest($type, $row)) return '<div class="card-row card-row-status"><i class="fas fa-exclamation-triangle"></i><span class="card-label">Status</span><span class="card-value">' . emergencyStatusBlock($type, $row) . '</span></div>';
+    if (!($req = servicePendingRequest($type, $row))) return '';
+    return '<div class="card-row card-row-status"><i class="fas fa-redo"></i><span class="card-label">Status</span><span class="card-value">'
+         . '<span class="badge badge-warning"><i class="fas fa-redo"></i> Pending Rebook</span>' . serviceWaitingNote($type, $req) . '</span></div>';
+}
+
+/** While a request waits the ACTION area holds only Cancel Rebook (View is rendered by the row; the waiting note is in Status). */
 function servicePendingActions($type, array $row, array $req, $mobile) {
-    $lines = RebookService::scheduleLines($type, $req['requested']);
-    $txt = implode(' · ', array_map(function ($l) { return $l['label'] . ': ' . $l['text']; }, $lines));
     $onclick = 'cancelServiceRebook(' . (int)$req['id'] . ', ' . htmlspecialchars(json_encode((string)$row['reference_number']), ENT_QUOTES, 'UTF-8') . ')';
-    if ($mobile) {
-        return '<span class="rebook-pending-badge svc-pending-note" style="display:block;width:100%;text-align:center;"><i class="fas fa-hourglass-half"></i> Pending rebook — waiting for admin confirmation<br><small>Requested ' . htmlspecialchars($txt) . '</small></span>'
-             . '<button type="button" class="btn-card-action btn-cancel-rebook-mobile" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Rebook</button>';
-    }
-    return '<span class="rebook-pending-badge svc-pending-note" style="display:block;margin-top:5px;"><i class="fas fa-hourglass-half"></i> Waiting for admin confirmation<br><small>Requested ' . htmlspecialchars($txt) . '</small></span>'
-         . '<button type="button" class="btn-cancel-rebook" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Rebook</button>';
+    if ($mobile) return '<button type="button" class="btn-card-action btn-cancel-rebook-mobile" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Rebook</button>';
+    return '<button type="button" class="btn-cancel-rebook" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Rebook</button>';
 }
 
 /** "Rebook" button for a paid tour / food / package booking (a request; payment carried forward). */
 function serviceRebookButton($type, array $row, $mobile) {
     if ($req = servicePendingRequest($type, $row)) return servicePendingActions($type, $row, $req, $mobile);
-    if (!RebookService::canRebookService($type, $row)) return '';
+    if (emergencyRequest($type, $row)) return emergencyRebookButton($type, $row, $mobile);                // Cancel Emergency Request
+    if (!RebookService::canRebookService($type, $row)) return emergencyRebookButton($type, $row, $mobile);   // normal closed: Emergency when it qualifies
     if ($type === 'tour') $current = $row['booking_date'] ?? '';
     elseif ($type === 'food') $current = $row['preferred_date'] ?? '';
     else {
@@ -389,7 +451,8 @@ if(!isset($_SESSION['user_id'])) {
 // ============================================================
 // ✅ HANDLE OVERALL FEEDBACK
 // ============================================================
-if (isset($_POST['submit_feedback']) && isset($_SESSION['user_id'])) {
+// Phase 7.9: the per-booking Rate form also posts submit_feedback (with booking_id) — it must NOT overwrite the overall review.
+if (isset($_POST['submit_feedback']) && isset($_SESSION['user_id']) && !isset($_POST['booking_id'])) {
     try {
         $rating       = (int)($_POST['rating'] ?? 0);
         $comment      = trim($_POST['comment'] ?? '');
@@ -620,6 +683,27 @@ if(isset($_POST['cancel_service_rebook'])) {
         exit();
     } catch (PDOException $e) {
         error_log('cancel service rebook failed: ' . $e->getMessage());
+        $error = "❌ Something went wrong and nothing was changed. Please try again.";
+    } catch (Exception $e) {
+        $error = "❌ " . $e->getMessage();
+    }
+}
+
+// ---- CANCEL an EMERGENCY Rebook request (Phase 7.7). The booking was never changed; this only closes the guest's own pending request. CSRF required. ----
+if(isset($_POST['cancel_emergency_rebook'])) {
+    try {
+        if (!hash_equals($profile_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page and try again.");
+        $g = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
+        $g->execute([$_SESSION['user_id']]);
+        $em_guest = (int)$g->fetchColumn();
+        if (!$em_guest) throw new Exception("Guest profile not found.");
+        $em_req = EmergencyRebookService::cancel($pdo, (int)($_POST['request_id'] ?? 0), $em_guest, (int)$_SESSION['user_id']);
+        EmergencyRebookService::log($pdo, 'cancel', $em_req, 'guest');
+        EmergencyRebookUI::notify($pdo, 'cancel', (int)$em_req['id']);   // Phase 7.9: tell Admin/Staff the request is withdrawn (after commit)
+        header("Location: profile.php?emergency_cancelled=1");
+        exit();
+    } catch (PDOException $e) {
+        error_log('cancel emergency rebook failed: ' . $e->getMessage());
         $error = "❌ Something went wrong and nothing was changed. Please try again.";
     } catch (Exception $e) {
         $error = "❌ " . $e->getMessage();
@@ -903,16 +987,16 @@ if(isset($_POST['upload_proof'])) {
 }
 
 // ---- SUBMIT PER-BOOKING FEEDBACK ----
-if(isset($_POST['submit_feedback'])) {
+// Phase 7.9: booking type is whitelisted (it used to be pasted into the table name), the guest must own the booking, and the
+// service must have ended (FeedbackService — the same rule as the Rate button). Errors are shown, never raw SQL.
+if(isset($_POST['submit_feedback']) && isset($_POST['booking_id']) && isset($_SESSION['user_id'])) {
     try {
-        $booking_type = $_POST['booking_type'];
-        $booking_id = $_POST['booking_id'];
-        $rating = $_POST['rating'];
-        $feedback = $_POST['feedback'];
-        $is_anonymous = isset($_POST['is_anonymous']) ? 1 : 0;
-        $table = $booking_type . '_bookings';
-        $pdo->prepare("UPDATE `$table` SET feedback_rating = ?, feedback_text = ?, feedback_date = NOW(), feedback_is_anonymous = ? WHERE id = ?")
-            ->execute([$rating, $feedback, $is_anonymous, $booking_id]);
+        $booking_type = (string)($_POST['booking_type'] ?? '');
+        if (!isset(FeedbackService::TABLES[$booking_type])) throw new InvalidArgumentException('Unknown booking type.');
+        $fb = FeedbackService::save($pdo, $booking_type, $_POST['booking_id'] ?? '', (int)$_SESSION['user_id'], $_POST['rating'] ?? '', $_POST['feedback'] ?? '', isset($_POST['is_anonymous']), 'create');
+        $booking_id = $fb['id'];
+        $rating = $fb['rating'];
+        $is_anonymous = $fb['anonymous'];
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log(
@@ -929,8 +1013,11 @@ if(isset($_POST['submit_feedback'])) {
 
         header("Location: profile.php?feedback=1");
         exit();
-    } catch(Exception $e) {
-        $error = "Failed: " . $e->getMessage();
+    } catch(InvalidArgumentException $e) {
+        $error = "❌ " . $e->getMessage();
+    } catch(Throwable $e) {
+        error_log('profile feedback failed: ' . $e->getMessage());
+        $error = "❌ Your feedback could not be saved right now. Please try again.";
     }
 }
 
@@ -941,13 +1028,11 @@ if(isset($_POST['edit_house_feedback']) || isset($_POST['edit_tour_feedback']) |
         elseif(isset($_POST['edit_tour_feedback'])) $booking_type = 'tour';
         else $booking_type = 'food';
 
-        $booking_id = $_POST['booking_id'];
-        $rating = $_POST['rating'];
-        $feedback = $_POST['feedback'];
-        $is_anonymous = isset($_POST['is_anonymous']) ? 1 : 0;
-        $table = $booking_type . '_bookings';
-        $pdo->prepare("UPDATE `$table` SET feedback_rating = ?, feedback_text = ?, feedback_date = NOW(), feedback_is_anonymous = ? WHERE id = ?")
-            ->execute([$rating, $feedback, $is_anonymous, $booking_id]);
+        // Phase 7.9: owner only, existing feedback only (FeedbackService)
+        $fb = FeedbackService::save($pdo, $booking_type, $_POST['booking_id'] ?? '', (int)($_SESSION['user_id'] ?? 0), $_POST['rating'] ?? '', $_POST['feedback'] ?? '', isset($_POST['is_anonymous']), 'edit');
+        $booking_id = $fb['id'];
+        $rating = $fb['rating'];
+        $is_anonymous = $fb['anonymous'];
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log(
@@ -964,8 +1049,11 @@ if(isset($_POST['edit_house_feedback']) || isset($_POST['edit_tour_feedback']) |
 
         header("Location: profile.php?feedback_updated=1");
         exit();
-    } catch(Exception $e) {
-        $error = "Failed: " . $e->getMessage();
+    } catch(InvalidArgumentException $e) {
+        $error = "❌ " . $e->getMessage();
+    } catch(Throwable $e) {
+        error_log('profile feedback update failed: ' . $e->getMessage());
+        $error = "❌ Your feedback could not be saved right now. Please try again.";
     }
 }
 
@@ -1020,6 +1108,12 @@ if($guest) {
 
 // Phase 7.6: this guest's waiting tour / food / package rebook requests (one query)
 if ($guest) $GLOBALS['profile_svc_pending'] = RebookService::pendingMap($pdo, (int)$guest['id']);
+// Phase 7.7: this guest's waiting Emergency Rebook requests + recently rejected ones (two small queries)
+if ($guest && EmergencyRebookService::tableReady($pdo)) {
+    $GLOBALS['profile_em_ready'] = true;
+    $GLOBALS['profile_em_pending'] = EmergencyRebookService::pendingMap($pdo, (int)$guest['id']);
+    $GLOBALS['profile_em_rejected'] = EmergencyRebookService::recentRejections($pdo, (int)$guest['id']);
+}
 
 // ✅ FETCH PACKAGE BOOKINGS — WITH FULL DETAIL FIELDS (including times)
 $package_bookings = [];
@@ -1142,7 +1236,7 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
-<link rel="stylesheet" href="assets/css/design-system.css">
+<link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
 <link rel="stylesheet" href="assets/css/transient-theme.css">
   
   <style>
@@ -1469,6 +1563,16 @@ background-position: center top;
 
         .rebook-pending-badge { display: inline-block; margin-top: 5px; padding: 3px 10px; background: #fef3c7; color: #92400e; border-radius: 12px; font-size: 10px; font-weight: 600; border: 1px solid #fcd34d; white-space: nowrap; }
         .rebook-pending-badge i { margin-right: 3px; }
+        .badge-emergency { background: #ffedd5; color: #c2410c; }
+        .btn-emergency-rebook { background: #ea580c; color: #fff; padding: 5px 12px; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; line-height: 1.4; min-height: 28px; }
+        .btn-emergency-rebook:hover { background: #c2410c; transform: translateY(-2px); color: #fff; text-decoration: none; }
+        .booking-card-mobile .btn-emergency-rebook-mobile { background: linear-gradient(135deg, #f97316, #dc2626); color: white; text-decoration: none; }
+        .em-wait { background: #ffedd5 !important; color: #9a3412 !important; }
+        .em-rejected-note { display: block; margin-top: 5px; font-size: 11.5px; line-height: 1.35; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 5px 8px; white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+        .svc-wait.em { border-color: #fdba74; background: #fff7ed; }
+        .svc-wait.em .svc-wait-grid > div { border-color: #fdba74; } .svc-wait.em .svc-wait-grid small, .svc-wait.em .svc-wait-sub { color: #9a3412; }
+        .svc-status-wait { display: block; margin-top: 5px; white-space: normal; line-height: 1.3; max-width: 100%; text-align: left; }
+        .booking-card-mobile .card-row-status .card-value { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
         .svc-pending-note small { display: block; font-weight: 500; margin-top: 2px; white-space: normal; }
         .svc-wait-list { display: grid; gap: 10px; margin-bottom: 22px; }
         .svc-wait { border: 1px solid #fde68a; background: #fffbeb; border-radius: 12px; padding: 12px 14px; min-width: 0; }
@@ -1997,6 +2101,12 @@ Manage your reservations, payments, and vacation plans in one place.
     <?php elseif(isset($_GET['rebooked'])): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Rebook request submitted! Your new dates stay pending until staff confirms them. If the request is not approved, your original dates are restored. The amount already paid is carried forward.</span></div>
     <?php endif; ?>
+    <?php if(isset($_GET['emergency_requested'])): ?>
+    <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Emergency Rebook request submitted. It is waiting for Admin/Staff approval; your current schedule and payment stay as they are until it is decided.</span></div>
+    <?php endif; ?>
+    <?php if(isset($_GET['emergency_cancelled'])): ?>
+    <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Emergency Rebook request cancelled. Your booking keeps its current schedule.</span></div>
+    <?php endif; ?>
     <?php if(isset($_GET['rebook_cancelled'])): ?>
     <div class="alert alert-success"><i class="fas fa-check-circle"></i> <span>✅ Pending rebook cancelled! Your booking keeps its original schedule.</span></div>
     <?php endif; ?>
@@ -2328,6 +2438,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                 <i class="fas fa-hourglass-half"></i> Waiting for admin confirmation
                                             </div>
                                         <?php endif; ?>
+                                        <?php echo emergencyStatusBlock('house', $booking); ?>
                                     </td>
                                     <td>
                                         <div class="action-cell">
@@ -2387,6 +2498,9 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                 <?php endif; ?>
                                             <?php endif; ?>
                                             
+                                            <?php if (!$pending_rebook && ($emBtn = emergencyRebookButton('house', $booking, false))): ?>
+                                                <div class="action-row"><?php echo $emBtn; ?></div>
+                                            <?php endif; ?>
                                             <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
                                                 <div class="action-row" style="margin-top:4px;">
                                                     <?php echo completeBookingButton('house', (int)$booking['id']); ?>
@@ -2422,6 +2536,9 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                 </div>
                             </div>
 
+                            <?php if ($emSt = emergencyStatusBlock('house', $booking)): ?>
+                            <div class="card-row card-row-status"><i class="fas fa-exclamation-triangle"></i><span class="card-label">Status</span><span class="card-value"><?php echo $emSt; ?></span></div>
+                            <?php endif; ?>
                             <div class="card-row">
                                 <i class="fas fa-home"></i>
                                 <span class="card-label">House</span>
@@ -2511,6 +2628,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <?php endif; ?>
                                     </button>
                                 <?php endif; ?>
+                                <?php if (!$pending_rebook) echo emergencyRebookButton('house', $booking, true); ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -2619,6 +2737,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                     <?php echo PaymentService::guestBadge($booking); ?>
                                 </div>
                             </div>
+                            <?php echo serviceStatusRow('tour', $booking); ?>
 
                             <div class="card-row">
                                 <i class="fas fa-umbrella-beach"></i>
@@ -2801,6 +2920,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                     <?php echo PaymentService::guestBadge($booking); ?>
                                 </div>
                             </div>
+                            <?php echo serviceStatusRow('food', $booking); ?>
 
                             <div class="card-row">
                                 <i class="fas fa-utensils"></i>
@@ -2984,6 +3104,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                     <?php echo PaymentService::guestBadge($pkg); ?>
                                 </div>
                             </div>
+                            <?php echo serviceStatusRow('package', $pkg); ?>
 
                             <div class="card-row">
                                 <i class="fas fa-box-open"></i>
@@ -3067,6 +3188,40 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                             <div><small>Requested</small><?php foreach (RebookService::scheduleLines($svcReq['booking_type'], $svcReq['requested']) as $l): ?><div><strong><?php echo htmlspecialchars($l['label'] . ': ' . $l['text']); ?></strong></div><?php endforeach; ?></div>
                         </div>
                         <button type="button" class="btn-cancel-rebook" onclick="cancelServiceRebook(<?php echo (int)$svcReq['id']; ?>, <?php echo htmlspecialchars(json_encode((string)$svcReq['reference_number']), ENT_QUOTES, 'UTF-8'); ?>)"><i class="fas fa-undo"></i> Cancel Rebook</button>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+                <?php endif; ?>
+                <?php
+                // Phase 7.7: Emergency Rebook requests waiting for Admin/Staff (any service), and recent decisions
+                $em_waiting = [];
+                foreach ($GLOBALS['profile_em_pending'] as $emT => $emList) foreach ($emList as $emReq) $em_waiting[] = $emReq;
+                usort($em_waiting, function ($a, $b) { return strcmp((string)$b['requested_at'], (string)$a['requested_at']); });
+                $em_rejected = [];
+                foreach ($GLOBALS['profile_em_rejected'] as $emT => $emList) foreach ($emList as $emReq) if (empty($GLOBALS['profile_em_pending'][$emT][(int)$emReq['booking_id']])) $em_rejected[] = $emReq + ['booking_type' => $emT];
+                ?>
+                <?php if ($em_waiting || $em_rejected): ?>
+                <h4 style="margin-bottom:12px;font-size:16px;"><i class="fas fa-exclamation-triangle" style="color:#ea580c;"></i> Emergency Rebook Requests</h4>
+                <div class="svc-wait-list">
+                    <?php foreach ($em_waiting as $emReq): ?>
+                    <div class="svc-wait em">
+                        <div class="svc-wait-top"><strong><?php echo htmlspecialchars($emReq['reference_number']); ?></strong>
+                            <span class="badge badge-emergency"><i class="fas fa-exclamation-triangle"></i> Emergency Rebook Pending</span>
+                            <span class="svc-wait-sub"><?php echo htmlspecialchars(ucfirst($emReq['booking_type'])); ?> · waiting for admin/staff approval · requested <?php echo htmlspecialchars(date('M j, Y g:i A', strtotime($emReq['requested_at']))); ?></span></div>
+                        <div class="svc-wait-grid">
+                            <div><small>Current</small><?php foreach (RebookService::scheduleLines($emReq['booking_type'], $emReq['original']) as $l): ?><div><?php echo htmlspecialchars($l['label'] . ': ' . $l['text']); ?></div><?php endforeach; ?></div>
+                            <div><small>Requested</small><?php foreach (RebookService::scheduleLines($emReq['booking_type'], $emReq['requested']) as $l): ?><div><strong><?php echo htmlspecialchars($l['label'] . ': ' . $l['text']); ?></strong></div><?php endforeach; ?></div>
+                        </div>
+                        <button type="button" class="btn-cancel-rebook" onclick="cancelEmergencyRebook(<?php echo (int)$emReq['id']; ?>, <?php echo htmlspecialchars(json_encode((string)$emReq['reference_number']), ENT_QUOTES, 'UTF-8'); ?>)"><i class="fas fa-undo"></i> Cancel Emergency Request</button>
+                    </div>
+                    <?php endforeach; ?>
+                    <?php foreach ($em_rejected as $emReq): ?>
+                    <div class="svc-wait">
+                        <div class="svc-wait-top"><strong><?php echo htmlspecialchars($emReq['reference_number']); ?></strong>
+                            <span class="badge badge-danger"><i class="fas fa-times-circle"></i> Emergency request not approved</span>
+                            <span class="svc-wait-sub"><?php echo htmlspecialchars(ucfirst($emReq['booking_type'])); ?> · decided <?php echo htmlspecialchars(date('M j, Y', strtotime($emReq['reviewed_at']))); ?></span></div>
+                        <?php if (trim((string)$emReq['review_note']) !== ''): ?><div style="font-size:13px;margin-bottom:4px;"><?php echo htmlspecialchars($emReq['review_note']); ?></div><?php endif; ?>
+                        <div style="font-size:12.5px;color:#64748b;">Your current schedule and payment are unchanged.</div>
                     </div>
                     <?php endforeach; ?>
                 </div>
@@ -3298,7 +3453,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                                 </div>
                                             <?php endif; ?>
                                             <div class="action-row" style="margin-top:6px;">
-                                                <?php if(canGiveFeedback($booking)): ?>
+                                                <?php if(canGiveFeedback($booking, 'house')): ?>
                                                     <button class="btn-sm btn-feedback" onclick="openFeedbackModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['house_name']); ?>')">
                                                         <i class="fas fa-star"></i> Rate
                                                     </button>
@@ -3344,7 +3499,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
 <?php echo serviceRebookButton('tour', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
-                                                <?php if(canGiveFeedback($booking)): ?>
+                                                <?php if(canGiveFeedback($booking, 'tour')): ?>
                                                     <button class="btn-sm btn-feedback" onclick="openFeedbackModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>')">
                                                         <i class="fas fa-star"></i> Rate
                                                     </button>
@@ -3390,7 +3545,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
 <?php echo serviceRebookButton('food', $booking, false); ?>
                                             </div>
                                             <div class="action-row">
-                                                <?php if(canGiveFeedback($booking)): ?>
+                                                <?php if(canGiveFeedback($booking, 'food')): ?>
                                                     <button class="btn-sm btn-feedback" onclick="openFeedbackModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['food_name']); ?>')">
                                                         <i class="fas fa-star"></i> Rate
                                                     </button>
@@ -3442,7 +3597,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
 <?php echo serviceRebookButton('package', $pkg, false); ?>
                                             </div>
                                             <div class="action-row">
-                                                <?php if(canGiveFeedback($pkg)): ?>
+                                                <?php if(canGiveFeedback($pkg, 'package')): ?>
                                                     <button class="btn-sm btn-feedback" onclick="openFeedbackModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', 'Package')">
                                                         <i class="fas fa-star"></i> Rate
                                                     </button>
@@ -3503,7 +3658,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                             onclick='viewBooking("house", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
-                                    <?php if(canGiveFeedback($booking)): ?>
+                                    <?php if(canGiveFeedback($booking, 'house')): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['house_name']); ?>')">
                                             <i class="fas fa-star"></i> Rate
@@ -3523,6 +3678,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <?php echo PaymentService::guestBadge($booking); ?>
                                     </div>
                                 </div>
+                            <?php echo serviceStatusRow('tour', $booking); ?>
                                 <div class="card-row">
                                     <i class="fas fa-umbrella-beach"></i>
                                     <span class="card-label">Tour</span>
@@ -3545,7 +3701,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
 <?php echo serviceRebookButton('tour', $booking, true); ?>
-                                    <?php if(canGiveFeedback($booking)): ?>
+                                    <?php if(canGiveFeedback($booking, 'tour')): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>')">
                                             <i class="fas fa-star"></i> Rate
@@ -3565,6 +3721,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <?php echo PaymentService::guestBadge($booking); ?>
                                     </div>
                                 </div>
+                            <?php echo serviceStatusRow('food', $booking); ?>
                                 <div class="card-row">
                                     <i class="fas fa-utensils"></i>
                                     <span class="card-label">Food</span>
@@ -3581,7 +3738,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
 <?php echo serviceRebookButton('food', $booking, true); ?>
-                                    <?php if(canGiveFeedback($booking)): ?>
+                                    <?php if(canGiveFeedback($booking, 'food')): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('food', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['food_name']); ?>')">
                                             <i class="fas fa-star"></i> Rate
@@ -3601,6 +3758,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <?php echo PaymentService::guestBadge($pkg); ?>
                                     </div>
                                 </div>
+                            <?php echo serviceStatusRow('package', $pkg); ?>
                                 <div class="card-row">
                                     <i class="fas fa-box-open"></i>
                                     <span class="card-label">Package</span>
@@ -3617,7 +3775,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                         <i class="fas fa-eye"></i> More / View
                                     </button>
 <?php echo serviceRebookButton('package', $pkg, true); ?>
-                                    <?php if(canGiveFeedback($pkg)): ?>
+                                    <?php if(canGiveFeedback($pkg, 'package')): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('package', <?php echo $pkg['id']; ?>, '<?php echo htmlspecialchars($pkg['reference_number']); ?>', 'Package')">
                                             <i class="fas fa-star"></i> Rate
@@ -4986,6 +5144,15 @@ function cancelRebook(bookingId, reference) {
     document.body.style.overflow = 'hidden';
 }
 // Phase 7.6: cancel a waiting tour / food / package rebook request (the booking itself never changed)
+function cancelEmergencyRebook(requestId, reference) {
+    document.getElementById('cancel_rebook_booking_id').value = '';
+    document.getElementById('cancel_rebook_request_id').value = requestId;
+    document.getElementById('cancelRebookSubmitBtn').name = 'cancel_emergency_rebook';
+    document.getElementById('cancel_rebook_note').innerHTML = 'Your Emergency Rebook request is withdrawn. Your <strong>current schedule</strong> and payment stay as they are.';
+    document.getElementById('cancel_rebook_reference').textContent = reference;
+    document.getElementById('cancelRebookModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
 function cancelServiceRebook(requestId, reference) {
     document.getElementById('cancel_rebook_booking_id').value = '';
     document.getElementById('cancel_rebook_request_id').value = requestId;

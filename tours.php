@@ -9,6 +9,8 @@ if (file_exists('includes/SystemLogger.php')) {
 }
 
 require_once 'includes/PaymentService.php';
+require_once 'includes/FeedbackService.php';   // Phase 7.9: one rating rule (UI + server)
+require_once 'includes/booking-terms.php';
 require_once 'includes/TermsGate.php';
 $termsGate = new TermsGate($pdo);
 
@@ -248,6 +250,7 @@ if(isset($_GET['logout'])) {
 if(isset($_POST['tour_booking']) && isset($_SESSION['user_id'])) {
     try {
         $pdo->beginTransaction();
+        if (!BookingTerms::acknowledged()) { throw new Exception(BookingTerms::MISSING_MESSAGE); }   // Phase 7.7: Terms must be accepted (server-side)
 
         $booking_date = $_POST['booking_date'];
         $number_of_guests = (int)$_POST['number_of_guests'];
@@ -362,13 +365,14 @@ if(isset($_POST['tour_booking']) && isset($_SESSION['user_id'])) {
     }
 }
 
+// Phase 7.9: owner + not cancelled + the tour's scheduled date+time has passed — FeedbackService, same rule as the Rate button.
+$fb_notice = $_SESSION['fb_notice'] ?? null; unset($_SESSION['fb_notice']);
 if(isset($_POST['submit_tour_feedback']) && isset($_SESSION['user_id'])) {
     try {
-        $booking_id = (int)$_POST['booking_id'];
-        $rating = (int)$_POST['rating'];
-        $stmt = $pdo->prepare("UPDATE tour_bookings SET feedback_rating = ?, feedback_text = ?, feedback_date = NOW(), feedback_is_anonymous = ? WHERE id = ?");
-        $stmt->execute([$_POST['rating'], $_POST['feedback'], isset($_POST['is_anonymous']) ? 1 : 0, $booking_id]);
-        $success = "Thank you for your feedback!";
+        $fb = FeedbackService::save($pdo, 'tour', $_POST['booking_id'] ?? '', (int)$_SESSION['user_id'], $_POST['rating'] ?? '', $_POST['feedback'] ?? '', isset($_POST['is_anonymous']), 'create');
+        $booking_id = $fb['id'];
+        $rating = $fb['rating'];
+        $_SESSION['fb_notice'] = ['ok', 'Thank you for your feedback!'];
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log(
@@ -380,18 +384,23 @@ if(isset($_POST['submit_tour_feedback']) && isset($_SESSION['user_id'])) {
                 'tour_booking'
             );
         }
-    } catch(Exception $e) {
-        $error = "Failed to submit feedback: " . $e->getMessage();
+        header('Location: tours.php?feedback_saved=1');
+        exit();
+    } catch (InvalidArgumentException $e) {
+        $fb_notice = ['err', $e->getMessage()];
+    } catch (Throwable $e) {
+        error_log('tour feedback failed: ' . $e->getMessage());
+        $fb_notice = ['err', 'Your feedback could not be saved right now. Please try again.'];
     }
 }
 
 if(isset($_POST['edit_tour_feedback']) && isset($_SESSION['user_id'])) {
     try {
-        $booking_id = (int)$_POST['booking_id'];
-        $rating = (int)$_POST['rating'];
-        $stmt = $pdo->prepare("UPDATE tour_bookings SET feedback_rating = ?, feedback_text = ?, feedback_date = NOW(), feedback_is_anonymous = ? WHERE id = ?");
-        $stmt->execute([$_POST['rating'], $_POST['feedback'], isset($_POST['is_anonymous']) ? 1 : 0, $booking_id]);
-        $success = "Your feedback has been updated successfully!";
+        // Phase 7.9: only the owner, only an existing rating (FeedbackService)
+        $fb = FeedbackService::save($pdo, 'tour', $_POST['booking_id'] ?? '', (int)$_SESSION['user_id'], $_POST['rating'] ?? '', $_POST['feedback'] ?? '', isset($_POST['is_anonymous']), 'edit');
+        $booking_id = $fb['id'];
+        $rating = $fb['rating'];
+        $_SESSION['fb_notice'] = ['ok', 'Your feedback has been updated successfully!'];
 
         if (class_exists('SystemLogger')) {
             SystemLogger::log(
@@ -403,8 +412,13 @@ if(isset($_POST['edit_tour_feedback']) && isset($_SESSION['user_id'])) {
                 'tour_booking'
             );
         }
-    } catch(Exception $e) {
-        $error = "Failed to update feedback: " . $e->getMessage();
+        header('Location: tours.php?feedback_saved=1');
+        exit();
+    } catch (InvalidArgumentException $e) {
+        $fb_notice = ['err', $e->getMessage()];
+    } catch (Throwable $e) {
+        error_log('tour feedback update failed: ' . $e->getMessage());
+        $fb_notice = ['err', 'Your feedback could not be saved right now. Please try again.'];
     }
 }
 
@@ -559,7 +573,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     <title>Boat Tours - Hundred Islands</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/design-system.css">
+    <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1094,6 +1108,11 @@ $is_logged_in = isset($_SESSION['user_id']);
 <?php include 'components/navbar.php'; ?>
 
 <!-- PAGE HERO -->
+<?php if (!empty($fb_notice)): ?>
+<div class="alert-overlay fb-notice">
+    <div class="alert-box <?php echo $fb_notice[0] === 'ok' ? 'success' : 'error'; ?>"><i class="fas <?php echo $fb_notice[0] === 'ok' ? 'fa-check-circle' : 'fa-exclamation-circle'; ?>"></i> <?php echo htmlspecialchars($fb_notice[1]); ?></div>
+</div>
+<?php endif; ?>
 <?php if (isset($error) && strpos((string)$error, 'Booking failed') === 0): ?>
 <div class="alert-overlay">
     <div class="alert-box error"><i class="fas fa-exclamation-circle"></i> <?php echo htmlspecialchars($error); ?></div>
@@ -1260,7 +1279,7 @@ $is_logged_in = isset($_SESSION['user_id']);
                                     </a>
                                 <?php endif; ?>
 
-                                <?php if(($booking['booking_status'] == 'completed' || PaymentService::isSecured($booking)) && empty($booking['feedback_text'])): ?>
+                                <?php if(FeedbackService::canRate($pdo, 'tour', $booking)): /* Phase 7.9: only after the tour's scheduled date+time */ ?>
                                     <button class="btn-sm btn-rate" onclick="openTourFeedbackModal(<?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['tour_name']); ?>', '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
                                         <i class="fas fa-star"></i> Rate
                                     </button>
@@ -1317,6 +1336,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         </div>
         <div class="modal-body" style="padding: 25px; max-height: 80vh; overflow-y: auto;">
             <form method="POST" id="tourBookingForm">
+                <?php echo BookingTerms::field(); ?>
                 <input type="hidden" name="tour_id" id="tour_booking_id">
                 <input type="hidden" name="tour_name" id="tour_booking_name">
 
@@ -1681,6 +1701,7 @@ $is_logged_in = isset($_SESSION['user_id']);
     </div>
 </div>
 
+<?php BookingTerms::render($pdo); ?>
 <?php include 'components/footer.php'; ?>
 
 <div class="modal terms-modal" id="termsModal"
@@ -2508,7 +2529,10 @@ document.getElementById('tourBookingForm').addEventListener('submit', function(e
     let guests = parseInt(document.getElementById('tour_guests').value);
     if (isNaN(guests) || guests < 1) { e.preventDefault(); alert('Please enter a valid number of guests (minimum 1).'); return false; }
     if (guests > currentMaxGuests) { e.preventDefault(); alert('Maximum of ' + currentMaxGuests + ' guests allowed.'); return false; }
-    return true;
+    // Phase 7.7: show the Terms first; the booking is only submitted after the guest accepts.
+    e.preventDefault();
+    BookingTerms.gate(this, 'tour_booking');
+    return false;
 });
 
 window.onclick = function(event) {

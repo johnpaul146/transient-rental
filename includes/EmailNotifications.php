@@ -6,6 +6,8 @@ require_once __DIR__ . '/../config/mail_config.php';
 class EmailNotifications {
 
     public static $lastError = '';
+    /** Optional replacement for the "pay the reservation fee, then upload the receipt" note (walk-in bookings). */
+    private static $confirmationNote = null;
     private static $columnCache = [];
 
     // ============================================================
@@ -497,8 +499,9 @@ class EmailNotifications {
     // 📧 SEND METHODS
     // ============================================================
 
-    public static function sendBookingConfirmation($booking_id, $booking_type, $pdo) {
+    public static function sendBookingConfirmation($booking_id, $booking_type, $pdo, $options = []) {
         try {
+            self::$confirmationNote = (is_array($options) && !empty($options['note_html'])) ? (string)$options['note_html'] : null;
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
             if (!$booking || (empty($booking['email']) || self::isPlaceholderEmail($booking['email']))) {
                 self::$lastError = !$booking ? 'Booking not found.' : 'Guest has no email on file.';
@@ -526,6 +529,8 @@ class EmailNotifications {
             self::$lastError = $e->getMessage();
             error_log("sendBookingConfirmation error: " . $e->getMessage());
             return false;
+        } finally {
+            self::$confirmationNote = null;
         }
     }
 
@@ -890,6 +895,22 @@ class EmailNotifications {
         }
     }
 
+    /** Phase 7.9.3: "Nov 26, 2026 · 10:00 AM" (date only when the time is empty/invalid). */
+    private static function fmtDateAt($date, $time = '') {
+        if (empty($date) || $date === '0000-00-00') return 'N/A';
+        $ts = strtotime(substr((string)$date, 0, 10));
+        if ($ts === false) return (string)$date;
+        $out = date('M j, Y', $ts);
+        $time = trim((string)$time);
+        if (preg_match('/^([01]\d|2[0-3]):[0-5]\d/', $time)) $out .= ' · ' . date('g:i A', strtotime('2000-01-01 ' . substr($time, 0, 5)));
+        return $out;
+    }
+
+    /** Phase 7.9.3: "Old date · time → old out · time" for a rebooked HOUSE row. A NULL previous time (request made before the migration) falls back to the saved time. */
+    private static function houseScheduleText($in, $inTime, $out, $outTime) {
+        return self::fmtDateAt($in, $inTime) . ' → ' . self::fmtDateAt($out, $outTime);
+    }
+
     // ============================================================
     // 🎨 TEMPLATE BUILDERS — HOUSE / TOUR / FOOD
     // ============================================================
@@ -947,7 +968,7 @@ class EmailNotifications {
                 'Special Notes:'          => $notes,
             ]) . '
 
-            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.') . '
+            ' . self::totalBlock($total, (self::$confirmationNote !== null ? self::$confirmationNote : '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.')) . '
 
             ' . self::noteBlock('<strong>⚠️ Important Check-In Reminders:</strong><br>
                 • Please arrive on time for your check-in.<br>
@@ -1232,9 +1253,11 @@ class EmailNotifications {
         $ref     = $booking['reference_number'] ?? 'N/A';
         $house   = htmlspecialchars($booking['item_name'] ?? 'House');
         $guest   = $booking['guest_name'] ?? $booking['username'] ?? 'Guest';
-        $new_dates = self::fmtDate($booking['check_in_date'] ?? null) . ' → ' . self::fmtDate($booking['check_out_date'] ?? null);
+        // Phase 7.9.3: dates AND times (the new schedule is the row; the old one is previous_* with the saved time as fallback for older requests)
+        $new_dates = self::houseScheduleText($booking['check_in_date'] ?? null, $booking['check_in_time'] ?? '', $booking['check_out_date'] ?? null, $booking['check_out_time'] ?? '');
         $old_dates = (!empty($booking['previous_check_in_date']) && !empty($booking['previous_check_out_date']))
-            ? self::fmtDate($booking['previous_check_in_date']) . ' → ' . self::fmtDate($booking['previous_check_out_date'])
+            ? self::houseScheduleText($booking['previous_check_in_date'], !empty($booking['previous_check_in_time']) ? $booking['previous_check_in_time'] : ($booking['check_in_time'] ?? ''),
+                                      $booking['previous_check_out_date'], !empty($booking['previous_check_out_time']) ? $booking['previous_check_out_time'] : ($booking['check_out_time'] ?? ''))
             : 'Previous dates unavailable';
         $pax = (int)($booking['number_of_guests'] ?? 1);
         $rebook_count = (int)($booking['rebook_count'] ?? 1);
@@ -1258,7 +1281,7 @@ class EmailNotifications {
             'title'         => 'Rebook Awaiting Confirmation',
             'ref_code'      => $ref,
             'greeting_name' => 'Admin',
-            'intro_text'    => 'A guest has updated their stay dates on an already-paid booking.',
+            'intro_text'    => 'A guest has updated their stay schedule (dates and/or check-in time) on an already-paid booking.',
             'content'       => $content,
             'gradient_from' => '#0B2447',
             'gradient_to'   => '#4DA6D9',
@@ -1269,14 +1292,21 @@ class EmailNotifications {
         $ref   = $booking['reference_number'] ?? 'N/A';
         $house = htmlspecialchars($booking['item_name'] ?? 'House');
         $guest = $booking['guest_name'] ?? $booking['username'] ?? 'Guest';
-        $checkin  = self::fmtDate($booking['check_in_date']  ?? null);
-        $checkout = self::fmtDate($booking['check_out_date'] ?? null);
+        $checkin  = self::fmtDateAt($booking['check_in_date']  ?? null, $booking['check_in_time'] ?? '');     // Phase 7.9.3: date · time
+        $checkout = self::fmtDateAt($booking['check_out_date'] ?? null, $booking['check_out_time'] ?? '');
         $pax  = (int)($booking['number_of_guests'] ?? 1);
+        $prevBlock = '';
+        if (!empty($booking['previous_check_in_date']) && !empty($booking['previous_check_out_date'])) {
+            $prevBlock = self::noteBlock('<strong>Previous schedule:</strong> <span style="text-decoration: line-through;">' . self::houseScheduleText(
+                $booking['previous_check_in_date'], !empty($booking['previous_check_in_time']) ? $booking['previous_check_in_time'] : ($booking['check_in_time'] ?? ''),
+                $booking['previous_check_out_date'], !empty($booking['previous_check_out_time']) ? $booking['previous_check_out_time'] : ($booking['check_out_time'] ?? '')) . '</span>', 'blue');
+        }
 
         $content = '
-            ' . self::noteBlock('<strong>🎉 Your new stay dates are officially locked in!</strong><br>Our management has confirmed your rebook. Your payment remains valid.', 'blue') . '
+            ' . self::noteBlock('<strong>🎉 Your new stay schedule is officially locked in!</strong><br>Our management has confirmed your rebook. Your payment remains valid.', 'blue') . '
 
             ' . self::datePairBlock('🛬 NEW CHECK-IN', $checkin, '🛫 NEW CHECK-OUT', $checkout) . '
+            ' . $prevBlock . '
 
             ' . self::infoCardBlock('📋 REBOOK DETAILS', [
                 'House:'            => $house,
@@ -1305,8 +1335,8 @@ class EmailNotifications {
         $guest = $booking['guest_name'] ?? $booking['username'] ?? 'Guest';
         $pax   = (int)($booking['number_of_guests'] ?? 1);
 
-        $restored_checkin  = self::fmtDate($booking['check_in_date']  ?? null);
-        $restored_checkout = self::fmtDate($booking['check_out_date'] ?? null);
+        $restored_checkin  = self::fmtDateAt($booking['check_in_date']  ?? null, $booking['check_in_time'] ?? '');     // Phase 7.9.3: restored date · time
+        $restored_checkout = self::fmtDateAt($booking['check_out_date'] ?? null, $booking['check_out_time'] ?? '');
 
         if (empty($reason)) $reason = 'Rebook request could not be approved.';
 
@@ -1396,7 +1426,7 @@ class EmailNotifications {
 
             ' . self::packageItemsBlock($pkg) . '
 
-            ' . self::totalBlock($total, '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.') . '
+            ' . self::totalBlock($total, (self::$confirmationNote !== null ? self::$confirmationNote : '💳 <strong>GCash Payment Verification:</strong> Pay the reservation fee, then upload the receipt screenshot and GCash reference in your profile to secure your booking.')) . '
 
             ' . self::noteBlock('<strong>⚠️ Important Reminders:</strong><br>
                 • Please arrive on time for each scheduled item.<br>
@@ -1671,5 +1701,164 @@ class EmailNotifications {
             'gradient_from' => '#0B2447',
             'gradient_to'   => '#4DA6D9',
         ]);
+    }
+
+    // ============================================================
+    // 🚨 Phase 7.9 — EMERGENCY REBOOK NOTIFICATIONS
+    // Always called AFTER the request / approval / rejection / cancellation has been committed. Best effort: never
+    // throws, never touches the request, the booking or any payment; a failed send is logged (no SMTP details shown).
+    //   request -> guest acknowledgement + Admin/Staff alert
+    //   approve -> guest "approved" (new schedule, payment carried forward, no new fee)
+    //   reject  -> guest "rejected" (requested schedule + the rejection reason entered by Admin/Staff)
+    //   cancel  -> Admin/Staff "cancelled by the guest" (so an earlier alert is not mistaken for an open request)
+    // A Package request lives on the package itself, so a Package gets ONE e-mail per event — never one per House/Tour/Food part.
+    // Admin/Staff recipients = the existing getAdminEmails() convention (admin + staff accounts with an e-mail); there is no
+    // hard-coded fallback address here, and placeholder (@walkin.invalid) addresses are never used.
+    // Returns ['guest' => true|false|null, 'admin' => true|false|null]  (null = not applicable / no valid recipient).
+    // ============================================================
+    public static function notifyEmergency($pdo, $event, $requestId) {
+        $res = ['guest' => null, 'admin' => null];
+        try {
+            if (!in_array($event, ['request', 'approve', 'reject', 'cancel'], true)) return $res;
+            $req = self::emergencyRequestData($pdo, $requestId);
+            if (!$req) return $res;
+            // guest and Admin/Staff mails are independent: one failing never skips the other
+            if ($event === 'request' || $event === 'approve' || $event === 'reject') {
+                try { $res['guest'] = self::emergencyGuestMail($req, $event); }
+                catch (\Throwable $e) { $res['guest'] = false; error_log('notifyEmergency(' . $event . ') guest mail failed: ' . get_class($e)); }
+            }
+            if ($event === 'request' || $event === 'cancel') {
+                try { $res['admin'] = self::emergencyAdminMail($pdo, $req, $event); }
+                catch (\Throwable $e) { $res['admin'] = false; error_log('notifyEmergency(' . $event . ') admin mail failed: ' . get_class($e)); }
+            }
+        } catch (\Throwable $e) {
+            self::$lastError = 'Emergency notification failed.';
+            error_log('notifyEmergency(' . $event . ') failed: ' . get_class($e));
+        }
+        return $res;
+    }
+
+    private static function emergencyRequestData($pdo, $requestId) {
+        $st = $pdo->prepare("SELECT r.*, COALESCE(NULLIF(g.full_name, ''), NULLIF(u.fullname, ''), u.username, 'Guest') AS guest_name, u.email AS guest_email
+                               FROM emergency_rebook_requests r
+                               LEFT JOIN guests g ON g.id = r.guest_id
+                               LEFT JOIN users u ON u.id = g.user_id
+                              WHERE r.id = ?");
+        $st->execute([(int)$requestId]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$r || !in_array($r['booking_type'], ['house', 'tour', 'food', 'package'], true)) return null;
+        if (!class_exists('RebookService')) require_once __DIR__ . '/RebookService.php';
+        $type = $r['booking_type'];
+        $lines = function ($json) use ($type) {
+            $s = json_decode((string)$json, true);
+            return (is_array($s) && class_exists('RebookService')) ? RebookService::scheduleLines($type, $s) : [];
+        };
+        $r['current_lines'] = $lines($r['original_schedule']);
+        $r['requested_lines'] = $lines($r['requested_schedule']);
+        $r['service_label'] = ['house' => 'House / Stay', 'tour' => 'Tour / Boat', 'food' => 'Food', 'package' => 'Package'][$type];
+        return $r;
+    }
+
+    private static function emergencyValidAddress($email) {
+        $email = trim((string)$email);
+        return $email !== '' && !self::isPlaceholderEmail($email) && filter_var($email, FILTER_VALIDATE_EMAIL) ? $email : null;
+    }
+
+    private static function emergencyLinesHtml(array $lines) {
+        if (!$lines) return '—';
+        return implode('<br>', array_map(function ($l) { return '<strong>' . htmlspecialchars($l['label']) . ':</strong> ' . htmlspecialchars($l['text']); }, $lines));
+    }
+
+    private static function emergencySend($to, $toName, $subject, $html) {
+        $mail = MailConfig::getInstance()->getMailer();
+        $mail->clearAddresses();
+        foreach ((array)$to as $addr) $mail->addAddress($addr, count((array)$to) === 1 ? $toName : '');
+        $mail->Subject = $subject;
+        $mail->Body = $html;
+        $mail->AltBody = self::toPlainText($html);
+        $ok = (bool)$mail->send();
+        if (!$ok) { self::$lastError = 'Mail not sent.'; error_log('Emergency e-mail not sent (' . $subject . ')'); }
+        return $ok;
+    }
+
+    private static function emergencyGuestMail(array $r, $event) {
+        $to = self::emergencyValidAddress($r['guest_email'] ?? '');
+        if ($to === null) return null;                                   // no real address: nothing to send (the action itself already succeeded)
+        $ref = (string)$r['reference_number'];
+        $svc = htmlspecialchars($r['service_label']);
+        $cur = self::emergencyLinesHtml($r['current_lines']);
+        $new = self::emergencyLinesHtml($r['requested_lines']);
+        if ($event === 'request') {
+            $subject = "🚨 Emergency Rebook Request Received - #{$ref}";
+            $title = 'Emergency Rebook Request Received';
+            $intro = 'We received your Emergency Rebook request. Our team will review it and e-mail you the decision. Your current booking stays exactly as it is until then.';
+            $content = self::infoCardBlock('🚨 YOUR EMERGENCY REQUEST', [
+                    'Reference:' => htmlspecialchars($ref), 'Service:' => $svc,
+                    'Current schedule:' => $cur, 'Requested schedule:' => $new,
+                    'Your reason:' => nl2br(htmlspecialchars((string)$r['reason'])),
+                    'Status:' => '<span style="color:#fcd34d;">Awaiting review</span>',
+                ])
+                . self::noteBlock('Your payment stays on the booking. No new reservation fee is charged for an Emergency Rebook, and the no-refund rule still applies.', 'amber');
+            $grad = '#9a3412';
+        } elseif ($event === 'approve') {
+            $subject = "✅ Emergency Rebook Approved - #{$ref}";
+            $title = 'Emergency Rebook Approved';
+            $intro = 'Good news — your Emergency Rebook request has been approved. Your booking now has the new schedule below.';
+            $content = self::infoCardBlock('✅ CONFIRMED NEW SCHEDULE', [
+                    'Reference:' => htmlspecialchars($ref), 'Service:' => $svc,
+                    'Previous schedule:' => $cur, 'New schedule:' => $new,
+                ])
+                . self::noteBlock('Your payment has been carried forward to the new schedule. <strong>No new reservation fee</strong> is charged. Any remaining balance is settled as before.', 'green');
+            $grad = '#047857';
+        } else {
+            $subject = "❌ Emergency Rebook Not Approved - #{$ref}";
+            $title = 'Emergency Rebook Not Approved';
+            $intro = 'We are sorry — your Emergency Rebook request could not be approved. Your booking keeps its current schedule and your payment is unchanged.';
+            $content = self::infoCardBlock('❌ REQUEST DECISION', [
+                    'Reference:' => htmlspecialchars($ref), 'Service:' => $svc,
+                    'Requested schedule:' => $new,
+                    'Reason:' => nl2br(htmlspecialchars((string)($r['review_note'] ?? ''))),
+                ])
+                . self::noteBlock('Your current schedule stays in place. If you still need to change your plans, please contact us.', 'red');
+            $grad = '#991b1b';
+        }
+        $html = self::wrapTemplate(['badge_text' => '🌴 TRANSIT HOUSE & TOURS', 'title' => $title, 'ref_code' => $ref,
+                                    'greeting_name' => (string)$r['guest_name'], 'intro_text' => $intro, 'content' => $content,
+                                    'gradient_from' => '#0B2447', 'gradient_to' => $grad]);
+        return self::emergencySend($to, (string)$r['guest_name'], $subject, $html);
+    }
+
+    private static function emergencyAdminMail($pdo, array $r, $event) {
+        $to = [];
+        foreach (self::getAdminEmails($pdo) as $a) {
+            $e = self::emergencyValidAddress($a['email'] ?? '');
+            if ($e !== null && !in_array(strtolower($e), array_map('strtolower', $to), true)) $to[] = $e;
+        }
+        if (!$to) return null;                                           // no configured Admin/Staff address: skip (never a hard-coded one)
+        $ref = (string)$r['reference_number'];
+        $rows = [
+            'Guest:' => htmlspecialchars((string)$r['guest_name']),
+            'Reference:' => htmlspecialchars($ref),
+            'Service:' => htmlspecialchars($r['service_label']),
+            'Current schedule:' => self::emergencyLinesHtml($r['current_lines']),
+            'Requested schedule:' => self::emergencyLinesHtml($r['requested_lines']),
+        ];
+        if ($event === 'request') {
+            $rows['Reason:'] = nl2br(htmlspecialchars((string)$r['reason']));
+            $rows['Contact number:'] = htmlspecialchars((string)$r['contact_number']);
+            $subject = "🚨 New Emergency Rebook Request - #{$ref}";
+            $title = 'New Emergency Rebook Request';
+            $intro = 'A guest submitted an Emergency Rebook request. Review it in <strong>Booking Management → Rebooks → Emergency Rebook Requests</strong> (Approve re-checks availability; Reject needs a reason).';
+            $note = self::noteBlock('Nothing has changed on the booking yet. The payment stays as it is; no new fee, no refund.', 'amber');
+        } else {
+            $subject = "↩️ Emergency Rebook Request Cancelled by Guest - #{$ref}";
+            $title = 'Emergency Request Cancelled';
+            $intro = 'The guest cancelled their pending Emergency Rebook request. <strong>No action is needed</strong> — please disregard the earlier request e-mail for this booking.';
+            $note = self::noteBlock('The booking keeps its current schedule and payment.', 'blue');
+        }
+        $html = self::wrapTemplate(['badge_text' => '🚨 EMERGENCY REBOOK', 'title' => $title, 'ref_code' => $ref, 'greeting_name' => 'Admin',
+                                    'intro_text' => $intro, 'content' => self::infoCardBlock('📋 REQUEST DETAILS', $rows) . $note,
+                                    'gradient_from' => '#0B2447', 'gradient_to' => '#9a3412']);
+        return self::emergencySend($to, 'Admin', $subject, $html);
     }
 }

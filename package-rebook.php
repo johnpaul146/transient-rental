@@ -22,6 +22,7 @@ require_once 'includes/TermsGate.php';
 TermsGate::enforceGuest($pdo);
 require_once 'includes/PaymentService.php';
 require_once 'includes/RebookService.php';
+require_once 'includes/emergency-ui.php';   // Phase 7.7 Emergency Rebook
 if (file_exists('includes/SystemLogger.php')) require_once 'includes/SystemLogger.php';
 
 if (!isset($_SESSION['user_id'])) { header('Location: index.php'); exit(); }
@@ -84,6 +85,19 @@ $blockReason = RebookService::serviceBlockReason('package', $pkg);
 $parts = RebookService::packageView($pdo, $pkg);
 $startDate = RebookService::packageStartDate($parts);
 $pending = RebookService::pendingRequest($pdo, 'package', $pkg_id);
+// ---- Phase 7.7 Emergency Rebook (guest only). Same page, same calendars, same validation: ONLY the 2-rebook limit and the 7-day window are lifted.
+$emPending = EmergencyRebookService::pendingRequest($pdo, 'package', $pkg_id);
+$emergency = !$isAssist && ($emPending || EmergencyRebookUI::wanted($isAssist));
+$emEl = EmergencyRebookService::eligibility('package', $pkg);
+$emOffer = !$isAssist && !$pending && !$emPending && $emEl['eligible'] && EmergencyRebookService::tableReady($pdo);   // show the Emergency link on the normal screen
+$emContact = '';
+if ($emergency) {
+    if (!EmergencyRebookService::tableReady($pdo)) $blockReason = 'Emergency Rebook is not available right now.';
+    elseif ($pending) $blockReason = RebookService::PENDING_MESSAGE;                  // a normal rebook request is waiting: never both
+    else $blockReason = ($emEl['eligible'] || $emPending) ? null : $emEl['message'];
+    $pending = $emPending;                                                              // show the Emergency request while it waits
+    $emContact = EmergencyRebookUI::contactFor($pdo, $guest_id);
+}
 $cur = RebookService::currentSchedule('package', $pkg, $parts);
 $capacity = $parts['house'] ? (int)RebookService::houseView($pdo, $parts['house'])['capacity'] : 0;
 $tourTimes = $cur['tour'] ? RebookService::timeChoices('tour', $cur['tour']['time']) : [];
@@ -142,6 +156,11 @@ if (isset($_POST['rebook_package'])) {
     }
     $pending = RebookService::pendingRequest($pdo, 'package', $pkg_id);
 }
+if ($emergency && isset($_POST['emergency_rebook']) && !$isAssist) {
+    $error = EmergencyRebookUI::handlePost($pdo, 'package', $pkg_id, $guest_id, $csrf);      // redirects to the dashboard on success
+    $emPending = EmergencyRebookService::pendingRequest($pdo, 'package', $pkg_id);
+    if ($emPending) $pending = $emPending;
+}
 $canRebook = ($blockReason === null && $startDate && !$pending);
 
 $remaining = RebookService::remaining($pkg);
@@ -171,6 +190,7 @@ $hm = function ($time) { return substr((string)$time, 0, 5); };
 <title>Rebook Package - <?php echo htmlspecialchars($site_name); ?></title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<?php echo EmergencyRebookUI::css(); ?>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;line-height:1.5}
@@ -219,6 +239,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day{text-align:center;padding:9px 0;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid transparent;background:#ecfdf5;color:#065f46;font-weight:600;min-height:38px}
 .cal-grid .day:hover:not(.off):not(.sel){border-color:#10b981}
 .cal-grid .day.off{background:#f1f5f9;color:#94a3b8;text-decoration:line-through;cursor:not-allowed;font-weight:500}
+.cal-grid .day.nostart{background:#fff;color:#92400e;border:1px dashed #f59e0b;cursor:not-allowed;font-weight:600;text-decoration:none}
+.cal-grid .day.today{position:relative}
+.cal-grid .day.today::after{content:'';position:absolute;left:50%;bottom:3px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:#0B3D91}
+.cal-grid .day.sel.today::after{background:#fff}
 .cal-grid .day.cur{box-shadow:inset 0 0 0 2px #F4B400}
 .cal-grid .day.sel{background:#4DA6D9;color:#fff;box-shadow:0 4px 12px rgba(77,166,217,.4);text-decoration:none}
 .cal-grid .day.rng{background:#dbeafe;color:#1e3a8a;text-decoration:none}
@@ -259,11 +283,13 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <div class="pr-wrap">
     <div class="pr-title">
         <i class="fas fa-redo-alt"></i>
-        <h1>Rebook Package <small>Ref: <?php echo htmlspecialchars($pkg['reference_number']); ?><?php if ($isAssist && $guestLabel !== ''): ?> · Guest: <?php echo htmlspecialchars($guestLabel); ?><?php endif; ?></small></h1>
+        <h1><?php echo $emergency ? 'Emergency Rebook — Package' : 'Rebook Package'; ?> <small>Ref: <?php echo htmlspecialchars($pkg['reference_number']); ?><?php if ($isAssist && $guestLabel !== ''): ?> · Guest: <?php echo htmlspecialchars($guestLabel); ?><?php endif; ?></small></h1>
     </div>
 
     <?php if ($error !== ''): ?><div class="pr-alert err"><i class="fas fa-exclamation-circle"></i><span><?php echo htmlspecialchars($error); ?></span></div><?php endif; ?>
     <?php if ($blockReason !== null): ?><div class="pr-alert info"><i class="fas fa-info-circle"></i><span><?php echo htmlspecialchars($blockReason); ?></span></div><?php endif; ?>
+    <?php if ($emOffer && !$emergency): ?><div style="margin-bottom:14px;"><?php echo EmergencyRebookUI::link('package-rebook.php', $pkg_id); ?></div><?php endif; ?>
+    <?php if ($emergency && $blockReason === null): echo EmergencyRebookUI::banner('package', $emPending ? $emPending['eligibility'] : $emEl['reason']); endif; ?>
 
     <div class="pr-grid">
         <div>
@@ -296,6 +322,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <div class="pr-stat <?php echo $daysLeft <= 2 ? 'warn' : ''; ?>"><b><?php echo $daysLeft; ?></b><small>Day(s) left</small></div>
                     <div class="pr-stat"><b><?php echo $deadline ? htmlspecialchars(date('M j', strtotime($deadline))) : '—'; ?></b><small>Deadline</small></div>
                 </div>
+                <?php if ($emergency): ?>
+                <ul class="pr-rules">
+                    <li><i class="fas fa-exclamation-triangle" style="color:#ea580c"></i><span><strong>Emergency Rebook</strong> is only for packages whose normal rebook is closed (limit reached or 7-day window passed).</span></li>
+                    <li><i class="fas fa-check-circle"></i><span>Each part gets <strong>its own new schedule</strong>, and it is <strong>one request for the whole package</strong>: all parts are approved together or none.</span></li>
+                    <?php if ($h && ($t || $f)): ?><li><i class="fas fa-check-circle"></i><span>The <?php echo $t && $f ? 'tour and food' : ($t ? 'tour' : 'food'); ?> must still be <strong>during the new house stay</strong>.</span></li><?php endif; ?>
+                    <li><i class="fas fa-check-circle"></i><span>Your payment is <strong>carried forward</strong>: one payment, no new reservation fee, price unchanged.</span></li>
+                    <li><i class="fas fa-hourglass-half" style="color:#ea580c"></i><span><strong>This is a request.</strong> It still requires Admin/Staff approval and availability; it does not guarantee rescheduling. Until then you keep your current schedule, and you can cancel it from the dashboard.</span></li>
+                </ul>
+                <?php else: ?>
                 <ul class="pr-rules">
                     <li><i class="fas fa-check-circle"></i><span>Each part gets <strong>its own new schedule</strong>. You can change one part and keep the others.</span></li>
                     <?php if ($h): ?><li><i class="fas fa-check-circle"></i><span><strong>House:</strong> same unit and the same <?php echo (int)$cur['house']['nights']; ?> night<?php echo (int)$cur['house']['nights'] === 1 ? '' : 's'; ?>. Check-out is automatic and its time follows the check-in time. Up to <?php echo (int)$capacity; ?> guests.</span></li><?php endif; ?>
@@ -304,12 +339,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <li><i class="fas fa-check-circle"></i><span>Up to <?php echo $maxRebooks; ?> rebooks per booking, within <?php echo RebookService::WINDOW_DAYS; ?> days from the booking date.</span></li>
                     <li><i class="fas fa-hourglass-half" style="color:#f59e0b"></i><span><strong>This is a request.</strong> Admin/Staff confirm the whole package at once; if any part was taken meanwhile, nothing changes.</span></li>
                 </ul>
+                <?php endif; ?>
             </div>
         </div>
 
         <div class="pr-card">
             <h2><i class="fas fa-calendar-alt"></i> Choose the new schedule</h2>
-            <?php if ($pending): ?>
+            <?php if ($pending && $emergency): ?>
+            <?php echo EmergencyRebookUI::pendingBox('package', $pending, 'profile.php'); ?>
+            <?php elseif ($pending): ?>
             <div class="pr-pending"><b><i class="fas fa-hourglass-half"></i> Pending rebook — waiting for admin confirmation</b>
                 <?php foreach (RebookService::scheduleLines('package', $pending['requested']) as $pl): ?><div class="row">Requested <?php echo htmlspecialchars($pl['label']); ?>: <strong><?php echo htmlspecialchars($pl['text']); ?></strong></div><?php endforeach; ?>
                 <div class="row" style="font-size:13px;">Requested on <?php echo htmlspecialchars(date('M j, Y g:i A', strtotime($pending['requested_at']))); ?>. <?php echo $isAssist ? 'Confirm or reject it in the Rebooks tab.' : 'You can cancel it from your dashboard.'; ?></div>
@@ -317,7 +355,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             <p class="pr-hint"><a href="<?php echo $isAssist ? 'booking-management.php?tab=rebook' : 'profile.php'; ?>"><?php echo $isAssist ? 'Open the Rebooks tab' : 'Back to my bookings'; ?></a></p>
             <?php elseif ($canRebook): ?>
             <form method="POST" id="rebookForm">
-                <input type="hidden" name="rebook_package" value="1">
+                <input type="hidden" name="<?php echo $emergency ? 'emergency_rebook' : 'rebook_package'; ?>" value="1">
                 <input type="hidden" name="id" value="<?php echo (int)$pkg_id; ?>">
                 <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($csrf); ?>">
                 <?php foreach (['house' => ['fa-home', 'House', 'Pick the new check-in date'], 'tour' => ['fa-ship', 'Tour / Boat', 'Pick the new tour date'], 'food' => ['fa-utensils', 'Food', 'Pick the new food date']] as $pk => $pm): if (!$cur[$pk]) continue;
@@ -354,11 +392,12 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     <?php endif; ?>
                 </section>
                 <?php endforeach; ?>
-                <div class="cal-legend"><span><i style="background:#ecfdf5;border:1px solid #10b981"></i>Available</span><span><i style="background:#f1f5f9;border:1px solid #cbd5e1"></i>Unavailable</span><span><i style="background:#4DA6D9"></i>Selected</span><?php if ($h): ?><span><i style="background:#dbeafe"></i>House stay</span><?php endif; ?><span><i style="box-shadow:inset 0 0 0 2px #F4B400"></i>Current</span></div>
+                <div class="cal-legend"><span><i style="background:#ecfdf5;border:1px solid #10b981"></i>Available</span><span><i style="background:#f1f5f9;border:1px solid #cbd5e1"></i>Booked / blocked / unavailable</span><span><i style="background:#4DA6D9"></i>Selected</span><?php if ($h): ?><span><i style="background:#dbeafe"></i>House stay</span><span><i style="background:#fff;border:1px dashed #f59e0b"></i>Free night, but the house stay can't start here</span><?php endif; ?><span><i style="box-shadow:inset 0 0 0 2px #F4B400"></i>Current</span><span><i style="background:#fff;border:1px solid #cbd5e1;position:relative"><b style="position:absolute;left:3px;top:3px;width:5px;height:5px;border-radius:50%;background:#0B3D91"></b></i>Today</span></div>
                 <div class="cal-note" id="calNote"></div>
                 <div class="pr-preview" id="preview"></div>
-                <button type="submit" class="pr-btn" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> Submit Rebook Request</button>
-                <p class="pr-hint">One request for the whole package. It waits for Admin/Staff confirmation; <?php echo $isAssist ? 'the guest\'s' : 'your'; ?> payment stays as it is.</p>
+                <?php if ($emergency) echo EmergencyRebookUI::fields($emContact); ?>
+                <button type="submit" class="pr-btn<?php echo $emergency ? ' em-btn' : ''; ?>" id="submitBtn" disabled><i class="fas fa-paper-plane"></i> <?php echo $emergency ? 'Submit Emergency Request' : 'Submit Rebook Request'; ?></button>
+                <p class="pr-hint"><?php echo $emergency ? 'This is an Emergency Rebook request and still requires Admin/Staff approval. ' : ''; ?>One request for the whole package. It waits for Admin/Staff confirmation; <?php echo $isAssist ? 'the guest\'s' : 'your'; ?> payment stays as it is.</p>
             </form>
             <?php else: ?>
             <p style="font-size:14px;color:#64748b;">This package cannot be rebooked right now.</p>
@@ -368,10 +407,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 </div>
 
 <?php if ($canRebook): ?>
-<?php require __DIR__ . '/includes/rebook-confirm.php'; ?>
+<?php $rbcEmergency = $emergency; require __DIR__ . '/includes/rebook-confirm.php'; ?>
+<?php if ($emergency) echo EmergencyRebookUI::js(); ?>
 <script>
 (function () {
-    var PKG_ID = <?php echo (int)$pkg_id; ?>;
+    var PKG_ID = <?php echo (int)$pkg_id; ?>, EMQ = <?php echo $emergency ? "'&emergency=1'" : "''"; ?>;
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var NIGHTS = <?php echo $cur['house'] ? (int)$cur['house']['nights'] : 0; ?>;
@@ -402,13 +442,17 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             for (var i = 0; i < first; i++) h += '<div class="day blank"></div>';
             for (var d = 1; d <= n; d++) {
                 var ds = ym + '-' + pad(d), cls = 'day', r = info ? info[ds] : null;
+                // House only: nostart = that night is free, but the package stay cannot BEGIN here (Phase 7.9: not shown as booked)
+                var nostart = !!(part === 'house' && r && !r.ok && r.kind === 'start' && ds >= TODAY && ds <= MAXD);
                 var off = ds < TODAY || ds > MAXD || (r && !r.ok);
                 if (!info) cls += ' loading';
                 if (ds === sel) cls += ' sel';
                 else if (part === 'house' && sel && ds > sel && ds < out) cls += ' rng';
                 else if (part === 'house' && ds === out) cls += ' outd';
+                else if (nostart) cls += ' nostart';
                 else if (off) cls += ' off';
                 if (ds === CUR[part]) cls += ' cur';
+                if (ds === TODAY) cls += ' today';
                 h += '<div class="' + cls + '" data-d="' + ds + '" role="button" aria-disabled="' + (off ? 'true' : 'false') + '">' + d + '</div>';
             }
             grid.innerHTML = h;
@@ -417,7 +461,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             var ym = y + '-' + pad(m + 1), key = ym + ctx(), my = ++token;
             if (cache[key]) { info = cache[key]; draw(); return; }
             info = null; draw();
-            fetch('package-rebook.php?id=' + PKG_ID + '&ajax=month&part=' + part + '&ym=' + ym + ctx(), { credentials: 'same-origin' })
+            fetch('package-rebook.php?id=' + PKG_ID + EMQ + '&ajax=month&part=' + part + '&ym=' + ym + ctx(), { credentials: 'same-origin' })
                 .then(function (r) { return r.json(); })
                 .then(function (j) { if (my !== token) return; if (j.days) { cache[key] = j.days; info = j.days; draw(); } else { msg.textContent = j.error || 'Could not load availability.'; } })
                 .catch(function () { msg.textContent = 'Could not load availability. Please refresh.'; });
@@ -457,7 +501,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     function check() {
         var my = ++ptoken; last = null; btn.disabled = true; prev.style.display = 'none';
         note.textContent = 'Checking the new schedule…';
-        fetch('package-rebook.php?id=' + PKG_ID + '&ajax=check&' + params(), { credentials: 'same-origin' })
+        fetch('package-rebook.php?id=' + PKG_ID + EMQ + '&ajax=check&' + params(), { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (j) {
                 if (my !== ptoken) return;
@@ -480,7 +524,9 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         if (!last || btn.disabled) { e.preventDefault(); return; }
         var cur = {}; (last.current || []).forEach(function (l) { cur[l.label] = l.text; });
         var rows = (last.requested || []).map(function (r) { return { label: r.label, from: cur[r.label] || '', to: r.text }; });
-        if (!RebookConfirm.gate(e, rows)) return;          // first click opens the confirmation; the confirmed submit continues
+        var em = null;
+        if (window.EmergencyForm) { em = EmergencyForm.check(); if (!em.ok) { e.preventDefault(); return; } }
+        if (!RebookConfirm.gate(e, rows, em ? em.reason : '')) return;          // first click opens the confirmation; the confirmed submit continues
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';
     });
     houseAuto();
