@@ -90,10 +90,12 @@ class BookingTerms {
 .btm-overlay { position: fixed; inset: 0; z-index: 4000; display: none; align-items: center; justify-content: center; padding: 14px; background: rgba(15, 23, 42, 0.62); }
 .btm-overlay.show { display: flex; }
 .btm-box { position: relative; width: 100%; max-width: 640px; max-height: 94vh; max-height: 94dvh; display: flex; flex-direction: column; background: #fff; border-radius: 18px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.35); }
-.btm-head { position: relative; padding: 22px 56px 16px 22px; text-align: center; background: linear-gradient(135deg, #0B2447, #19376D); color: #fff; }
+.btm-head { position: relative; padding: 22px 56px 16px 22px; text-align: center; background: linear-gradient(135deg, #0B2447, #19376D); color: #fff !important; }
 .btm-head .btm-icon { font-size: 34px; color: #4DA6D9; margin-bottom: 6px; }
-.btm-head h3 { margin: 0; font-size: 19px; line-height: 1.25; }
-.btm-head p { margin: 4px 0 0; font-size: 12.5px; opacity: 0.85; }
+/* design-system.css normalizes all h1-h6 and p colors with !important.
+   These stronger booking-terms rules keep the dark modal header readable. */
+.btm-head h3 { margin: 0; font-size: 19px; line-height: 1.25; color: #fff !important; }
+.btm-head p { margin: 4px 0 0; font-size: 12.5px; color: rgba(255,255,255,0.92) !important; opacity: 1 !important; }
 .btm-close { position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(255,255,255,0.15); color: #fff; font-size: 15px; cursor: pointer; }
 .btm-close:hover { background: rgba(255,255,255,0.28); }
 .btm-scroll { flex: 1 1 auto; min-height: 120px; overflow-y: auto; padding: 18px 22px; -webkit-overflow-scrolling: touch; }

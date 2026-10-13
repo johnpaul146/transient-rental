@@ -1471,7 +1471,7 @@ $is_logged_in = isset($_SESSION['user_id']);
             background: #f8fafc; border-radius: 16px; margin: 15px 0;
         }
 
-        .payment-popup .qr-section img { max-width: 200px; height: auto; border-radius: 12px; }
+        .payment-popup .qr-section img { max-width: 200px; height: auto; border-radius: 12px; display: block; margin-left: auto; margin-right: auto; }
         .payment-popup .qr-section .no-qr { padding: 30px; background: #e2e8f0; border-radius: 12px; color: #94a3b8; }
 
         .payment-popup .instructions {

@@ -956,7 +956,7 @@ $is_logged_in = isset($_SESSION['user_id']);
         .payment-popup .payment-detail .value { font-weight: 600; color: #1e293b; text-align: right; overflow-wrap: anywhere; min-width: 0; }
         .payment-popup .payment-detail .value.amount { color: #10b981; font-size: 20px; }
         .payment-popup .qr-section { text-align: center; padding: 20px; background: #f8fafc; border-radius: 16px; margin: 15px 0; }
-        .payment-popup .qr-section img { max-width: 200px; width: 100%; height: auto; border-radius: 12px; }
+        .payment-popup .qr-section img { max-width: 200px; width: 100%; height: auto; border-radius: 12px; display: block; margin-left: auto; margin-right: auto; }
         .payment-popup .qr-section .no-qr { padding: 30px; background: #e2e8f0; border-radius: 12px; color: #94a3b8; }
         .payment-popup .instructions { background: #fef3c7; padding: 15px; border-radius: 12px; font-size: 13px; color: #92400e; margin: 15px 0; }
         .payment-popup .instructions strong { display: block; margin-bottom: 5px; }

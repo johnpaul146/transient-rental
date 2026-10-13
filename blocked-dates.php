@@ -291,6 +291,45 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
     $act = (string)$_POST['bd_action'];
 
+    // ---------- MONTH AVAILABILITY for the Block Availability calendar (AJAX → JSON, read-only) ----------
+    // Uses the SAME rules as the preview/save path: bd_booking_conflicts() (house = nights [check-in, check-out)) plus existing
+    // blocked_dates rows. Returns only the dates that are NOT free (booked / blocked) — no references, names or payment data.
+    // The preview + save handlers still re-validate on the server; this only draws the calendar.
+    if ($act === 'month_availability') {
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page.");
+            $resources = bd_resources();
+            $type = (string)($_POST['item_type'] ?? '');
+            $id   = (int)($_POST['item_id'] ?? 0);
+            if (!isset($resources[$type]) || $id <= 0) throw new Exception("Please choose a valid resource.");
+            $ym = (string)($_POST['month'] ?? '');
+            if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) throw new Exception("Invalid month.");
+            $first = $ym . '-01';
+            if ($first < date('Y-m-01', strtotime('-1 month')) || $first > date('Y-m-01', strtotime('+36 months'))) throw new Exception("That month is out of range.");
+            $cfg = $resources[$type];
+            $chk = $pdo->prepare("SELECT 1 FROM `{$cfg['table']}` WHERE id = ?");
+            $chk->execute([$id]);
+            if (!$chk->fetchColumn()) throw new Exception("That {$cfg['label']} no longer exists.");
+
+            $n = (int)date('t', strtotime($first));
+            $dates = [];
+            for ($d = 1; $d <= $n; $d++) $dates[] = sprintf('%s-%02d', $ym, $d);
+            $days = [];
+            foreach (array_keys(bd_booking_conflicts($pdo, $type, $id, $dates)) as $d) $days[$d] = 'booked';
+            $st = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = ? AND item_id = ? AND block_date BETWEEN ? AND ?");
+            $st->execute([$type, $id, $dates[0], $dates[$n - 1]]);
+            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $d) { if (!isset($days[$d])) $days[$d] = 'blocked'; }
+            echo json_encode(['ok' => true, 'month' => $ym, 'days' => (object)$days]);
+        } catch (PDOException $e) {
+            error_log('blocked-dates month availability failed: ' . $e->getMessage());
+            echo json_encode(['ok' => false, 'error' => 'A database error occurred while loading availability.']);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+        }
+        exit();
+    }
+
     // ---------- PREVIEW (AJAX → JSON, nothing is saved) ----------
     if ($act === 'preview') {
         header('Content-Type: application/json; charset=utf-8');
@@ -1099,6 +1138,31 @@ try {
         .notice .chip { background: rgba(255,255,255,0.75); border-radius: 6px; padding: 3px 8px; font-size: 11.5px; font-weight: 600; }
         .loading-line { display: flex; align-items: center; gap: 10px; color: #64748b; font-size: 13px; padding: 20px 0; }
 
+        /* Block Availability calendar (step 3) */
+        .bd-status { margin: 12px 0 10px; min-height: 30px; }
+        .bd-cal { border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px; background: #fff; margin-bottom: 12px; }
+        .bd-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .bd-cal-title { font-size: 15px; font-weight: 700; color: #0B2447; }
+        .bd-cal-nav { width: 36px; height: 36px; border-radius: 10px; border: 2px solid #e2e8f0; background: #fff; color: #0B2447; cursor: pointer; font-family: inherit; }
+        .bd-cal-nav:hover:not(:disabled) { background: #f0f7fb; border-color: #4DA6D9; }
+        .bd-cal-nav:disabled { opacity: .4; cursor: not-allowed; }
+        .bd-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        .bd-cal-dow { text-align: center; font-size: 11px; font-weight: 700; color: #94a3b8; padding: 4px 0; text-transform: uppercase; }
+        .bd-day { min-height: 40px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; color: #0B2447; font-weight: 600; font-size: 13px; cursor: pointer; font-family: inherit; padding: 0; }
+        .bd-day.blank { border: none; background: transparent; cursor: default; }
+        .bd-day.available:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .bd-day.past { background: #f8fafc; color: #cbd5e1; cursor: not-allowed; }
+        .bd-day.booked { background: #fee2e2; border-color: #fecaca; color: #b91c1c; cursor: not-allowed; text-decoration: line-through; }
+        .bd-day.blocked { background: #e2e8f0; border-color: #cbd5e1; color: #475569; cursor: not-allowed; }
+        .bd-day.loading { background: #f8fafc; color: #cbd5e1; cursor: wait; }
+        .bd-day.in-range { background: #dbeafe; border-color: #bfdbfe; color: #0B2447; }
+        .bd-day.selected { background: #4DA6D9; border-color: #4DA6D9; color: #fff; }
+        .bd-day.today { box-shadow: inset 0 0 0 2px #F4B400; }
+        .bd-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: #64748b; }
+        .bd-legend span { display: inline-flex; align-items: center; gap: 6px; }
+        .bd-legend i { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #cbd5e1; display: inline-block; }
+        @media (max-width: 600px) { .bd-cal { padding: 10px; } .bd-cal-grid { gap: 3px; } .bd-day { min-height: 38px; } }
+
         .modal-content.small { max-width: 480px; }
 
         @media (max-width: 600px) {
@@ -1623,7 +1687,8 @@ var W = null;
 
 function newWizardState() {
     return { step: 1, type: '', id: '', name: '', mode: 'single', start: '', end: '', dates: [], custom: false,
-             reasonType: 'walk_in', note: '', preview: null, previewing: false, error: '' };
+             reasonType: 'walk_in', note: '', preview: null, previewing: false, error: '',
+             avail: {}, availPending: {}, availError: '', calY: 0, calM: 0 };
 }
 
 function openBlockWizard(preset) {
@@ -1742,7 +1807,8 @@ function renderStepType(body) {
         card.appendChild(mk('div', 'c-name', r.label));
         card.appendChild(mk('div', 'c-count', r.items.length + ' available'));
         card.onclick = function() {
-            if (W.type !== t) { W.type = t; W.id = ''; W.name = ''; }
+            if (W.type !== t) { W.type = t; W.id = ''; W.name = ''; W.start = ''; W.end = ''; }
+            W.avail = {}; W.availPending = {};
             W.error = ''; W.step = 2; renderWizard();
         };
         grid.appendChild(card);
@@ -1775,6 +1841,8 @@ function renderStepResource(body) {
             row.appendChild(mk('span', '', it.name));
             row.appendChild(mk('i', 'fas fa-check-circle check'));
             row.onclick = function() {
+                if (W.id !== String(it.id)) { W.start = ''; W.end = ''; }   // another resource: its dates are different
+                W.avail = {}; W.availPending = {};                            // always re-read availability when (re)choosing a resource
                 W.id = String(it.id); W.name = it.name; W.error = '';
                 W.step = 3; renderWizard();
             };
@@ -1814,34 +1882,159 @@ function renderStepDates(body) {
         return;
     }
 
-    var fields = mk('div', 'date-fields');
-    var g1 = mk('div');
-    g1.appendChild(mk('label', 'form-label', W.mode === 'range' ? 'Start date' : 'Date'));
-    var start = mk('input', 'form-control'); start.type = 'date'; start.min = BD.today; start.value = W.start;
-    start.onchange = function() {
-        W.start = start.value;
-        if (W.mode === 'range' && W.end && W.end < W.start) W.end = W.start;
-        W.error = ''; renderWizard();
-    };
-    g1.appendChild(start); fields.appendChild(g1);
+    errorLine(body);          // above the calendar so a rejection is visible without scrolling
+    renderBdCalendar(body);
+}
 
-    if (W.mode === 'range') {
-        var g2 = mk('div');
-        g2.appendChild(mk('label', 'form-label', 'End date (inclusive)'));
-        var end = mk('input', 'form-control'); end.type = 'date'; end.min = W.start || BD.today; end.value = W.end;
-        end.onchange = function() { W.end = end.value; W.error = ''; renderWizard(); };
-        g2.appendChild(end); fields.appendChild(g2);
+// ---- Block Availability calendar (Phase: calendar instead of date inputs). The server stays the authority: the preview and
+// the save re-validate every date; this only DRAWS what the server reports (booked / blocked) and refuses obviously invalid picks.
+function bdYM(y, m) { return y + '-' + String(m + 1).padStart(2, '0'); }
+function bdKey(ym) { return W.type + '|' + W.id + '|' + ym; }
+function bdMonthInfo(ym) { return W.avail[bdKey(ym)] || null; }
+function bdLoadMonth(ym, cb) {
+    var key = bdKey(ym), mine = W;
+    if (W.avail[key]) { cb(true); return; }
+    if (W.availPending[key]) { W.availPending[key].push(cb); return; }
+    W.availPending[key] = [cb];
+    var fd = new FormData();
+    fd.append('bd_action', 'month_availability');
+    fd.append('csrf', BD.csrf);
+    fd.append('item_type', W.type);
+    fd.append('item_id', W.id);
+    fd.append('month', ym);
+    function done(ok, err) {
+        if (W !== mine) return;
+        var q = W.availPending[key] || []; delete W.availPending[key];
+        if (!ok) W.availError = err || 'Could not load availability.';
+        q.forEach(function(f) { f(ok); });
     }
-    body.appendChild(fields);
-
-    var ds = computeDates();
-    if (ds.length) {
+    fetch('blocked-dates.php', { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+            if (W !== mine) return;
+            if (j && j.ok && j.days) { W.avail[key] = j.days; W.availError = ''; done(true); }
+            else done(false, (j && j.error) || 'Could not load availability.');
+        })
+        .catch(function() { done(false, 'Could not reach the server. Please refresh and try again.'); });
+}
+// 'past' | 'booked' | 'blocked' | 'loading' | 'ok'
+function bdDayState(ds) {
+    if (ds < BD.today) return 'past';
+    var info = bdMonthInfo(ds.slice(0, 7));
+    if (!info) return 'loading';
+    return info[ds] || 'ok';
+}
+function bdEnsureRange(a, b, cb) {          // load every month a..b, then call cb(list of unavailable dates) — null if it could not be checked
+    var mine = W, months = [], t = toUTC(a), end = toUTC(b);
+    while (t <= end) { var ym = new Date(t).toISOString().slice(0, 7); if (months.indexOf(ym) === -1) months.push(ym); t += 86400000; }
+    var left = months.length, failed = false;
+    months.forEach(function(ym) {
+        bdLoadMonth(ym, function(ok) {
+            if (W !== mine) return;
+            if (!ok) failed = true;
+            if (--left === 0) {
+                if (failed) { cb(null); return; }
+                var bad = [];
+                expandRange(a, b).forEach(function(d) { if (bdDayState(d) !== 'ok') bad.push(d); });
+                cb(bad);
+            }
+        });
+    });
+}
+function bdPick(ds) {
+    var st = bdDayState(ds);
+    if (st !== 'ok') {
+        W.error = st === 'past' ? 'Past dates can’t be blocked.'
+                : st === 'booked' ? fmtDate(ds) + ' is already booked and can’t be blocked.'
+                : st === 'blocked' ? fmtDate(ds) + ' is already blocked.' : 'Availability is still loading.';
+        renderWizard(); return;
+    }
+    W.error = '';
+    if (W.mode === 'single') { W.start = ds; W.end = ''; renderWizard(); return; }
+    if (!W.start || W.end || ds < W.start) { W.start = ds; W.end = ''; renderWizard(); return; }   // (re)start a range
+    var mine = W, from = W.start;
+    if (expandRange(from, ds).length > BD.maxDates) { W.error = 'A range can cover at most ' + BD.maxDates + ' days.'; renderWizard(); return; }
+    bdEnsureRange(from, ds, function(bad) {
+        if (W !== mine || W.step !== 3) return;
+        if (bad === null) { W.error = W.availError || 'Could not check availability for this range.'; }
+        else if (bad.length) {
+            W.error = 'That range contains unavailable dates (' + bad.slice(0, 4).map(function(d) { return fmtDate(d) + ' – ' + bdDayState(d); }).join(', ') + (bad.length > 4 ? ', …' : '') + '). Pick a range with only available dates.';
+        } else { W.end = ds; W.error = ''; }
+        renderWizard();
+    });
+}
+var BD_FULL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function bdLongDate(s) { var q = s.split('-'); return BD_FULL_MONTHS[parseInt(q[1], 10) - 1] + ' ' + parseInt(q[2], 10) + ', ' + q[0]; }
+function bdSelectedText(dates) {
+    if (dates.length === 1) return bdLongDate(dates[0]);
+    var contiguous = (toUTC(dates[dates.length - 1]) - toUTC(dates[0])) / 86400000 === dates.length - 1;
+    return contiguous ? bdLongDate(dates[0]) + ' – ' + bdLongDate(dates[dates.length - 1]) + ' (' + dates.length + ' days)' : summarizeDates(dates);
+}
+function renderBdCalendar(body) {
+    if (!W.calY) {
+        var base = (W.start || BD.today).split('-');
+        W.calY = +base[0]; W.calM = +base[1] - 1;
+    }
+    var ym = bdYM(W.calY, W.calM), info = bdMonthInfo(ym);
+    if (!info && !W.availPending[bdKey(ym)]) {
+        var mine = W;
+        bdLoadMonth(ym, function() { if (W === mine && W.step === 3) renderWizard(); });
+    }
+    var status = mk('div', 'bd-status');
+    var ds2 = computeDates();
+    if (W.mode === 'range' && W.start && !W.end) {
+        status.appendChild(mk('div', 'field-help', 'Start: ' + bdLongDate(W.start) + ' — now pick the end date.'));
+    } else if (ds2.length) {
         var pill = mk('span', 'days-pill');
         pill.appendChild(mk('i', 'fas fa-calendar-day'));
-        pill.appendChild(document.createTextNode(' ' + ds.length + ' day' + (ds.length > 1 ? 's' : '') + ' · ' + summarizeDates(ds)));
-        body.appendChild(pill);
+        pill.appendChild(document.createTextNode(' Selected: ' + bdSelectedText(ds2)));
+        status.appendChild(pill);
+    } else {
+        status.appendChild(mk('div', 'field-help', W.mode === 'range' ? 'Pick the start date, then the end date.' : 'Pick a date.'));
     }
-    errorLine(body);
+    body.appendChild(status);
+    var wrap = mk('div', 'bd-cal');
+    var head = mk('div', 'bd-cal-head');
+    var prev = mk('button', 'bd-cal-nav'); prev.type = 'button'; prev.setAttribute('aria-label', 'Previous month'); prev.innerHTML = '<i class="fas fa-chevron-left"></i>';
+    var next = mk('button', 'bd-cal-nav'); next.type = 'button'; next.setAttribute('aria-label', 'Next month'); next.innerHTML = '<i class="fas fa-chevron-right"></i>';
+    var curYM = BD.today.slice(0, 7);
+    prev.disabled = ym <= curYM;
+    next.disabled = ym >= bdYM(+BD.today.slice(0, 4) + 3, +BD.today.slice(5, 7) - 1);   // up to 3 years ahead (the server allows 36 months)
+    prev.onclick = function() { W.calM--; if (W.calM < 0) { W.calM = 11; W.calY--; } renderWizard(); };
+    next.onclick = function() { W.calM++; if (W.calM > 11) { W.calM = 0; W.calY++; } renderWizard(); };
+    head.appendChild(prev); head.appendChild(mk('div', 'bd-cal-title', BD_FULL_MONTHS[W.calM] + ' ' + W.calY)); head.appendChild(next);
+    wrap.appendChild(head);
+
+    var grid = mk('div', 'bd-cal-grid');
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(d) { grid.appendChild(mk('div', 'bd-cal-dow', d)); });
+    var first = new Date(W.calY, W.calM, 1).getDay(), n = new Date(W.calY, W.calM + 1, 0).getDate();
+    for (var i = 0; i < first; i++) grid.appendChild(mk('div', 'bd-day blank'));
+    var lo = W.start, hi = (W.mode === 'range' && W.end) ? W.end : W.start;
+    for (var d = 1; d <= n; d++) {
+        (function(day) {
+            var ds = ym + '-' + String(day).padStart(2, '0'), st = bdDayState(ds);
+            var cls = 'bd-day ' + (st === 'ok' ? 'available' : st);
+            if (ds === BD.today) cls += ' today';
+            var picked = W.start && (ds === W.start || (W.mode === 'range' && W.end && ds === W.end));
+            if (picked) cls += ' selected';
+            else if (W.mode === 'range' && W.start && W.end && ds > W.start && ds < W.end) cls += ' in-range';
+            var b = mk('button', cls, String(day)); b.type = 'button';
+            b.setAttribute('data-date', ds);
+            b.setAttribute('aria-label', fmtDate(ds) + (st === 'ok' ? '' : ' — ' + st));
+            if (st !== 'ok' && st !== 'loading') b.setAttribute('aria-disabled', 'true');
+            b.onclick = function() { bdPick(ds); };
+            grid.appendChild(b);
+        })(d);
+    }
+    wrap.appendChild(grid);
+
+    var legend = mk('div', 'bd-legend');
+    [['#fff', 'Available'], ['#fee2e2', 'Booked'], ['#e2e8f0', 'Blocked'], ['#4DA6D9', 'Selected'], ['#f8fafc', 'Past']].forEach(function(l) {
+        var sp = mk('span'); var sw = mk('i'); sw.style.background = l[0]; sp.appendChild(sw); sp.appendChild(document.createTextNode(l[1])); legend.appendChild(sp);
+    });
+    wrap.appendChild(legend);
+    if (!info && W.availError) wrap.appendChild(mk('div', 'field-error', W.availError));
+    body.appendChild(wrap);
 }
 
 // ---- Step 4

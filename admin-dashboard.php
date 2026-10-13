@@ -949,7 +949,7 @@ function getBookingStatusLabel($payment_status) {
                         </div>
                     </a>
 
-                     <a href="blocked-dates.php" class="stat-card" style="background: linear-gradient(135deg, #64748b, #475569);">
+                     <a href="blocked-dates.php" class="stat-card">
                         <div class="stat-icon"><i class="fas fa-ban"></i></div>
                         <div class="stat-number"><?php echo $total_blocked; ?></div>
                         <div class="stat-label">Blocked Dates</div>
