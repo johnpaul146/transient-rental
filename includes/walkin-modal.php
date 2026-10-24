@@ -13,13 +13,10 @@ if (empty($can_manage_booking)) return;
 if (empty($_SESSION['wk_csrf'])) $_SESSION['wk_csrf'] = bin2hex(random_bytes(16));
 require_once __DIR__ . '/InputRules.php';   // shared name/phone rules (same patterns as the server)
 
-$wk_data = ['houses' => [], 'tours' => [], 'foods' => []];
+$wk_data = ['houses' => [], 'foods' => []];   // Tours/Boat booking removed
 try {
     foreach ($pdo->query("SELECT id, house_name, price_per_night, capacity FROM houses WHERE status = 'available' ORDER BY house_name")->fetchAll(PDO::FETCH_ASSOC) as $r) {
         $wk_data['houses'][] = ['id' => (int)$r['id'], 'name' => $r['house_name'], 'price' => (float)$r['price_per_night'], 'capacity' => (int)$r['capacity']];
-    }
-    foreach ($pdo->query("SELECT id, tour_name, price_per_boat, max_guests FROM tours WHERE status = 'available' ORDER BY tour_name")->fetchAll(PDO::FETCH_ASSOC) as $r) {
-        $wk_data['tours'][] = ['id' => (int)$r['id'], 'name' => $r['tour_name'], 'price' => (float)$r['price_per_boat'], 'max' => (int)$r['max_guests']];
     }
     foreach ($pdo->query("SELECT id, name, price, size_variations FROM food_items WHERE is_available = 1 ORDER BY name")->fetchAll(PDO::FETCH_ASSOC) as $r) {
         $sizes = [];
@@ -188,14 +185,12 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                 <div data-step="2" class="wk-hide">
                     <div class="wk-types" id="wkTypes">
                         <div class="wk-type" data-type="house"><i class="fas fa-home"></i>House</div>
-                        <div class="wk-type" data-type="tour"><i class="fas fa-ship"></i>Tour / Boat</div>
                         <div class="wk-type" data-type="food"><i class="fas fa-utensils"></i>Food</div>
                         <div class="wk-type" data-type="package"><i class="fas fa-box-open"></i>Package</div>
                     </div>
                     <div class="wk-checks wk-hide" id="wkPkgItems">
                         <strong style="width:100%;font-size:13px;">Package includes:</strong>
                         <label><input type="checkbox" name="package_items[]" value="house"> House</label>
-                        <label><input type="checkbox" name="package_items[]" value="tour"> Tour / Boat</label>
                         <label><input type="checkbox" name="package_items[]" value="food"> Food</label>
                     </div>
 
@@ -211,18 +206,11 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                             <div class="wk-field"><label><i class="fas fa-lock"></i> Check-out time <small>(automatic)</small></label><input type="time" name="check_out_time" id="wkOutTime" value="14:00" readonly tabindex="-1" aria-readonly="true" class="wk-locked"><small class="wk-lock-note">Checkout time follows the check-in time.</small></div>
                         </div>
                         <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkHouseCap"></small></label><input type="number" name="guests" id="wkPax" min="1" value="1"></div>
-                        <div class="wk-field"><label>Guest names <span class="req">*</span> <small>— one per line, exactly match the number of guests</small></label><textarea name="guest_names" id="wkNames" rows="3" placeholder="One full name per line" aria-describedby="wkm_guest_names"></textarea><div class="wk-fmsg wk-count" id="wkm_guest_names" role="status" aria-live="polite"></div></div>
-                    </div>
-
-                    <div class="wk-sec wk-hide" id="wkSecTour"><h4><i class="fas fa-ship"></i> Tour / Boat</h4>
-                        <div class="wk-stay-note wk-hide" data-for="tour"></div>
-                        <div class="wk-field"><label>Boat / tour <span class="req">*</span></label><select name="tour_id" id="wkTour"></select></div>
-                        <div class="wk-row">
-                            <div class="wk-field"><label>Tour date <span class="req">*</span></label><input type="hidden" name="tour_date" id="wkTourDate" value=""><button type="button" class="wk-datebtn" id="wkTourDateBtn" data-empty="Select tour date"></button></div>
-                            <div class="wk-field"><label>Time <span class="req">*</span></label><input type="time" name="tour_time" id="wkTourTime" value="08:00"></div>
-                        </div>
-                        <div class="wk-cal" id="wkCalTour" data-cal="tour"></div>
-                        <div class="wk-field"><label>Number of guests <span class="req">*</span> <small id="wkTourCap"></small></label><input type="number" name="tour_guests" min="1" value="1"></div>
+                        <div class="wk-field"><label>Senior citizens in the group <span class="req">*</span> <small>— 0 if none; cannot exceed the number of guests</small></label><input type="number" name="senior_citizens" id="wkSenior" min="0" step="1" inputmode="numeric" placeholder="0" aria-describedby="wkm_senior"><div class="wk-fmsg wk-count" id="wkm_senior" role="status" aria-live="polite"></div></div>
+                        <div class="wk-field"><label>Any guest with a health condition? <span class="req">*</span></label>
+                            <div style="display:flex;gap:18px;flex-wrap:wrap;"><label style="display:inline-flex;align-items:center;gap:6px;"><input type="radio" name="has_health_condition" value="yes"> Yes</label><label style="display:inline-flex;align-items:center;gap:6px;"><input type="radio" name="has_health_condition" value="no"> No</label></div>
+                            <div id="wkHealthWrap" class="wk-hide" style="margin-top:8px;"><label>Details <small>(optional)</small></label><textarea name="health_condition_details" id="wkHealthDetails" rows="2" maxlength="500" placeholder="e.g., wheelchair user, asthma"></textarea></div>
+                            <div class="wk-fmsg" id="wkm_health" role="status" aria-live="polite"></div></div>
                     </div>
 
                     <div class="wk-sec wk-hide" id="wkSecFood"><h4><i class="fas fa-utensils"></i> Food</h4>
@@ -290,10 +278,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         sel.innerHTML = '<option value="">— choose —</option>' + items.map(function (i) { return '<option value="' + i.id + '">' + esc(i.name) + ' · ' + label(i) + '</option>'; }).join('');
     }
     fillSelect($('wkHouse'), DATA.houses, function (i) { return peso(i.price) + '/night · up to ' + i.capacity; });
-    fillSelect($('wkTour'), DATA.tours, function (i) { return peso(i.price) + ' · up to ' + i.max; });
     fillSelect($('wkFood'), DATA.foods, function (i) { return i.sizes.length ? 'sizes from ' + peso(Math.min.apply(null, i.sizes.map(function (s) { return s.price; }))) : peso(i.price); });
     if (!DATA.houses.length) $('wkHouse').innerHTML = '<option value="">No available houses</option>';
-    if (!DATA.tours.length) $('wkTour').innerHTML = '<option value="">No available tours</option>';
     if (!DATA.foods.length) $('wkFood').innerHTML = '<option value="">No available food</option>';
 
     function find(list, id) { id = parseInt(id, 10); for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]; return null; }
@@ -305,7 +291,6 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     function nights() { var a = val('check_in'), b = val('check_out'); if (!a || !b) return 0; var d = Math.round((new Date(b) - new Date(a)) / 86400000); return d > 0 ? d : 0; }
     function priceFor(k) {
         if (k === 'house') { var h = find(DATA.houses, val('house_id')); return h ? h.price * nights() : 0; }
-        if (k === 'tour') { var t = find(DATA.tours, val('tour_id')); return t ? t.price : 0; }
         var f = find(DATA.foods, val('food_id')); if (!f) return 0;
         var qn = parseInt(val('food_quantity'), 10); if (!(qn >= 1)) qn = 0;
         if (f.sizes.length) { var sv = val('size_variant'); var s = f.sizes.filter(function (x) { return String(x.i) === sv; })[0]; return s ? s.price * qn : 0; }
@@ -316,7 +301,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
 
     function syncSections() {
         var items = activeItems();
-        [['house', 'wkSecHouse'], ['tour', 'wkSecTour'], ['food', 'wkSecFood']].forEach(function (p) {
+        [['house', 'wkSecHouse'], ['food', 'wkSecFood']].forEach(function (p) {
             var on = items.indexOf(p[0]) !== -1, sec = $(p[1]);
             sec.classList.toggle('wk-hide', !on);
             q('input,select,textarea', sec).forEach(function (el) { el.disabled = !on; });
@@ -330,11 +315,10 @@ $wk_fee = PaymentService::RESERVATION_FEE;
     }
     q('.wk-type').forEach(function (t) { t.addEventListener('click', function () { S.type = t.getAttribute('data-type'); syncSections(); setErr(''); }); });
     q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', syncSections); });
-    ['house_id', 'check_in', 'check_out', 'tour_id', 'food_id', 'size_variant'].forEach(function (n) { var el = form.elements[n]; if (el) el.addEventListener('change', refreshTotal); });
+    ['house_id', 'check_in', 'check_out', 'food_id', 'size_variant'].forEach(function (n) { var el = form.elements[n]; if (el) el.addEventListener('change', refreshTotal); });
     $('wkQty').addEventListener('input', refreshTotal); $('wkQty').addEventListener('change', refreshTotal);
 
     $('wkHouse').addEventListener('change', function () { var h = find(DATA.houses, this.value); $('wkHouseCap').textContent = h ? '(max ' + h.capacity + ')' : ''; if (h) $('wkPax').max = h.capacity; });
-    $('wkTour').addEventListener('change', function () { var t = find(DATA.tours, this.value); $('wkTourCap').textContent = t ? '(max ' + t.max + ')' : ''; if (t) form.elements['tour_guests'].max = t.max; });
     // ---------- house stay window (package with a house): guides staff before "Create Booking".
     // Display/guidance only — WalkInBookingService + AvailabilityService::packageWindowError stay the final check.
     function wkMonthLbl(d) { return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(d.slice(5, 7), 10) - 1] + ' ' + parseInt(d.slice(8, 10), 10) + ', ' + d.slice(0, 4); }
@@ -357,7 +341,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
             n.classList.toggle('wk-hide', !w);
             if (w) n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Selected house stay:</strong> ' + w.label + '.<br>The ' + n.getAttribute('data-for') + ' schedule must be within this stay.';
         });
-        [['wkTourDate', 'wkTourTime', 'Tour'], ['wkFoodDate', 'wkFoodTime', 'Food']].forEach(function (p) {
+        [['wkFoodDate', 'wkFoodTime', 'Food']].forEach(function (p) {
             var d = $(p[0]), t = $(p[1]), warn = t.parentNode.querySelector('.wk-stay-warn');
             if (w) { d.min = w.a > '<?php echo $wk_today; ?>' ? w.a : '<?php echo $wk_today; ?>'; d.max = w.b; }
             else { d.min = '<?php echo $wk_today; ?>'; d.removeAttribute('max'); }
@@ -370,7 +354,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
             if (warn) { warn.textContent = msg; warn.classList.toggle('wk-hide', !msg); }
         });
     }
-    ['check_in', 'check_out', 'check_in_time', 'tour_date', 'tour_time', 'food_date', 'food_time'].forEach(function (n) { var el = form.elements[n]; if (el) { el.addEventListener('change', wkSyncWindow); el.addEventListener('input', wkSyncWindow); } });
+    ['check_in', 'check_out', 'check_in_time', 'food_date', 'food_time'].forEach(function (n) { var el = form.elements[n]; if (el) { el.addEventListener('change', wkSyncWindow); el.addEventListener('input', wkSyncWindow); } });
     q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', wkSyncWindow); });
     q('.wk-type').forEach(function (t) { t.addEventListener('click', wkSyncWindow); });
     function wkSyncOut() { $('wkOutTime').value = $('wkInTime').value; }
@@ -398,7 +382,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         });
     });
 
-    // ---------- availability calendars (House stay · Tour/Boat · Food)
+    // ---------- availability calendars (House stay · Food)
     // GUIDANCE ONLY. Every state (booked / blocked / outside the house stay) comes from
     // booking-management.php?walkin_availability=1, which asks AvailabilityService — the same calls create()
     // makes. No availability rule lives here, and create() still re-checks everything inside its transaction.
@@ -587,32 +571,27 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                 return { view: 'house' + id, key: 'house' + id + '|' + t, qs: 'type=house&id=' + encodeURIComponent(id) + '&time=' + encodeURIComponent(t) };
             },
             deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : 'That date is unavailable for this unit.'; } }),
-        tour: makeCal({ box: $('wkCalTour'), field: $('wkTourDate'), range: false, noun: 'tour',
-            ctx: function () { return stayCtx('tour', 'boat'); },
-            deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : c === 'outside' ? outsideMsg() : c === 'blocked' ? 'This date is blocked for this boat.' : 'This boat is already booked on this date.'; } }),
         food: makeCal({ box: $('wkCalFood'), field: $('wkFoodDate'), range: false, noun: 'food',
             ctx: function () { return stayCtx('food', 'food package'); },
             deny: function (c) { return c === 'past' ? 'That date has passed. Choose a future date.' : c === 'outside' ? outsideMsg() : 'That date is unavailable for this food item.'; } })
     };
     function syncBtns() {
-        [['wkIn', 'wkInBtn'], ['wkOut', 'wkOutBtn'], ['wkTourDate', 'wkTourDateBtn'], ['wkFoodDate', 'wkFoodDateBtn']].forEach(function (p) {
+        [['wkIn', 'wkInBtn'], ['wkOut', 'wkOutBtn'], ['wkFoodDate', 'wkFoodDateBtn']].forEach(function (p) {
             var v = $(p[0]).value, b = $(p[1]);
             b.textContent = v ? wkMonthLbl(v) : b.getAttribute('data-empty'); b.classList.toggle('empty', !v);
         });
     }
     function calsRefresh(force) {
         var items = activeItems();
-        ['house', 'tour', 'food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(force); });
+        ['house', 'food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(force); });
     }
-    function windowCalsRefresh() { var items = activeItems(); ['tour', 'food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(false); }); }
+    function windowCalsRefresh() { var items = activeItems(); ['food'].forEach(function (k) { if (items.indexOf(k) !== -1) cals[k].sync(false); }); }
     $('wkHouse').addEventListener('change', function () { cals.house.sync(false); windowCalsRefresh(); });
-    $('wkTour').addEventListener('change', function () { cals.tour.sync(false); });
     $('wkFood').addEventListener('change', function () { cals.food.sync(false); });
     var wkTimeTimer = null;
     function onInTime() { clearTimeout(wkTimeTimer); wkTimeTimer = setTimeout(function () { if (activeItems().indexOf('house') !== -1) cals.house.sync(false); windowCalsRefresh(); }, 300); }
     $('wkInTime').addEventListener('input', onInTime); $('wkInTime').addEventListener('change', onInTime);
     ['wkIn', 'wkOut'].forEach(function (id) { $(id).addEventListener('change', function () { syncBtns(); cals.house.render(); windowCalsRefresh(); }); });
-    $('wkTourDate').addEventListener('change', function () { syncBtns(); cals.tour.render(); });
     $('wkFoodDate').addEventListener('change', function () { syncBtns(); cals.food.render(); });
     q('.wk-type').forEach(function (t) { t.addEventListener('click', function () { calsRefresh(false); }); });
     q('input[name="package_items[]"]').forEach(function (c) { c.addEventListener('change', function () { calsRefresh(false); }); });
@@ -626,9 +605,8 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         if (val('check_out')) setHidden($('wkOut'), '');
         cals.house.say('Choose a check-out date.', true); cals.house.focus();
     });
-    $('wkTourDateBtn').addEventListener('click', function () { cals.tour.focus(); });
     $('wkFoodDateBtn').addEventListener('click', function () { cals.food.focus(); });
-    function calsReset() { ['wkIn', 'wkOut', 'wkTourDate', 'wkFoodDate'].forEach(function (id) { $(id).value = ''; }); ['house', 'tour', 'food'].forEach(function (k) { cals[k].reset(); }); syncBtns(); }
+    function calsReset() { ['wkIn', 'wkOut', 'wkFoodDate'].forEach(function (id) { $(id).value = ''; }); ['house', 'food'].forEach(function (k) { cals[k].reset(); }); syncBtns(); }
     syncBtns();
 
     // ---------- guest step
@@ -735,30 +713,34 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         return first;
     }
 
-    // ---------- House guest names: exactly one valid name per guest
-    function nameLines() { return String(($('wkNames') || {}).value || '').split(/\r\n|\r|\n/).map(cleanName).filter(function (x) { return x !== ''; }); }
-    function guestNamesState() {
-        var pax = parseInt(val('guests'), 10), lines = nameLines();
-        if (!pax || pax < 1) return { err: '', info: 'Enter the number of guests first.', count: lines.length };
-        for (var i = 0; i < lines.length; i++) { var e = nameErr(lines[i], true); if (e) return { err: 'Guest name #' + (i + 1) + ': ' + e, count: lines.length, pax: pax }; }
-        if (lines.length !== pax) return { err: 'Guest names: enter exactly ' + pax + ' name' + (pax === 1 ? '' : 's') + ' (one per line) to match the number of guests — you entered ' + lines.length + '.', count: lines.length, pax: pax };
-        return { err: '', count: lines.length, pax: pax };
+    // ---------- House group details: senior citizens (0..guests) + explicit health-condition answer
+    function healthChoice() { var r = form.querySelector('input[name="has_health_condition"]:checked'); return r ? r.value : ''; }
+    function groupState() {
+        var pax = parseInt(val('guests'), 10), raw = String(($('wkSenior') || {}).value || '').trim();
+        if (raw === '') return { err: 'Senior citizens: enter a number (0 if none).', silent: true };
+        if (!/^[0-9]{1,3}$/.test(raw)) return { err: 'Senior citizens must be a whole number (0 or more).' };
+        if (pax && parseInt(raw, 10) > pax) return { err: 'Senior citizens (' + parseInt(raw, 10) + ') cannot exceed the number of guests (' + pax + ').' };
+        if (!healthChoice()) return { err: 'Please answer whether any guest has a health condition (Yes or No).', health: true, silent: true };
+        return { err: '' };
     }
-    function refreshNames(reveal) {
-        var m = $('wkm_guest_names'), t = $('wkNames'); if (!m || !t) return '';
-        var st = guestNamesState(), touched = reveal || String(t.value).trim() !== '';
-        m.className = 'wk-fmsg wk-count';
-        if (st.info) { m.textContent = st.info; }
-        else if (st.err && touched) { m.textContent = st.err; m.classList.add('bad'); }
-        else { m.textContent = st.count + ' of ' + st.pax + ' name' + (st.pax === 1 ? '' : 's') + ' entered' + (st.err ? '' : ' ✓'); if (!st.err) m.classList.add('good'); }
-        t.classList.toggle('wk-invalid', !!(st.err && touched)); if (st.err && touched) t.setAttribute('aria-invalid', 'true'); else t.removeAttribute('aria-invalid');
+    function refreshNames(reveal) {   // kept name: shared hook for the pax/guest inputs
+        var m = $('wkm_senior'), t = $('wkSenior'), hm = $('wkm_health'); if (!m || !t) return '';
+        var st = groupState(), raw = String(t.value).trim();
+        var show = reveal || (raw !== '' && !st.silent);
+        m.className = 'wk-fmsg wk-count'; m.textContent = '';
+        if (hm) { hm.className = 'wk-fmsg'; hm.textContent = ''; }
+        var target = st.health ? hm : m;
+        if (st.err && (show || (reveal && st.health))) { target.textContent = st.err; target.classList.add('bad'); }
+        t.classList.toggle('wk-invalid', !!(st.err && !st.health && show)); if (st.err && !st.health && show) t.setAttribute('aria-invalid', 'true'); else t.removeAttribute('aria-invalid');
+        var wrap = $('wkHealthWrap'); if (wrap) wrap.classList.toggle('wk-hide', healthChoice() !== 'yes');
         return st.err || '';
     }
     ['input', 'change'].forEach(function (ev) {
-        $('wkNames').addEventListener(ev, function () { refreshNames(false); });
+        $('wkSenior').addEventListener(ev, function () { refreshNames(false); });
         $('wkPax').addEventListener(ev, function () { refreshNames(false); });
     });
-    $('wkNames').addEventListener('blur', function () { refreshNames(true); });
+    Array.prototype.forEach.call(form.querySelectorAll('input[name="has_health_condition"]'), function (r) { r.addEventListener('change', function () { refreshNames(false); }); });
+    $('wkSenior').addEventListener('blur', function () { refreshNames(true); });
     function clearFieldMsgs() { G1.forEach(function (g) { showFieldMsg(g.n, ''); }); refreshNames(false); }
     function validate(n) {
         if (n === 1) {
@@ -777,13 +759,7 @@ $wk_fee = PaymentService::RESERVATION_FEE;
                     if (val('check_in') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
                     if (nights() < 1) return 'Check-out must be after check-in.';
                     var px = parseInt(val('guests'), 10); if (!px || px < 1) return 'Enter the number of guests.'; if (px > h.capacity) return h.name + ' fits up to ' + h.capacity + ' guests.';
-                    var gnErr = refreshNames(true); if (gnErr) { try { $('wkNames').focus(); } catch (x) {} return gnErr; }
-                } else if (k === 'tour') {
-                    var t = find(DATA.tours, val('tour_id')); if (!t) return 'Choose a boat/tour.';
-                    if (!val('tour_date')) return 'Select the tour date.'; if (val('tour_date') < '<?php echo $wk_today; ?>') return 'Selected date is no longer available. Please choose a future date.';
-                    if (!val('tour_time')) return 'Select the tour time.';
-                    var wmT = wkWindowMsg('Tour', val('tour_date'), val('tour_time')); if (wmT) return wmT;
-                    var tg = parseInt(val('tour_guests'), 10); if (!tg || tg < 1) return 'Enter the number of guests.'; if (tg > t.max) return t.name + ' allows up to ' + t.max + ' guests.';
+                    var gnErr = refreshNames(true); if (gnErr) { try { $('wkSenior').focus(); } catch (x) {} return gnErr; }
                 } else {
                     var f = find(DATA.foods, val('food_id')); if (!f) return 'Choose a food package.';
                     if (f.sizes.length && val('size_variant') === '') return 'Choose a size.';
@@ -807,7 +783,6 @@ $wk_fee = PaymentService::RESERVATION_FEE;
         rows.push(['Guest', esc(g) + (S.mode === 'new' ? ' <span class="wk-tag walk">New walk-in</span>' : '')]);
         activeItems().forEach(function (k) {
             if (k === 'house') { var h = find(DATA.houses, val('house_id')); rows.push(['House', esc(h.name) + ' · ' + val('check_in') + ' → ' + val('check_out') + ' (' + nights() + ' night' + (nights() > 1 ? 's' : '') + ')']); }
-            if (k === 'tour') { var t = find(DATA.tours, val('tour_id')); rows.push(['Tour', esc(t.name) + ' · ' + val('tour_date') + ' ' + val('tour_time')]); }
             if (k === 'food') { var f = find(DATA.foods, val('food_id')); rows.push(['Food', esc(f.name) + ' × ' + esc(val('food_quantity')) + ' · ' + val('food_date') + ' ' + val('food_time')]); }
         });
         rows.push(['Booking type', S.type === 'package' ? 'Package (' + activeItems().length + ' items)' : S.type.charAt(0).toUpperCase() + S.type.slice(1)]);

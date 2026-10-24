@@ -26,7 +26,7 @@ $map_embed = $map_embed ?? '';
                 <div class="site-footer__brand">
                     <span class="site-footer__brand-icon"><i class="fas fa-umbrella-beach"></i></span>
                     <span class="site-footer__brand-text">
-                        <span class="site-footer__brand-name">Transient House &amp; Tours</span>
+                        <span class="site-footer__brand-name">Jerry Dino's Stay</span>
                         <span class="site-footer__brand-sub">Hundred Islands &bull; Alaminos, Pangasinan</span>
                     </span>
                 </div>
@@ -67,7 +67,6 @@ $map_embed = $map_embed ?? '';
                 <ul class="site-footer__list">
                     <li><a href="index.php"><i class="fas fa-chevron-right"></i> Home</a></li>
                     <li><a href="houses.php"><i class="fas fa-chevron-right"></i> Stay</a></li>
-                    <li><a href="tours.php"><i class="fas fa-chevron-right"></i> Tours</a></li>
                     <li><a href="activities.php"><i class="fas fa-chevron-right"></i> Activities</a></li>
                     <li><a href="food.php"><i class="fas fa-chevron-right"></i> Food</a></li>
                     <li><a href="packages.php"><i class="fas fa-chevron-right"></i> Packages</a></li>
@@ -119,7 +118,7 @@ $map_embed = $map_embed ?? '';
 
         <div class="site-footer__bottom">
             <div class="site-footer__copy">
-                &copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.
+                &copy; <?php echo date('Y'); ?> Jerry Dino's Stay. All rights reserved.
             </div>
             <div class="site-footer__links">
                 <a onclick="if (window.reopenTermsModal) { reopenTermsModal('privacy'); } return false;">Privacy Policy</a>

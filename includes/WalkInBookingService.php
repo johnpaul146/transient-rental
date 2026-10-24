@@ -37,13 +37,15 @@
 require_once __DIR__ . '/AvailabilityService.php';
 require_once __DIR__ . '/PaymentService.php';
 require_once __DIR__ . '/InputRules.php';
+require_once __DIR__ . '/GroupHealth.php';
 if (file_exists(__DIR__ . '/SystemLogger.php')) require_once __DIR__ . '/SystemLogger.php';
 
 class WalkInBookingService {
 
     const PLACEHOLDER_DOMAIN = 'walkin.invalid';
     const SOURCE = 'walk_in';
-    const TYPES = ['house', 'tour', 'food', 'package'];
+    const TYPES = ['house', 'food', 'package'];   // 'tour' was removed with the Tours/Boat service (history stays in the database)
+    const TOUR_REMOVED_MESSAGE = 'Tour/boat bookings are no longer offered.';
     const PAYMENT_OPTIONS = ['pay_later', 'cash', 'gcash'];
 
     private static $schemaChecked = false;
@@ -237,7 +239,6 @@ class WalkInBookingService {
         $id = filter_var($id, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 2147483647]]);
         if ($id === false) throw new InvalidArgumentException('Please choose an item first.');
         $sql = ['house' => "SELECT 1 FROM houses WHERE id = ? AND status = 'available'",
-                'tour'  => "SELECT 1 FROM tours WHERE id = ? AND status = 'available'",
                 'food'  => "SELECT 1 FROM food_items WHERE id = ? AND is_available = 1"][$type] ?? null;
         if ($sql === null) throw new InvalidArgumentException('Unknown booking type.');
         $st = $pdo->prepare($sql);
@@ -258,7 +259,7 @@ class WalkInBookingService {
      *          'window' => null | ['from','to','label']].
      */
     public static function availabilityMonth(PDO $pdo, $type, $id, $ym, array $opt = []) {
-        if (!in_array($type, ['house', 'tour', 'food'], true)) throw new InvalidArgumentException('Unknown booking type.');
+        if (!in_array($type, ['house', 'food'], true)) throw new InvalidArgumentException('Unknown booking type.');
         if (!is_string($ym) || !preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) throw new InvalidArgumentException('Please choose a valid month.');
         $first = DateTime::createFromFormat('!Y-m-d', $ym . '-01');
         $thisMonth = new DateTime('first day of this month 00:00:00');
@@ -290,8 +291,6 @@ class WalkInBookingService {
             if ($type === 'house') {
                 $next = (clone $d)->modify('+1 day')->format('Y-m-d');
                 $msg = AvailabilityService::houseConflict($pdo, $id, $ds, $next, [], [], $stay['in'], $stay['out']);
-            } elseif ($type === 'tour') {
-                $msg = AvailabilityService::tourConflict($pdo, $id, $ds);
             } else {
                 $msg = AvailabilityService::foodConflict($pdo, $id, $ds);
             }
@@ -369,56 +368,16 @@ class WalkInBookingService {
         }
 
         $nights = (int)(new DateTime($checkIn))->diff(new DateTime($checkOut))->days;
-        // Same rule as the online House/Package forms: exactly one valid name per guest. The lead guest's
-        // name is NOT silently substituted for missing names.
-        $names = [];
-        foreach (preg_split('/\R/u', (string)($in['guest_names'] ?? '')) as $line) {
-            $line = InputRules::cleanName($line);
-            if ($line !== '') $names[] = $line;
-        }
-        if (count($names) !== $pax) {
-            throw new InvalidArgumentException('Guest names: enter exactly ' . $pax . ' name' . ($pax === 1 ? '' : 's') . ' (one per line) to match the number of guests — you entered ' . count($names) . '.');
-        }
-        foreach ($names as $i => $n) {
-            if (($e = InputRules::nameError($n, true)) !== null) {
-                throw new InvalidArgumentException('Guest name #' . ($i + 1) . ': ' . $e);
-            }
-        }
+        // Same rule as the online House/Package forms: senior-citizen count (0..guests) + explicit health-condition answer.
+        // Individual guest names are no longer collected.
+        $group = GroupHealth::parse($in, $pax);
         return ['type' => 'house', 'row' => $h, 'name' => $h['house_name'], 'price' => round((float)$h['price_per_night'] * $nights, 2),
                 'check_in' => $checkIn, 'check_out' => $checkOut, 'nights' => $nights, 'pax' => $pax,
                 'in_time' => $stay['in'],
                 'out_time' => $stay['out'],   // = check-in time
-                'names' => implode("\n", $names)];
+                'group' => $group];
     }
 
-    private static function planTour(PDO $pdo, array $in, array $guest) {
-        $tourId = (int)($in['tour_id'] ?? 0);
-        $date = self::cleanDate($in['tour_date'] ?? '', 'tour');
-        $pax = (int)($in['tour_guests'] ?? 0);
-        if ($pax < 1) throw new InvalidArgumentException('Number of guests must be at least 1.');
-        $time = trim((string)($in['tour_time'] ?? ''));
-        if ($time === '') throw new InvalidArgumentException('Please select a tour time.');
-
-        AvailabilityService::lockItem($pdo, 'tour', $tourId);
-        $st = $pdo->prepare('SELECT id, tour_name, price_per_boat, max_guests, status FROM tours WHERE id = ?');
-        $st->execute([$tourId]);
-        $t = $st->fetch(PDO::FETCH_ASSOC);
-        if (!$t) throw new InvalidArgumentException('Please choose a boat/tour.');
-        if ($t['status'] !== 'available') throw new InvalidArgumentException("Tour '{$t['tour_name']}' is not available for booking.");
-        if ($pax > (int)$t['max_guests']) throw new InvalidArgumentException("'{$t['tour_name']}' allows up to {$t['max_guests']} guest(s).");
-        if (($msg = AvailabilityService::tourConflict($pdo, $tourId, $date)) !== null) {
-            throw new InvalidArgumentException("Tour '{$t['tour_name']}': $msg");
-        }
-        return ['type' => 'tour', 'row' => $t, 'name' => $t['tour_name'], 'price' => round((float)$t['price_per_boat'], 2),
-                'date' => $date, 'pax' => $pax, 'time' => self::cleanTime($time, '08:00', 'tour'),
-                'requests' => self::clip($in['tour_requests'] ?? ($in['special_requests'] ?? ''), 1000)];
-    }
-
-    /**
-     * $inPackage: food is part of a walk-in package; $packageHouseName: that package's house (delivery goes there).
-     * Standalone food delivery follows the same rule as the guest food page: only to the guest's own confirmed
-     * house stay, only inside its window (AvailabilityService::foodDeliveryResolve).
-     */
     private static function planFood(PDO $pdo, array $in, array $guest, $inPackage = false, $packageHouseName = null) {
         $foodId = (int)($in['food_id'] ?? 0);
         $date = self::cleanDate($in['food_date'] ?? '', 'food');
@@ -463,18 +422,10 @@ class WalkInBookingService {
              number_of_guests, total_amount, reservation_fee_amount, guest_names, gcash_reference, payment_status, booking_status, booking_source, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', 'walk_in', NOW())")
             ->execute([$guest['id'], $p['row']['id'], $ref, $p['check_in'], $p['in_time'], $p['check_out'], $p['out_time'],
-                       $p['pax'], $p['price'], $withFee ? PaymentService::feeFor($p['price']) : 0, $p['names'], $gcashRef]);
-        return (int)$pdo->lastInsertId();
-    }
-
-    private static function insertTour(PDO $pdo, array $p, array $guest, $ref, $gcashRef, $withFee) {
-        $pdo->prepare("INSERT INTO tour_bookings
-            (guest_id, tour_id, reference_number, booking_date, number_of_guests, guest_name, contact_number, preferred_time,
-             total_amount, reservation_fee_amount, special_requests, gcash_reference, payment_status, booking_status, booking_source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', 'walk_in', NOW())")
-            ->execute([$guest['id'], $p['row']['id'], $ref, $p['date'], $p['pax'], $guest['name'], $guest['contact'], $p['time'],
-                       $p['price'], $withFee ? PaymentService::feeFor($p['price']) : 0, $p['requests'], $gcashRef]);
-        return (int)$pdo->lastInsertId();
+                       $p['pax'], $p['price'], $withFee ? PaymentService::feeFor($p['price']) : 0, null, $gcashRef]);   // guest_names: no longer collected
+        $id = (int)$pdo->lastInsertId();
+        GroupHealth::save($pdo, $id, $p['group']);
+        return $id;
     }
 
     private static function insertFood(PDO $pdo, array $p, array $guest, $ref, $gcashRef, $withFee) {
@@ -497,9 +448,8 @@ class WalkInBookingService {
      * $in keys (all strings, straight from the form):
      *   guest_mode existing|new, guest_id | wg_name, wg_contact, wg_email, wg_address, wg_id_type, wg_id_number,
      *   wg_emergency_name, wg_emergency_number
-     *   booking_type house|tour|food|package   (package: package_items[] = house,tour,food)
-     *   house: house_id, check_in, check_out, check_in_time, check_out_time, guests, guest_names
-     *   tour:  tour_id, tour_date, tour_time, tour_guests, tour_requests
+     *   booking_type house|food|package   (package: package_items[] = house,food; 'tour' is refused — service discontinued)
+     *   house: house_id, check_in, check_out, check_in_time, check_out_time, guests, senior_citizens, has_health_condition, health_condition_details
      *   food:  food_id, food_date, food_time, size_variant, food_quantity, fulfillment, delivery_stay_id (optional), food_requests
      *   payment_option pay_later|cash|gcash, gcash_reference
      *
@@ -510,6 +460,7 @@ class WalkInBookingService {
         self::ensureSchema($pdo);
 
         $type = (string)($in['booking_type'] ?? '');
+        if ($type === 'tour' || in_array('tour', (array)($in['package_items'] ?? []), true)) throw new InvalidArgumentException(self::TOUR_REMOVED_MESSAGE);   // server-side: a hand-made POST cannot create a tour booking
         if (!in_array($type, self::TYPES, true)) throw new InvalidArgumentException('Please choose a booking type.');
         $payOpt = (string)($in['payment_option'] ?? 'pay_later');
         if (!in_array($payOpt, self::PAYMENT_OPTIONS, true)) throw new InvalidArgumentException('Please choose a payment option.');
@@ -524,7 +475,7 @@ class WalkInBookingService {
 
         $items = [];
         if ($type === 'package') {
-            $chosen = array_values(array_intersect(['house', 'tour', 'food'], (array)($in['package_items'] ?? [])));
+            $chosen = array_values(array_intersect(['house', 'food'], (array)($in['package_items'] ?? [])));
             if (!$chosen) throw new InvalidArgumentException('Choose at least one item for the package.');
         }
 
@@ -533,19 +484,16 @@ class WalkInBookingService {
             $guest = self::resolveGuest($pdo, $in);
 
             if ($type === 'house') $items['house'] = self::planHouse($pdo, $in, $guest);
-            if ($type === 'tour')  $items['tour']  = self::planTour($pdo, $in, $guest);
             if ($type === 'food')  $items['food']  = self::planFood($pdo, $in, $guest);
             if ($type === 'package') {
                 foreach ($chosen as $c) {
                     // package food: delivery goes to the package's house/unit (none in the package = pickup only)
                     $items[$c] = ($c === 'house') ? self::planHouse($pdo, $in, $guest)
-                               : (($c === 'tour') ? self::planTour($pdo, $in, $guest)
-                                                  : self::planFood($pdo, $in, $guest, true, isset($items['house']) ? $items['house']['name'] : null));
+                                                  : self::planFood($pdo, $in, $guest, true, isset($items['house']) ? $items['house']['name'] : null);
                 }
                 // The house stay is the package's schedule window (same shared rule as the online package builder)
                 if (isset($items['house'])) {
                     $sched = [];
-                    if (isset($items['tour'])) $sched[] = ['label' => 'Tour', 'date' => $items['tour']['date'], 'time' => $items['tour']['time']];
                     if (isset($items['food'])) $sched[] = ['label' => 'Food', 'date' => $items['food']['date'], 'time' => $items['food']['time']];
                     $winErr = AvailabilityService::packageWindowError(
                         ['check_in' => $items['house']['check_in'], 'check_in_time' => $items['house']['in_time'], 'check_out' => $items['house']['check_out']], $sched);
@@ -558,18 +506,16 @@ class WalkInBookingService {
                 $p = reset($items);
                 $total = $p['price'];
                 if ($type === 'house') { $reference = self::newReference($pdo, 'house_bookings', 'HS');   $bookingId = self::insertHouse($pdo, $p, $guest, $reference, $gcashRef, true); }
-                if ($type === 'tour')  { $reference = self::newReference($pdo, 'tour_bookings', 'TOUR');  $bookingId = self::insertTour($pdo, $p, $guest, $reference, $gcashRef, true); }
                 if ($type === 'food')  { $reference = self::newReference($pdo, 'food_bookings', 'FOOD');  $bookingId = self::insertFood($pdo, $p, $guest, $reference, $gcashRef, true); }
                 $logItems[] = ['type' => $type, 'name' => $p['name'], 'amount' => $total];
             } else {
                 // One package row; component rows carry no money (same as the online package flow).
                 $reference = 'PKG-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(2)));
-                $ids = ['house' => null, 'tour' => null, 'food' => null];
+                $ids = ['house' => null, 'tour' => null, 'food' => null];   // 'tour' stays NULL / 0: Tours/Boat removed (columns kept for historical packages)
                 $amt = ['house' => 0.0, 'tour' => 0.0, 'food' => 0.0];
                 foreach ($items as $k => $p) {
                     $ref = $reference . '-' . strtoupper($k[0]);
                     if ($k === 'house') $ids[$k] = self::insertHouse($pdo, $p, $guest, $ref, null, false);
-                    if ($k === 'tour')  $ids[$k] = self::insertTour($pdo, $p, $guest, $ref, null, false);
                     if ($k === 'food')  $ids[$k] = self::insertFood($pdo, $p, $guest, $ref, null, false);
                     $amt[$k] = $p['price'];
                     $logItems[] = ['type' => $k, 'name' => $p['name'], 'amount' => $p['price']];
@@ -584,7 +530,7 @@ class WalkInBookingService {
                                $amt['house'], $amt['tour'], $amt['food'], $total, PaymentService::feeFor($total),
                                $guest['contact'], self::clip($in['special_requests'] ?? '', 1000), $gcashRef]);
                 $bookingId = (int)$pdo->lastInsertId();
-                foreach (['house' => 'house_bookings', 'tour' => 'tour_bookings', 'food' => 'food_bookings'] as $k => $tbl) {
+                foreach (['house' => 'house_bookings', 'food' => 'food_bookings'] as $k => $tbl) {
                     if ($ids[$k]) $pdo->prepare("UPDATE `$tbl` SET package_id = ? WHERE id = ?")->execute([$bookingId, $ids[$k]]);
                 }
             }

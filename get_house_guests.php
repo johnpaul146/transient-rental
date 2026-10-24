@@ -1,5 +1,5 @@
 <?php
-// Guest names and stay dates for one house — staff/admin only.
+// House guest and group details for one house — staff/admin only.
 // (No page currently calls this endpoint; it is kept for compatibility but
 //  never answers without an authenticated admin or staff session.)
 ini_set('display_errors', '0');
@@ -34,6 +34,9 @@ try {
                             b.payment_status, 
                             b.booking_status,
                             b.guest_names,
+                            b.senior_citizens,
+                            b.has_health_condition,
+                            b.health_condition_details,
                             g.full_name as guest_name
                            FROM house_bookings b
                            LEFT JOIN guests g ON b.guest_id = g.id
@@ -94,7 +97,11 @@ try {
                         'reference_number' => $booking['reference_number'],
                         'check_in_date' => $check_in,
                         'check_out_date' => $check_out,
-                        'payment_status' => $booking['payment_status']
+                        'payment_status' => $booking['payment_status'],
+                        'number_of_guests' => (int)$booking['number_of_guests'],
+                        'senior_citizens' => $booking['senior_citizens'] === null ? null : (int)$booking['senior_citizens'],
+                        'has_health_condition' => $booking['has_health_condition'] === null ? null : (int)$booking['has_health_condition'],
+                        'health_condition_details' => $booking['health_condition_details'] ?? null
                     ];
                 }
             }
@@ -115,7 +122,11 @@ try {
                 'reference_number' => $booking['reference_number'],
                 'check_in_date' => $check_in,
                 'check_out_date' => $check_out,
-                'payment_status' => $booking['payment_status']
+                'payment_status' => $booking['payment_status'],
+                'number_of_guests' => (int)$booking['number_of_guests'],
+                'senior_citizens' => $booking['senior_citizens'] === null ? null : (int)$booking['senior_citizens'],
+                'has_health_condition' => $booking['has_health_condition'] === null ? null : (int)$booking['has_health_condition'],
+                'health_condition_details' => $booking['health_condition_details'] ?? null
             ];
         }
     }

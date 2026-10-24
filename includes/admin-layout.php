@@ -13,7 +13,7 @@
  *     require_once 'includes/admin-layout.php';
  *     ...
  *     <div class="app-container">
- *         <?php admin_layout_sidebar(['active' => 'tour']); ?>
+ *         <?php admin_layout_sidebar(['active' => 'house']); ?>
  *         <div class="main-content"> ... </div>
  *     </div>
  *     ...
@@ -44,7 +44,6 @@ if (!function_exists('admin_layout_nav')) {
             ['key' => 'dashboard',  'href' => 'admin-dashboard.php',      'icon' => 'th-large',       'label' => 'Dashboard'],
             ['key' => 'users',      'href' => 'user-management.php',      'icon' => 'users',          'label' => 'User Management',      'admin' => true],
             ['key' => 'house',      'href' => 'house-dashboard.php',      'icon' => 'home',           'label' => 'House Management'],
-            ['key' => 'tour',       'href' => 'tour-dashboard.php',       'icon' => 'umbrella-beach', 'label' => 'Tour Management'],
             ['key' => 'activities', 'href' => 'activities-dashboard.php', 'icon' => 'water',          'label' => 'Activities Management'],
             ['key' => 'food',       'href' => 'food-dashboard.php',       'icon' => 'utensils',       'label' => 'Food Management'],
             ['key' => 'bookings',   'href' => 'booking-management.php',   'icon' => 'calendar-check', 'label' => 'Booking Management',
@@ -93,7 +92,7 @@ if (!function_exists('admin_layout_nav')) {
         $logo = 'uploads/logos/logo.png';
         if (!empty($content['site_settings']['logo_path'])) $logo = $content['site_settings']['logo_path'];
         $exists = !empty($logo) && file_exists($logo) && !is_dir($logo);
-        $name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+        $name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
         return [$logo, $exists, $name];
     }
 

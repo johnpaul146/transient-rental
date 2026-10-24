@@ -52,9 +52,7 @@ $hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_pa
    COUNTS
    ------------------------------------------------------------ */
 $houses_count      = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM houses");
-$tours_count       = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM tours");
 $available_houses  = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM houses WHERE status = 'available'");
-$available_tours   = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM tours WHERE status = 'available'");
 $activities_count  = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM activities");
 $food_count        = (int) safe_query_value($pdo, "SELECT COUNT(*) FROM food_items");
 
@@ -70,9 +68,6 @@ $featured_food = safe_query_rows($pdo,
 $featured_houses = safe_query_rows($pdo,
     "SELECT * FROM houses WHERE status = 'available' ORDER BY id DESC LIMIT 6");
 
-$featured_tours = safe_query_rows($pdo,
-    "SELECT * FROM tours WHERE status = 'available' ORDER BY id DESC LIMIT 3");
-
 /* House galleries */
 $featured_house_gallery = [];
 foreach ($featured_houses as $fh) {
@@ -83,25 +78,6 @@ foreach ($featured_houses as $fh) {
     } catch (PDOException $e) {
         $featured_house_gallery[$fh['id']] = [];
     }
-}
-
-/* Tour galleries */
-$featured_tour_gallery = [];
-foreach ($featured_tours as $ft) {
-    $folder = !empty($ft['folder_name'])
-        ? $ft['folder_name']
-        : str_replace(' ', '_', trim($ft['tour_name']));
-    $path = 'uploads/tours/gallery/' . $folder . '/';
-    $imgs = [];
-    if (is_dir($path)) {
-        foreach (scandir($path) as $file) {
-            $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-            if (in_array($ext, ['jpg','jpeg','png','gif','webp'])) {
-                $imgs[] = ['image' => $file, 'folder' => $folder];
-            }
-        }
-    }
-    $featured_tour_gallery[$ft['id']] = $imgs;
 }
 
 /* ------------------------------------------------------------
@@ -251,19 +227,39 @@ function displayUsername($username, $is_anonymous = 0) {
     return $is_anonymous == 1 ? '***' : htmlspecialchars($username);
 }
 function getGoogleMapsUrl($address) {
-    if (empty($address) || $address === '#') return '#';
-    return 'https://www.google.com/maps/search/?api=1&query=' . urlencode($address);
+    if (!is_string($address) || trim($address) === '' || $address === '#') return '#';
+    return 'https://www.google.com/maps/search/?api=1&query=' . urlencode(trim($address));
+}
+/**
+ * Clean the saved "google_maps_embed" value into a safe Google Maps embed URL, or '' if unusable.
+ * Admins often paste the whole <iframe ...> snippet (or the src plus width/height/style attributes); the stray
+ * attributes corrupt the embed URL, which makes Google's "View larger map" link go to .../maps/undefined&cid=...
+ * Only https://www.google.com/maps/embed?... is accepted; anything else (or anything containing "undefined") is rejected.
+ */
+function cleanGoogleMapsEmbed($raw) {
+    if (!is_string($raw)) return '';
+    $raw = html_entity_decode(trim($raw), ENT_QUOTES, 'UTF-8');
+    if ($raw === '' || $raw === '#') return '';
+    if (preg_match('/src\s*=\s*["\']([^"\']+)["\']/i', $raw, $m)) $raw = $m[1];   // full <iframe src="...">
+    $raw = preg_split('/[\s"\'<>]/', $raw, 2)[0];                                  // drop trailing pasted attributes
+    if (!preg_match('#^https://(www\.)?google\.com/maps/embed\?pb=[A-Za-z0-9!%._~:,;=+\-\*]+$#', $raw)) return '';
+    if (stripos($raw, 'undefined') !== false) return '';
+    return $raw;
 }
 
 /* ------------------------------------------------------------
    SOCIAL / LOCATION
    ------------------------------------------------------------ */
 $facebook_link     = $content['social']['facebook'] ?? '#';
-$location_address  = $content['location']['address'] ?? $content['footer']['address'] ?? '123 Transient Street, City';
-$google_maps_embed = $content['location']['google_maps_embed'] ?? '';
+$location_address  = trim((string)($content['location']['address'] ?? ''));
+if ($location_address === '') $location_address = trim((string)($content['footer']['address'] ?? ''));
+if ($location_address === '') $location_address = '123 Transient Street, City';
+$google_maps_embed = cleanGoogleMapsEmbed($content['location']['google_maps_embed'] ?? '');
 $maps_url          = getGoogleMapsUrl($location_address);
-$default_map_url   = 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3863!2d119!3d16!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x0!2z!5e0!3m2!1sen!2sph!4v1';
-$map_embed         = !empty($google_maps_embed) && $google_maps_embed !== '#' ? $google_maps_embed : $default_map_url;
+// Valid saved embed -> use it. Otherwise fall back to an address-based Google Maps embed (never "undefined"/cid-only).
+$map_embed         = $google_maps_embed !== ''
+    ? $google_maps_embed
+    : 'https://www.google.com/maps?q=' . urlencode($location_address) . '&output=embed';
 
 /* ------------------------------------------------------------
    TERMS STATE
@@ -298,7 +294,7 @@ $nav_active = 'home';
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
     <meta name="theme-color" content="#06263D">
-    <title>Transient House &amp; Tours — Hundred Islands, Alaminos</title>
+    <title>Jerry Dino's Stay — Hundred Islands, Alaminos</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -309,6 +305,9 @@ $nav_active = 'home';
 <body>
 
 <?php include 'components/navbar.php'; ?>
+<?php if (($_GET['notice'] ?? '') === 'tours_unavailable'): ?>
+    <div role="status" style="max-width:1100px;margin:110px auto -90px;padding:14px 18px;border-radius:12px;background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">Tours/Boat booking is no longer available online. You can still book a stay, food, or a package.</div>
+<?php endif; ?>
 
 <!-- ============================================================
      HERO
@@ -328,7 +327,7 @@ $nav_active = 'home';
                     Hundred Islands &bull; Alaminos, Pangasinan
                 </span>
 
-                <h1><?php echo htmlspecialchars($content['hero']['title'] ?? 'Welcome to Transient House & Tours'); ?></h1>
+                <h1><?php echo htmlspecialchars((!empty($content['hero']['title']) && $content['hero']['title'] !== 'Welcome to Transient House & Tours') ? $content['hero']['title'] : "Jerry Dino's Stay"); ?></h1>
 
                 <p class="hero__subtitle">
                     <?php echo htmlspecialchars($content['hero']['subtitle'] ?? 'Your home away from home and gateway to unforgettable island adventures.'); ?>
@@ -361,15 +360,6 @@ $nav_active = 'home';
                         <span class="planner-option__text">
                             <span class="planner-option__title">Book a stay</span>
                             <span class="planner-option__desc"><?php echo (int)$available_houses; ?> houses currently available</span>
-                        </span>
-                        <i class="fas fa-arrow-right planner-option__arrow"></i>
-                    </a>
-
-                    <a href="tours.php" class="planner-option">
-                        <span class="planner-option__icon"><i class="fas fa-ship"></i></span>
-                        <span class="planner-option__text">
-                            <span class="planner-option__title">Explore island tours</span>
-                            <span class="planner-option__desc"><?php echo (int)$available_tours; ?> tour options available</span>
                         </span>
                         <i class="fas fa-arrow-right planner-option__arrow"></i>
                     </a>
@@ -437,33 +427,6 @@ $nav_active = 'home';
 
                     <span class="experience-card__arrow">
                         Explore stays <i class="fas fa-arrow-right"></i>
-                    </span>
-                </div>
-            </a>
-
-
-            <!-- Island Tours -->
-            <a href="tours.php" class="experience-card">
-                <img class="experience-card__img"
-                     src="uploads/experience/tours.jpg"
-                     alt="Island Tours"
-                     loading="lazy">
-
-                <div class="experience-card__overlay"></div>
-
-                <div class="experience-card__body">
-                    <span class="experience-card__icon">
-                        <i class="fas fa-ship"></i>
-                    </span>
-
-                    <h3 class="experience-card__title">Island Tours</h3>
-
-                    <p class="experience-card__desc">
-                        Boat tours to Governor's, Quezon, Marcos, and Children's Islands.
-                    </p>
-
-                    <span class="experience-card__arrow">
-                        See tours <i class="fas fa-arrow-right"></i>
                     </span>
                 </div>
             </a>
@@ -554,39 +517,6 @@ $nav_active = 'home';
             <div class="empty-state card card-body text-center">
                 <i class="fas fa-home"></i>
                 <p>No houses available yet. Please check back later.</p>
-            </div>
-        <?php endif; ?>
-    </div>
-</section>
-
-<!-- ============================================================
-     TOURS
-     ============================================================ -->
-<section class="section">
-    <div class="container">
-        <div class="section-head">
-            <span class="eyebrow">Popular island tours</span>
-            <h2>Popular island tours</h2>
-            <p>Hop on a boat and discover why travelers keep coming back.</p>
-        </div>
-
-        <?php if (!empty($featured_tours)): ?>
-            <div class="grid grid-auto-3">
-                <?php foreach ($featured_tours as $tour):
-                    $tour_gallery = $featured_tour_gallery[$tour['id']] ?? [];
-                    include 'components/card-tour.php';
-                endforeach; ?>
-            </div>
-
-            <div class="text-center" style="margin-top: var(--space-8);">
-                <a href="tours.php" class="btn btn-ocean btn-lg">
-                    Explore all tours <i class="fas fa-arrow-right"></i>
-                </a>
-            </div>
-        <?php else: ?>
-            <div class="empty-state card card-body text-center">
-                <i class="fas fa-ship"></i>
-                <p>No tours available yet. Please check back later.</p>
             </div>
         <?php endif; ?>
     </div>
@@ -781,7 +711,7 @@ $nav_active = 'home';
                  <?php endif; ?>></div>
 
             <h2><?php echo htmlspecialchars($content['cta']['title'] ?? 'Ready to Book Your Stay?'); ?></h2>
-            <p><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses or exciting tour packages.'); ?></p>
+            <p><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose a comfortable house, build a package, or order food for your stay.'); ?></p>
 
             <div class="cta-banner__actions">
                 <a href="houses.php" class="btn btn-primary btn-lg">

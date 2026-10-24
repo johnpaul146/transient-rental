@@ -8,7 +8,7 @@
  *   $is_logged_in, $_SESSION['user_id'], $_SESSION['role']
  *
  * Optional:
- *   $nav_active = 'home' | 'houses' | 'tours' | 'activities' | 'food' | 'packages'
+ *   $nav_active = 'home' | 'houses' | 'activities' | 'food' | 'packages'
  *   $nav_variant = 'floating' (default) | 'solid'
  */
 
@@ -21,7 +21,6 @@ $currentPage = basename($_SERVER['PHP_SELF']);
 $pageActiveMap = [
     'index.php'      => 'home',
     'houses.php'     => 'stay',
-    'tours.php'      => 'tours',
     'activities.php' => 'activities',
     'food.php'       => 'food',
     'packages.php'   => 'packages'
@@ -51,7 +50,6 @@ $navLogoExists = !empty($navLogoPath);
 $navItems = [
     'home'       => ['label' => 'Home',       'icon' => 'fa-home',          'href' => 'index.php'],
     'stay'       => ['label' => 'Stay',       'icon' => 'fa-bed',           'href' => 'houses.php'],
-    'tours'      => ['label' => 'Tours',      'icon' => 'fa-umbrella-beach','href' => 'tours.php'],
     'activities' => ['label' => 'Activities', 'icon' => 'fa-water',         'href' => 'activities.php'],
     'food'       => ['label' => 'Food',       'icon' => 'fa-utensils',      'href' => 'food.php'],
     'packages'   => ['label' => 'Packages',   'icon' => 'fa-box-open',      'href' => 'packages.php'],
@@ -74,8 +72,8 @@ $navItems = [
                 <span class="nav-drawer__brand-fallback"><i class="fas fa-umbrella-beach"></i></span>
             <?php endif; ?>
             <span class="nav-drawer__brand-text">
-                <span class="nav-drawer__brand-name">Transient House</span>
-                <span class="nav-drawer__brand-sub">&amp; Tours</span>
+                <span class="nav-drawer__brand-name">Jerry Dino's Stay</span>
+                <span class="nav-drawer__brand-sub">Hundred Islands</span>
             </span>
         </a>
         <button type="button" class="nav-drawer__close" id="navDrawerClose" aria-label="Close menu">
@@ -143,7 +141,7 @@ $navItems = [
                 <span class="navbar__brand-fallback"><i class="fas fa-umbrella-beach"></i></span>
             <?php endif; ?>
             <span class="navbar__brand-text">
-                <span class="navbar__brand-name">Transient House &amp; Tours</span>
+                <span class="navbar__brand-name">Jerry Dino's Stay</span>
                 <span class="navbar__brand-loc">
                     <i class="fas fa-map-marker-alt"></i> Hundred Islands &bull; Alaminos
                 </span>

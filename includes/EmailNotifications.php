@@ -304,7 +304,7 @@ class EmailNotifications {
           <tr>
             <td align="center" style="background-color: #0a1628; padding: 20px;">
               <p style="margin:0; color:#475569; font-size: 11px; line-height: 1.5;">
-                &copy; ' . date('Y') . ' Transient House &amp; Tours. All rights reserved.<br>
+                &copy; ' . date('Y') . ' Jerry Dino&#039;s Stay. All rights reserved.<br>
                 ' . htmlspecialchars($footer_note) . '
               </p>
             </td>
@@ -980,7 +980,7 @@ class EmailNotifications {
             'title'         => 'Booking Confirmation',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
-            'intro_text'    => 'Thank you for choosing Transient House &amp; Tours! Your reservation details and stay schedule have been successfully registered. Below is your official schedule summary:',
+            'intro_text'    => 'Thank you for choosing Jerry Dino\'s Stay! Your reservation details and stay schedule have been successfully registered. Below is your official schedule summary:',
             'content'       => $content,
             'gradient_from' => '#0B2447',
             'gradient_to'   => '#4DA6D9',
@@ -1438,7 +1438,7 @@ class EmailNotifications {
             'title'         => 'Package Booking Confirmation',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
-            'intro_text'    => 'Thank you for choosing Transient House &amp; Tours! Your package booking has been successfully registered. Below are your bundled items:',
+            'intro_text'    => 'Thank you for choosing Jerry Dino\'s Stay! Your package booking has been successfully registered. Below are your bundled items:',
             'content'       => $content,
             'gradient_from' => '#0B2447',
             'gradient_to'   => '#4DA6D9',

@@ -28,7 +28,11 @@ class RebookService {
 
     const MAX_REBOOKS = 2;
     const WINDOW_DAYS = 7;
-    const SERVICE_TYPES = ['tour', 'food', 'package'];
+    const SERVICE_TYPES = ['tour', 'food', 'package'];   // 'tour' is kept ONLY so old rebook requests/records still load; it can no longer be rebooked
+
+    /** The Tours/Boat booking service was removed: rebooking would (re)create a tour reservation, so it is refused everywhere. */
+    const TOUR_REMOVED_MESSAGE = 'Tour/boat bookings are no longer offered, so a tour booking can no longer be rebooked. Please contact us if you need help.';
+    const PACKAGE_TOUR_MESSAGE = 'This package includes a tour, which is no longer offered, so the package can no longer be rebooked online. Please contact us if you need help.';
 
     /** Remaining rebooks for ONE booking (the backend rule). */
     public static function remaining(array $booking) {
@@ -54,6 +58,8 @@ class RebookService {
      * the 7-day window. Every other rule (status, paid credit, package child, passed date) still applies.
      */
     public static function serviceBlockReason($type, array $booking, $ignoreLimitWindow = false) {
+        if ($type === 'tour') return self::TOUR_REMOVED_MESSAGE;
+        if ($type === 'package' && !empty($booking['tour_booking_id'])) return self::PACKAGE_TOUR_MESSAGE;
         if (!in_array($type, self::SERVICE_TYPES, true)) return 'Unknown booking type.';
         if ($type !== 'package' && !empty($booking['package_id'])) return 'This item is part of a package. Rebook the whole package instead.';
         // Same rule for every service: confirmed or cancelled WITH money received; never completed.
@@ -619,7 +625,7 @@ class RebookService {
      * requested schedule (null if unusable), 'changed' => bool].
      */
     public static function plan(PDO $pdo, $type, array $b, array $in, $parts = null, $lock = false) {
-        if ($type === 'tour')    return self::planTour($pdo, $b, $in, $lock);
+        if ($type === 'tour')    return self::planFail(self::TOUR_REMOVED_MESSAGE);   // Tours/Boat removed: never (re)create a tour reservation
         if ($type === 'food')    return self::planFood($pdo, $b, $in, $lock);
         if ($type === 'package') return self::planPackage($pdo, $b, $parts ?: self::packageView($pdo, $b), $in, $lock);
         return self::planFail('Unknown booking type.');
@@ -665,6 +671,7 @@ class RebookService {
      * rebooking credit, because it gave up its dates then).
      */
     private static function planPackage(PDO $pdo, array $p, array $parts, array $in, $lock) {
+        if (!empty($parts['tour']) || !empty($p['tour_booking_id'])) return self::planFail(self::PACKAGE_TOUR_MESSAGE);   // Tours/Boat removed
         $cur = self::currentSchedule('package', $p, $parts);
         if (!$cur['house'] && !$cur['tour'] && !$cur['food']) return self::planFail('This package has no dated items to move.');
         $cancelled = ($p['booking_status'] ?? '') === 'cancelled';

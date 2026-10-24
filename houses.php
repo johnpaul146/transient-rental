@@ -137,7 +137,7 @@ if (empty(trim($bookingTermsBody))) {
 <h3>👥 Guest Policy</h3>
 <ul>
     <li>The number of guests must not exceed the <strong>declared pax count</strong>.</li>
-    <li>All guest names must be <strong>accurate and complete</strong>.</li>
+    <li>The declared number of guests and senior citizens must be accurate. Please disclose relevant health conditions so staff can prepare appropriately.</li>
     <li>Additional guests beyond the declared pax will not be accommodated.</li>
 </ul>
 
@@ -189,11 +189,29 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
         $check_in_time  = substr($check_in_time_db, 0, 5);
         $check_out_time = substr($check_out_time_db, 0, 5);
 
+        $house_id = filter_var($_POST['house_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        if ($house_id === false) throw new Exception("Please select a valid house.");
+
+        $guests = filter_var($_POST['guests'] ?? null, FILTER_VALIDATE_INT);
+        if ($guests === false || $guests < 1) throw new Exception("Please enter a valid number of guests.");
+        if ($guests > 20) $guests = 20; // Preserve the existing form limit.
+
+        // Re-check the selected house on the server, not only in the browser.
+        $house_stmt = $pdo->prepare("SELECT id, house_name, price_per_night, capacity, status FROM houses WHERE id = ?");
+        $house_stmt->execute([$house_id]);
+        $house = $house_stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$house) throw new Exception("Selected house was not found. Please choose another house.");
+        if (($house['status'] ?? '') !== 'available') throw new Exception("This house is not currently available for booking.");
+        if ((int)($house['capacity'] ?? 0) > 0 && $guests > (int)$house['capacity']) {
+            throw new Exception("This house fits up to " . (int)$house['capacity'] . " guests. Please reduce the number of guests.");
+        }
+        $price = (float)$house['price_per_night'];
+
         // Same rule everywhere (AvailabilityService): confirmed/completed stays hold the
         // nights [check-in, check-out); blocked dates count for those nights only.
         // Pending reservations may overlap — the first confirmed fee wins, and the
         // check is repeated when the fee is confirmed.
-        $house_conflict = AvailabilityService::houseConflict($pdo, (int)$_POST['house_id'], $_POST['check_in'], $_POST['check_out'], [], [], $check_in_time_db, $check_out_time_db);
+        $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $_POST['check_in'], $_POST['check_out'], [], [], $check_in_time_db, $check_out_time_db);
         if ($house_conflict !== null) {
             throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
         }
@@ -208,60 +226,45 @@ if(isset($_POST['logged_booking']) && isset($_SESSION['user_id'])) {
         
         $guest_id = $guest['id'];
         
-        $house = $pdo->prepare("SELECT price_per_night FROM houses WHERE id = ?");
-        $house->execute([$_POST['house_id']]);
-        $price = $house->fetchColumn();
-        
         $nights = $check_out->diff($check_in)->days;
         $total = $price * $nights;
         $reference = generateReferenceNumber();
         
-        $guests = intval($_POST['guests']);
-        if($guests < 1) $guests = 1;
-        if($guests > 20) $guests = 20;
-        
-        // ✅ SERVER-SIDE VALIDATION: Guest names must match pax and contain only letters
-        $guest_names = isset($_POST['guest_names']) ? trim($_POST['guest_names']) : '';
-        
-        // Parse guest names (one per line)
-        $names_array = array_values(array_filter(array_map('trim', explode("\n", $guest_names))));
-        $names_count = count($names_array);
-        
-        if($names_count !== $guests) {
-            throw new Exception("Please provide exactly " . $guests . " guest name(s). You entered " . $names_count . ".");
+        $senior_citizens = filter_var($_POST['senior_citizens'] ?? 0, FILTER_VALIDATE_INT);
+        $senior_citizens = ($senior_citizens === false) ? -1 : (int)$senior_citizens;
+        $health_answer = (string)($_POST['has_health_condition'] ?? '');
+        if (!in_array($health_answer, ['0', '1'], true)) throw new Exception("Please answer whether any guest has a health condition.");
+        $has_health_condition = $health_answer === '1' ? 1 : 0;
+        $health_condition_details = trim((string)($_POST['health_condition_details'] ?? ''));
+        if ($senior_citizens < 0 || $senior_citizens > $guests) {
+            throw new Exception("Senior-citizen count must be between 0 and the total number of guests.");
         }
-        
-        // ✅ Validate each name: only letters, spaces, hyphens, periods, apostrophes
-        foreach($names_array as $name) {
-            if(!preg_match("/^[a-zA-ZÀ-ÿ\s\-'.]+$/u", $name)) {
-                throw new Exception("Guest names can only contain letters, spaces, hyphens, periods, and apostrophes. Invalid name: " . $name);
-            }
-            if(strlen($name) < 2) {
-                throw new Exception("Guest name is too short: " . $name);
-            }
+        if (mb_strlen($health_condition_details) > 1000) {
+            throw new Exception("Health-condition details must be 1,000 characters or fewer.");
         }
+        if (!$has_health_condition) $health_condition_details = '';
         
-        // Store as newline-separated
-        $guest_names_clean = implode("\n", $names_array);
-        
-        // ✅ UPDATED: Include check_in_time & check_out_time
+        // Check-out TIME is still derived from check-in TIME and availability is still revalidated.
         // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
-        $stmt = $pdo->prepare("INSERT INTO house_bookings 
-            (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time, 
-             number_of_guests, total_amount, reservation_fee_amount, guest_names, payment_status, booking_status, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+        $stmt = $pdo->prepare("INSERT INTO house_bookings
+            (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time,
+             number_of_guests, total_amount, reservation_fee_amount, senior_citizens, has_health_condition,
+             health_condition_details, payment_status, booking_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
         $stmt->execute([
-            $guest_id, 
-            $_POST['house_id'], 
-            $reference, 
-            $_POST['check_in'], 
+            $guest_id,
+            $house_id,
+            $reference,
+            $_POST['check_in'],
             $check_in_time_db,
-            $_POST['check_out'], 
+            $_POST['check_out'],
             $check_out_time_db,
-            $guests, 
-            $total, 
+            $guests,
+            $total,
             PaymentService::feeFor($total),
-            $guest_names_clean
+            $senior_citizens,
+            $has_health_condition,
+            $health_condition_details !== '' ? $health_condition_details : null
         ]);
         
         $booking_id = $pdo->lastInsertId();
@@ -1272,72 +1275,6 @@ $is_logged_in = isset($_SESSION['user_id']);
 
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244, 180, 0, 0.3); background: #e6a800; }
 
-        /* Guest Names Field */
-        .guest-names-field {
-            background: #f8fafc;
-            border-radius: 12px;
-            padding: 15px;
-            margin: 10px 0;
-            border: 1px solid #e2e8f0;
-        }
-
-        .guest-names-field .guest-names-header {
-            display: flex; justify-content: space-between;
-            align-items: center; margin-bottom: 8px;
-            flex-wrap: wrap; gap: 8px;
-        }
-
-        .guest-names-field .guest-names-header label {
-            font-weight: 600; color: #1e293b;
-            font-size: 13px; margin: 0;
-        }
-
-        .guest-names-field .guest-count-badge {
-            background: #e8f0fe; color: #4DA6D9;
-            padding: 2px 12px; border-radius: 20px;
-            font-size: 11px; font-weight: 700;
-        }
-
-        .guest-names-field .guest-count-badge.match { background: #d1fae5; color: #065f46; }
-        .guest-names-field .guest-count-badge.over { background: #fee2e2; color: #991b1b; }
-        .guest-names-field .guest-count-badge.under { background: #fef3c7; color: #92400e; }
-
-        .guest-names-field .guest-name-row {
-            display: flex; align-items: center;
-            gap: 8px; margin-bottom: 8px;
-        }
-
-        .guest-names-field .guest-name-row .guest-badge {
-            min-width: 28px; height: 28px;
-            background: #4DA6D9; color: white;
-            border-radius: 50%; display: flex;
-            align-items: center; justify-content: center;
-            font-size: 12px; font-weight: 700; flex-shrink: 0;
-        }
-
-        .guest-names-field .guest-name-row .guest-name-input {
-            flex: 1; padding: 10px 14px;
-            border: 2px solid #e2e8f0; border-radius: 10px;
-            font-size: 14px; font-family: inherit;
-            background: white; transition: all 0.2s;
-        }
-
-        .guest-names-field .guest-name-row .guest-name-input:focus {
-            outline: none; border-color: #4DA6D9;
-            box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1);
-        }
-
-        .guest-names-field .guest-name-row .guest-name-input.invalid { border-color: #ef4444; background: #fef2f2; }
-        .guest-names-field .guest-name-row .guest-name-input.valid { border-color: #10b981; }
-
-        .guest-names-field .help-text {
-            font-size: 11px; color: #94a3b8;
-            margin-top: 5px; display: flex;
-            align-items: center; gap: 4px;
-        }
-
-        .guest-names-field .help-text.error { color: #ef4444; font-weight: 600; }
-
         /* CALENDAR */
         .calendar-container { background: white; border-radius: 16px; padding: 20px; margin: 15px 0; border: 1px solid #e8f0fe; }
         .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
@@ -1367,7 +1304,9 @@ $is_logged_in = isset($_SESSION['user_id']);
             position: relative;
         }
 
-        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.blocked):not(.past) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day.available { background: #dcfce7; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
+        .calendar-grid .day.available:hover:not(.disabled):not(.booked):not(.blocked):not(.past) { background: #bbf7d0; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.blocked):not(.past):not(.available) { background: #eef2ff; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; border-radius: 8px; }
         .calendar-grid .day.in-range { background: #dbeafe; color: #0B2447; }   /* Phase 7.9.3: nights between check-in and check-out (same look as packages.php) */
         .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
@@ -2714,19 +2653,27 @@ $is_logged_in = isset($_SESSION['user_id']);
                 
                 <div class="form-group">
                     <label><i class="fas fa-users"></i> Number of Pax * <small style="color: #94a3b8; font-weight: 400;">(max 20)</small></label>
-                    <input type="number" name="guests" id="guests" class="form-control" min="1" max="20" placeholder="Enter number of pax" required onchange="rebuildGuestNameInputs()" oninput="validatePax(this)">
+                    <input type="number" name="guests" id="guests" class="form-control" min="1" max="20" placeholder="Enter number of pax" required oninput="validatePax(this)">
                 </div>
                 
-                <div class="guest-names-field">
-                    <div class="guest-names-header">
-                        <label><i class="fas fa-users"></i> Guest Names</label>
-                        <span class="guest-count-badge" id="guestCountBadge">0 / 0</span>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label><i class="fas fa-user-check"></i> Senior citizens in the group *</label>
+                        <input type="number" name="senior_citizens" id="senior_citizens" class="form-control" min="0" max="20" value="0" required>
+                        <small class="time-helper">How many of the guests are senior citizens? This cannot exceed total pax.</small>
                     </div>
-                    <div id="guestNamesList"></div>
-                    <input type="hidden" name="guest_names" id="guest_names" value="">
-                    <div class="help-text" id="guestNamesHelp">
-                        <i class="fas fa-info-circle"></i> Enter the number of pax above to add guest name fields
+                    <div class="form-group">
+                        <label><i class="fas fa-heartbeat"></i> Does any guest have a health condition? *</label>
+                        <select name="has_health_condition" id="has_health_condition" class="form-control" required onchange="toggleHealthConditionFields()">
+                            <option value="" selected>Choose Yes or No</option>
+                            <option value="0">No</option>
+                            <option value="1">Yes</option>
+                        </select>
                     </div>
+                </div>
+                <div class="form-group" id="healthConditionDetailsGroup" style="display:none;">
+                    <label><i class="fas fa-notes-medical"></i> Health condition details (optional)</label>
+                    <textarea name="health_condition_details" id="health_condition_details" class="form-control" rows="2" maxlength="1000" placeholder="Briefly describe any condition staff should know about."></textarea>
                 </div>
                 
                 <div style="background: #f8fafc; padding: 20px; border-radius: 16px; margin: 20px 0;">
@@ -3424,161 +3371,28 @@ function closePaymentPopup() {
 // ============================================================
 // GUEST NAME SANITIZER
 // ============================================================
-function sanitizeName(value) {
-    return value
-        .replace(/[^a-zA-ZÀ-ÿ\s\-'.]/g, '')
-        .replace(/\s{2,}/g, ' ')
-        .slice(0, 50);
-}
 
 function validatePax(input) {
-    let raw = input.value.trim();
-    if (raw === '') { rebuildGuestNameInputs(); return; }
-    let val = parseInt(raw);
-    if (isNaN(val) || val < 1) {
-        input.value = 1;
-    } else if (val > 20) {
-        input.value = 20;
-        alert('Maximum of 20 guests allowed.');
-    }
-    rebuildGuestNameInputs();
+    if (input.value.trim() === '') { calculateTotal(); return; }
+    var n = parseInt(input.value, 10);
+    if (!Number.isFinite(n) || n < 1) n = 1;
+    if (n > 20) n = 20;
+    input.value = String(n);
+    var seniorInput = document.getElementById('senior_citizens');
+    if (seniorInput) seniorInput.max = String(n);
+    if (seniorInput && parseInt(seniorInput.value || '0', 10) > n) seniorInput.value = String(n);
     calculateTotal();
 }
 
-function rebuildGuestNameInputs() {
-    const paxInput = document.getElementById('guests');
-    const listEl = document.getElementById('guestNamesList');
-    const badgeEl = document.getElementById('guestCountBadge');
-    const helpEl = document.getElementById('guestNamesHelp');
-    const hiddenEl = document.getElementById('guest_names');
-
-    if (!paxInput || !listEl || !badgeEl || !hiddenEl) return;
-
-    const isFreshReset = listEl.dataset.freshReset === '1';
-    let currentNames = [];
-
-    if (!isFreshReset) {
-        const existingInputs = listEl.querySelectorAll('.guest-name-input');
-        if (existingInputs.length > 0) {
-            currentNames = Array.from(existingInputs).map(inp => inp.value);
-        }
-    } else {
-        delete listEl.dataset.freshReset;
-    }
-
-    const pax = parseInt(paxInput.value) || 0;
-    listEl.innerHTML = '';
-
-    if (pax <= 0) {
-        badgeEl.textContent = '0 / 0';
-        badgeEl.classList.remove('match', 'over', 'under');
-        badgeEl.classList.add('under');
-        if (helpEl) {
-            helpEl.classList.remove('error');
-            helpEl.innerHTML = '<i class="fas fa-info-circle"></i> Enter the number of pax above to add guest name fields';
-        }
-        syncGuestNamesHidden();
-        return;
-    }
-
-    for (let i = 0; i < pax; i++) {
-        const row = document.createElement('div');
-        row.className = 'guest-name-row';
-
-        const badge = document.createElement('span');
-        badge.className = 'guest-badge';
-        badge.textContent = (i + 1);
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'guest-name-input';
-        input.placeholder = 'Enter guest ' + (i + 1) + ' full name';
-        input.maxLength = 50;
-        input.autocomplete = 'off';
-        input.value = currentNames[i] || '';
-
-        input.addEventListener('input', function() {
-            const before = this.value;
-            const after = sanitizeName(before);
-            if (before !== after) {
-                const pos = this.selectionStart;
-                const diff = before.length - after.length;
-                this.value = after;
-                try { this.setSelectionRange(pos - diff, pos - diff); } catch (e) {}
-            }
-            this.classList.toggle('invalid', this.value.trim().length > 0 && this.value.trim().length < 2);
-            this.classList.toggle('valid', this.value.trim().length >= 2);
-            updateGuestCountBadge();
-            syncGuestNamesHidden();
-        });
-
-        input.addEventListener('keypress', function(e) {
-            const char = String.fromCharCode(e.which);
-            if (!/[a-zA-ZÀ-ÿ\s\-'.]/.test(char)) {
-                e.preventDefault();
-            }
-        });
-
-        input.addEventListener('paste', function(e) {
-            e.preventDefault();
-            const pasted = (e.clipboardData || window.clipboardData).getData('text');
-            const cleaned = sanitizeName(pasted);
-            const start = this.selectionStart;
-            const end = this.selectionEnd;
-            this.value = this.value.slice(0, start) + cleaned + this.value.slice(end);
-            updateGuestCountBadge();
-            syncGuestNamesHidden();
-        });
-
-        row.appendChild(badge);
-        row.appendChild(input);
-        listEl.appendChild(row);
-    }
-
-    updateGuestCountBadge();
-    syncGuestNamesHidden();
-}
-
-function updateGuestCountBadge() {
-    const badgeEl = document.getElementById('guestCountBadge');
-    const helpEl = document.getElementById('guestNamesHelp');
-    if (!badgeEl) return;
-
-    const inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    const filled = Array.from(inputs).filter(i => i.value.trim().length >= 2).length;
-    const total = inputs.length;
-
-    badgeEl.textContent = filled + ' / ' + total;
-    badgeEl.classList.remove('match', 'over', 'under');
-
-    if (total === 0) {
-        badgeEl.classList.add('under');
-        if (helpEl) {
-            helpEl.classList.remove('error');
-            helpEl.innerHTML = '<i class="fas fa-info-circle"></i> Enter the number of pax above to add guest name fields';
-        }
-        return;
-    }
-
-    if (filled === total && total > 0) {
-        badgeEl.classList.add('match');
-        if (helpEl) {
-            helpEl.classList.remove('error');
-            helpEl.innerHTML = '<i class="fas fa-check-circle" style="color: #10b981;"></i> All guest names filled. Ready to book!';
-        }
-    } else {
-        badgeEl.classList.add('under');
-        if (helpEl) {
-            helpEl.classList.remove('error');
-            helpEl.innerHTML = '<i class="fas fa-info-circle"></i> Enter the full name of each guest (letters only, no numbers or special characters)';
-        }
-    }
-}
-
-function syncGuestNamesHidden() {
-    const inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    const names = Array.from(inputs).map(i => i.value.trim()).filter(n => n.length > 0);
-    document.getElementById('guest_names').value = names.join('\n');
+function toggleHealthConditionFields() {
+    var select = document.getElementById('has_health_condition');
+    var group = document.getElementById('healthConditionDetailsGroup');
+    var details = document.getElementById('health_condition_details');
+    if (!select || !group || !details) return;
+    var needsDetails = select.value === '1';
+    group.style.display = needsDetails ? 'block' : 'none';
+    details.required = false;
+    if (!needsDetails) details.value = '';
 }
 
 function calculateTotal() {
@@ -3665,6 +3479,7 @@ function generateCalendar(month, year, bookedDates) {
         if (isPast) classes += ' past';
         if (isBlocked) classes += ' blocked';
         else if (isBooked) classes += ' booked';
+        if (!isPast && !isBlocked && !isBooked) classes += ' available';
         if (selectedStartDate && dateStr === selectedStartDate) classes += ' selected';
         if (selectedEndDate && dateStr === selectedEndDate) classes += ' selected';
         // Phase 7.9.3 (visual only): dates strictly between check-in and check-out. Booked / blocked stay authoritative and never get the range look.
@@ -3866,11 +3681,10 @@ function bookHouse(houseId, price, houseName) {
         });
     });
     
-    document.getElementById('guestNamesList').innerHTML = '';
-    document.getElementById('guest_names').value = '';
-    document.getElementById('guestNamesList').dataset.freshReset = '1';
-    rebuildGuestNameInputs();
-    updateGuestCountBadge();
+    document.getElementById('senior_citizens').value = '0';
+    document.getElementById('has_health_condition').value = '';
+    document.getElementById('health_condition_details').value = '';
+    toggleHealthConditionFields();
     
     const today = new Date();
     currentMonth = today.getMonth();
@@ -3881,7 +3695,6 @@ function bookHouse(houseId, price, houseName) {
 }
 
 function requestBookingWithTerms() {
-    syncGuestNamesHidden();
     if (!validateBookingFormBeforeTerms()) return;
     __pendingBookingSubmit = true;
     openBookingTermsModal();
@@ -3914,27 +3727,15 @@ function validateBookingFormBeforeTerms() {
         return false;
     }
 
-    const inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    const names = Array.from(inputs).map(i => i.value.trim()).filter(n => n.length > 0);
-
-    if (names.length !== guests) {
-        alert('❌ Please provide exactly ' + guests + ' guest name(s).\n\nYou entered ' + names.length + ' name(s).');
+    const seniorInput = document.getElementById('senior_citizens');
+    const seniorCount = parseInt(seniorInput.value, 10);
+    if (seniorInput.value.trim() === '' || isNaN(seniorCount) || seniorCount < 0 || seniorCount > guests) {
+        alert('Senior-citizen count must be between 0 and the total number of guests.');
+        seniorInput.focus();
         return false;
     }
-
-    for (let i = 0; i < names.length; i++) {
-        const name = names[i];
-        if (name.length < 2) {
-            alert('❌ Guest ' + (i + 1) + ' name is too short. Please enter the full name.');
-            inputs[i].focus();
-            return false;
-        }
-        if (!/^[a-zA-ZÀ-ÿ\s\-'.]+$/.test(name)) {
-            alert('❌ Guest ' + (i + 1) + ' name contains invalid characters. Only letters, spaces, hyphens, periods, and apostrophes are allowed.');
-            inputs[i].focus();
-            return false;
-        }
-    }
+    const healthSelect = document.getElementById('has_health_condition');
+    const healthDetails = document.getElementById('health_condition_details');
 
     return true;
 }
@@ -3943,7 +3744,6 @@ function submitPendingBooking() {
     var bookingForm = document.getElementById('bookingForm');
     if (!bookingForm) return;
 
-    syncGuestNamesHidden();
 
     var existing = bookingForm.querySelector('input[name="logged_booking"][data-dynamic="1"]');
     if (existing) existing.remove();
@@ -4268,9 +4068,6 @@ setTimeout(function() {
     };
 <?php endif; ?>
 
-document.addEventListener('DOMContentLoaded', function() {
-    rebuildGuestNameInputs();
-});
 
 function reopenTermsModal(tabName) {
     var modal = document.getElementById('bookingTermsModal');

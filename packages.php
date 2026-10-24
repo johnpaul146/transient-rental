@@ -43,7 +43,7 @@ try {
 // ============================================================
 // ✅ BLOCKING STATUSES — ONLY these block dates (turn red)
 //    Pending bookings DO NOT block other guests
-//    Applies to: houses, tours, AND food
+//    Applies to: houses and food
 // ============================================================
 $blocking_statuses = ['confirmed', 'approved', 'completed'];
 $blocking_placeholders = "'" . implode("','", $blocking_statuses) . "'";
@@ -96,26 +96,31 @@ if (isset($_SESSION['flash_feedback_success'])) {
 // ============================================================
 // Initialize package cart
 // ============================================================
-if (!isset($_SESSION['package_cart'])) {
-    $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+if (!isset($_SESSION['package_cart']) || !is_array($_SESSION['package_cart'])) {
+    $_SESSION['package_cart'] = ['house' => null, 'food' => null];
 }
 
 $cart = &$_SESSION['package_cart'];
-
-if (!is_array($cart['house']) || !isset($cart['house']['price'])) $cart['house'] = null;
-if (!is_array($cart['food'])  || !isset($cart['food']['price']))  $cart['food']  = null;
-if (!is_array($cart['tour'])  || !isset($cart['tour']['price']))  $cart['tour']  = null;
+$cart['house'] = (is_array($cart['house'] ?? null) && isset($cart['house']['price'])) ? $cart['house'] : null;
+$cart['food']  = (is_array($cart['food'] ?? null) && isset($cart['food']['price'])) ? $cart['food'] : null;
+// Tours/Boat are no longer offered in guest package booking. Remove any stale cart item from older sessions.
+unset($cart['tour']);
 
 $has_house = !empty($cart['house']);
 $has_food  = !empty($cart['food']);
-$has_tour  = !empty($cart['tour']);
-$has_any   = $has_house || $has_food || $has_tour;
+$has_any   = $has_house || $has_food;
+// A package cart can survive a deployment in the guest's PHP session. Do not silently
+// turn missing answers from an old cart into zero seniors / No health condition.
+$house_needs_group_details = $has_house && (
+    !array_key_exists('senior_citizens', $cart['house']) ||
+    filter_var($cart['house']['senior_citizens'] ?? null, FILTER_VALIDATE_INT) === false ||
+    !array_key_exists('has_health_condition', $cart['house']) ||
+    !in_array((string)($cart['house']['has_health_condition'] ?? ''), ['0', '1'], true)
+);
 
-// Schedule rule (AvailabilityService::packageWindowError): with a house in the package, the tour and
-// food must fall inside the house stay. These two helpers only adapt cart rows; the rule lives in the service.
+// Package schedule checks cover food dates against the selected house stay.
 function pkgCartScheduleItems(array $cart) {
     $items = [];
-    if (!empty($cart['tour'])) $items[] = ['label' => 'Tour', 'date' => (string)($cart['tour']['booking_date'] ?? ''),   'time' => (string)($cart['tour']['preferred_time'] ?? '')];
     if (!empty($cart['food'])) $items[] = ['label' => 'Food', 'date' => (string)($cart['food']['preferred_date'] ?? ''), 'time' => (string)($cart['food']['preferred_time'] ?? '')];
     return $items;
 }
@@ -128,7 +133,7 @@ $pkg_house_name = $has_house ? (string)($cart['house']['name'] ?? '') : '';
 // ============================================================
 if (isset($_GET['remove'])) {
     $type = $_GET['remove'];
-    if (in_array($type, ['house', 'food', 'tour'])) {
+    if (in_array($type, ['house', 'food'])) {
         unset($_SESSION['package_cart'][$type]);
         // Food delivery address was filled automatically from the house: without the house it must be re-entered
         if ($type === 'house' && !empty($_SESSION['package_cart']['food']['delivery_auto'])) {
@@ -144,7 +149,7 @@ if (isset($_GET['remove'])) {
 }
 
 if (isset($_GET['clear'])) {
-    $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+    $_SESSION['package_cart'] = ['house' => null, 'food' => null];
     if (class_exists('SystemLogger')) {
         SystemLogger::log($pdo, 'delete', 'booking', "Guest cleared entire package cart", null, 'package', null, null, 'warning');
     }
@@ -162,7 +167,12 @@ if (isset($_POST['add_house_to_package'])) {
         $check_out = $_POST['check_out'] ?? '';
         $check_in_time  = $_POST['check_in_time']  ?? '14:00';   // check-out time is NOT read: it follows check-in
         $guests = (int)($_POST['guests'] ?? 1);
-        $guest_names_json = $_POST['guest_names_json'] ?? '[]';
+        $senior_citizens = filter_var($_POST['senior_citizens'] ?? 0, FILTER_VALIDATE_INT);
+        $senior_citizens = ($senior_citizens === false) ? -1 : (int)$senior_citizens;
+        $health_answer = (string)($_POST['has_health_condition'] ?? '');
+        if (!in_array($health_answer, ['0', '1'], true)) throw new Exception("Please answer whether any guest has a health condition.");
+        $has_health_condition = $health_answer === '1' ? 1 : 0;
+        $health_condition_details = trim((string)($_POST['health_condition_details'] ?? ''));
 
         if (empty($house_id)) throw new Exception("Please select a house.");
         if (empty($check_in)) throw new Exception("Check-in date is required.");
@@ -195,21 +205,13 @@ if (isset($_POST['add_house_to_package'])) {
         $nights = $check_out_dt->diff($check_in_dt)->days;
         $days = $nights + 1;
 
-        $names_array = json_decode($guest_names_json, true);
-        if (!is_array($names_array)) $names_array = [];
-        $names_array = array_values(array_filter(array_map('trim', $names_array)));
-
-        if (count($names_array) !== $guests) {
-            throw new Exception("Please provide exactly {$guests} guest name(s). You provided " . count($names_array) . ".");
+        if ($senior_citizens < 0 || $senior_citizens > $guests) {
+            throw new Exception("Senior-citizen count must be between 0 and the total number of guests.");
         }
-
-        foreach ($names_array as $n) {
-            if (mb_strlen($n) < 2) throw new Exception("Each guest name must be at least 2 characters. Invalid: {$n}");
-            if (!preg_match("/^[a-zA-ZÀ-ÿ\s\-'.]+$/u", $n)) {
-                throw new Exception("Guest names can only contain letters, spaces, hyphens, periods, and apostrophes. Invalid: {$n}");
-            }
+        if (mb_strlen($health_condition_details) > 1000) {
+            throw new Exception("Health-condition details must be 1,000 characters or fewer.");
         }
-        $guest_names_clean = implode("\n", $names_array);
+        if (!$has_health_condition) $health_condition_details = '';
 
         $stmt = $pdo->prepare("SELECT id, house_name, price_per_night, status, capacity FROM houses WHERE id = ?");
         $stmt->execute([$house_id]);
@@ -222,7 +224,7 @@ if (isset($_POST['add_house_to_package'])) {
         $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out, [], [], $stayTimes['in'], $stayTimes['out']);
         if ($house_conflict !== null) throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
 
-        // Food/tour already in the cart must still fit the (new or changed) house stay
+        // Food already in the cart must still fit the (new or changed) house stay
         $newHouse = ['check_in' => $check_in, 'check_in_time' => $check_in_time, 'check_out' => $check_out];
         $winErr = AvailabilityService::packageWindowError($newHouse, pkgCartScheduleItems($cart));
         if ($winErr !== null) throw new Exception($winErr . " Remove or change that item first, or choose house dates that include it.");
@@ -243,7 +245,9 @@ if (isset($_POST['add_house_to_package'])) {
             'check_out'     => $check_out,
             'check_out_time'=> $check_out_time,  // ✅ NEW
             'guests'        => $guests,
-            'guest_names'   => $guest_names_clean,
+            'senior_citizens' => $senior_citizens,
+            'has_health_condition' => $has_health_condition,
+            'health_condition_details' => $health_condition_details,
             'nights'        => $nights,
             'days'          => $days,
             'price'         => $total_price
@@ -340,69 +344,6 @@ if (isset($_POST['add_food_to_package'])) {
 }
 
 // ============================================================
-// ADD TOUR TO PACKAGE
-// ============================================================
-if (isset($_POST['add_tour_to_package'])) {
-    try {
-        $tour_id = (int)$_POST['tour_id'];
-        $booking_date = $_POST['booking_date'] ?? '';
-        $preferred_time = $_POST['preferred_time'] ?? '';
-        $number_of_guests = (int)($_POST['number_of_guests'] ?? 1);
-        $guest_name = trim($_POST['guest_name'] ?? '');
-        $contact_number = trim($_POST['contact_number'] ?? '');
-        $special_requests = trim($_POST['special_requests'] ?? '');
-
-        if (empty($tour_id)) throw new Exception("Please select a tour.");
-        if (empty($booking_date)) throw new Exception("Booking date is required.");
-        if (empty($preferred_time)) throw new Exception("Preferred time is required.");
-        if (empty($guest_name)) throw new Exception("Guest name is required.");
-
-        $today = date('Y-m-d');
-        $dateErr = AvailabilityService::futureDateError($booking_date);
-        if ($dateErr !== null) throw new Exception($dateErr);
-
-        $contact_number = preg_replace('/[^0-9]/', '', $contact_number);
-        if (substr($contact_number, 0, 1) === '0') $contact_number = substr($contact_number, 1);
-        if (empty($contact_number)) throw new Exception("Contact number is required.");
-        if (!preg_match('/^[0-9]{10}$/', $contact_number)) throw new Exception("PH mobile number must be exactly 10 digits (e.g., 9123456789).");
-        $contact_full = '+63' . $contact_number;
-
-        $stmt = $pdo->prepare("SELECT id, tour_name, price_per_boat, max_guests, status FROM tours WHERE id = ?");
-        $stmt->execute([$tour_id]);
-        $tour = $stmt->fetch();
-        if (!$tour) throw new Exception("Tour not found.");
-        if ($tour['status'] !== 'available') throw new Exception("This tour is not available.");
-
-        if ($number_of_guests < 1) $number_of_guests = 1;
-        if ($number_of_guests > $tour['max_guests']) throw new Exception("Maximum guests allowed for this tour is " . $tour['max_guests'] . ".");
-
-        $tour_conflict = AvailabilityService::tourConflict($pdo, $tour_id, $booking_date);
-        if ($tour_conflict !== null) throw new Exception($tour_conflict . " Please select a different date.");
-
-        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, [['label' => 'Tour', 'date' => $booking_date, 'time' => $preferred_time]]);
-        if ($winErr !== null) throw new Exception($winErr);
-
-        $_SESSION['package_cart']['tour'] = [
-            'id'                => $tour['id'],
-            'name'              => $tour['tour_name'],
-            'booking_date'      => $booking_date,
-            'preferred_time'    => $preferred_time,
-            'number_of_guests'  => $number_of_guests,
-            'guest_name'        => $guest_name,
-            'contact_number'    => $contact_full,
-            'special_requests'  => $special_requests,
-            'price'             => $tour['price_per_boat']
-        ];
-
-        header("Location: packages.php");
-        exit();
-    } catch (Exception $e) {
-        $modal_error = $e->getMessage();
-        $open_modal = 'tour';
-    }
-}
-
-// ============================================================
 // FINAL PACKAGE BOOKING CONFIRMATION
 // ============================================================
 $booking_success = null;
@@ -410,8 +351,31 @@ $booking_error = null;
 
 if (isset($_POST['confirm_package_booking'])) {
     try {
-        // A package needs at least one item (house, tour or food). Checked on the server, before anything is written.
+        // A package needs at least one item (house or food). Checked on the server, before anything is written.
         if (!$has_any) throw new Exception("Please add at least one item to your package before confirming.");
+        if ($house_needs_group_details) {
+            throw new Exception("Your saved house selection needs the new group details. Please edit the house item and enter the senior-citizen count and health-condition answer before confirming.");
+        }
+        if ($has_house) {
+            $hCheck = $cart['house'];
+            $seniorCheck = filter_var($hCheck['senior_citizens'] ?? null, FILTER_VALIDATE_INT);
+            $paxCheck = (int)($hCheck['guests'] ?? 0);
+            $healthCheck = (string)($hCheck['has_health_condition'] ?? '');
+            $healthDetailsCheck = trim((string)($hCheck['health_condition_details'] ?? ''));
+            if ($seniorCheck === false || $seniorCheck < 0 || $seniorCheck > $paxCheck) {
+                throw new Exception("Senior-citizen count must be between 0 and the total number of guests. Please edit the house item.");
+            }
+            if (!in_array($healthCheck, ['0', '1'], true)) {
+                throw new Exception("Please answer whether any guest has a health condition. Edit the house item to continue.");
+            }
+            if (mb_strlen($healthDetailsCheck) > 1000) {
+                throw new Exception("Health-condition details must be 1,000 characters or fewer.");
+            }
+            if ($healthCheck === '0') $healthDetailsCheck = '';
+            $cart['house']['senior_citizens'] = (int)$seniorCheck;
+            $cart['house']['has_health_condition'] = (int)$healthCheck;
+            $cart['house']['health_condition_details'] = $healthDetailsCheck;
+        }
 
         $pdo->beginTransaction();
 
@@ -427,11 +391,11 @@ if (isset($_POST['confirm_package_booking'])) {
 
         $package_ref = 'PKG-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(2)));
         $house_amount = 0.00;
-        $tour_amount  = 0.00;
+        $tour_amount  = 0.00; // Kept at zero for compatibility with historical package schema.
         $food_amount  = 0.00;
         $created_bookings = [];
         $house_booking_id = null;
-        $tour_booking_id  = null;
+        $tour_booking_id  = null; // New online packages no longer include Tours/Boat.
         $food_booking_id  = null;
         $package_contact  = $guest['contact_number'] ?? null;
         $package_requests = [];
@@ -454,15 +418,17 @@ if (isset($_POST['confirm_package_booking'])) {
             $check_out_time_db = $stayTimes['out'];   // = check-in time
 
             // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
-            $stmt = $pdo->prepare("INSERT INTO house_bookings 
+            $stmt = $pdo->prepare("INSERT INTO house_bookings
                 (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time,
-                 number_of_guests, total_amount, guest_names, payment_status, booking_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+                 number_of_guests, total_amount, senior_citizens, has_health_condition, health_condition_details,
+                 payment_status, booking_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
             $stmt->execute([
-                $guest_id, $h['id'], $ref, 
+                $guest_id, $h['id'], $ref,
                 $h['check_in'], $check_in_time_db,
                 $h['check_out'], $check_out_time_db,
-                $h['guests'], $h['price'], $h['guest_names']
+                $h['guests'], $h['price'], (int)($h['senior_citizens'] ?? 0),
+                (int)($h['has_health_condition'] ?? 0), $h['health_condition_details'] ?? null
             ]);
             $house_booking_id = (int)$pdo->lastInsertId();
             $created_bookings[] = ['type' => 'house', 'id' => $house_booking_id, 'ref' => $ref, 'name' => $h['name']];
@@ -525,32 +491,6 @@ if (isset($_POST['confirm_package_booking'])) {
             $food_amount += (float)$f['price'];
         }
 
-        if ($has_tour) {
-            $t = $cart['tour'];
-            if ($t['booking_date'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
-            if (AvailabilityService::tourConflict($pdo, $t['id'], $t['booking_date']) !== null) {
-                throw new Exception("Tour '{$t['name']}' is no longer available on " . date('M d, Y', strtotime($t['booking_date'])) . ".");
-            }
-
-            $ref = $package_ref . '-T';
-            if (!empty($t['contact_number'])) $package_contact = $t['contact_number'];
-            if (!empty($t['special_requests'])) $package_requests[] = "Tour: " . $t['special_requests'];
-
-            $stmt = $pdo->prepare("INSERT INTO tour_bookings 
-                (guest_id, tour_id, reference_number, booking_date, preferred_time,
-                 number_of_guests, guest_name, contact_number, special_requests,
-                 total_amount, payment_status, booking_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
-            $stmt->execute([
-                $guest_id, $t['id'], $ref, $t['booking_date'], $t['preferred_time'],
-                $t['number_of_guests'], $t['guest_name'], $t['contact_number'],
-                $t['special_requests'] ?? null, $t['price']
-            ]);
-            $tour_booking_id = (int)$pdo->lastInsertId();
-            $created_bookings[] = ['type' => 'tour', 'id' => $tour_booking_id, 'ref' => $ref, 'name' => $t['name']];
-            $tour_amount += (float)$t['price'];
-        }
-
         $grand_total = $house_amount + $tour_amount + $food_amount;
         $package_requests_text = !empty($package_requests) ? implode("\n", $package_requests) : null;
 
@@ -570,7 +510,6 @@ if (isset($_POST['confirm_package_booking'])) {
         $package_id = (int)$pdo->lastInsertId();
 
         if ($house_booking_id) $pdo->prepare("UPDATE house_bookings SET package_id = ? WHERE id = ?")->execute([$package_id, $house_booking_id]);
-        if ($tour_booking_id)  $pdo->prepare("UPDATE tour_bookings SET package_id = ? WHERE id = ?")->execute([$package_id, $tour_booking_id]);
         if ($food_booking_id)  $pdo->prepare("UPDATE food_bookings SET package_id = ? WHERE id = ?")->execute([$package_id, $food_booking_id]);
 
         $pdo->commit();
@@ -582,7 +521,7 @@ if (isset($_POST['confirm_package_booking'])) {
                 ['package_reference' => $package_ref, 'items' => $created_bookings, 'grand_total' => $grand_total]);
         }
 
-        $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+        $_SESSION['package_cart'] = ['house' => null, 'food' => null];
         $_SESSION['last_package_booking'] = [
             'id' => $package_id, 'reference' => $package_ref,
             'total' => $grand_total, 'items_count' => count($created_bookings)
@@ -690,7 +629,7 @@ $hero_path = 'uploads/hero/hero-bg.jpg';
 if (!empty($content['site_settings']['hero_image_path'])) $hero_path = $content['site_settings']['hero_image_path'];
 $hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
 
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? "Jerry Dino's Stay";
 
 $facebook_link = $content['social']['facebook'] ?? '#';
 $location_address = $content['location']['address'] ?? $content['footer']['address'] ?? 'Inansuana, Lucap, Alaminos, Philippines, 2404';
@@ -708,14 +647,12 @@ $map_embed = !empty($google_maps_embed) && $google_maps_embed != '#' ? $google_m
 $grand_total = 0;
 if ($has_house && isset($cart['house']['price'])) $grand_total += (float)$cart['house']['price'];
 if ($has_food  && isset($cart['food']['price']))  $grand_total += (float)$cart['food']['price'];
-if ($has_tour  && isset($cart['tour']['price']))  $grand_total += (float)$cart['tour']['price'];
 
 // ============================================================
 // FETCH ITEMS
 // ============================================================
 $houses = [];
 $food_items = [];
-$tours = [];
 
 $result = $pdo->query("SELECT * FROM houses WHERE status = 'available' ORDER BY house_name");
 if ($result !== false) {
@@ -729,12 +666,7 @@ if ($result !== false) {
     if (is_array($rows)) $food_items = $rows;
 }
 
-$result = $pdo->query("SELECT * FROM tours WHERE status = 'available' ORDER BY tour_name");
-if ($result !== false) {
-    $rows = $result->fetchAll(PDO::FETCH_ASSOC);
-    if (is_array($rows)) $tours = $rows;
-}
-
+$
 $open_modal = $open_modal ?? null;
 
 $user_has_feedback = false;
@@ -780,20 +712,6 @@ if (!function_exists('buildItemGallery')) {
                 if (file_exists($p1)) $images[] = $p1;
                 elseif (file_exists($p2)) $images[] = $p2;
             }
-        } elseif ($type === 'tour') {
-            $folder = $item['folder_name'] ?? '';
-            if (empty($folder)) $folder = str_replace(' ', '_', trim($item['tour_name'] ?? ''));
-            $base = 'uploads/tours/gallery/' . $folder . '/';
-            $exts = ['jpg','jpeg','png','gif','webp','bmp'];
-            if (is_dir($base)) {
-                foreach (scandir($base) as $file) {
-                    if (in_array(strtolower(pathinfo($file, PATHINFO_EXTENSION)), $exts)) $images[] = $base . $file;
-                }
-            }
-            if (empty($images) && !empty($item['image']) && $item['image'] !== 'default-tour.jpg') {
-                $p1 = 'uploads/tours/' . $item['image'];
-                if (file_exists($p1)) $images[] = $p1;
-            }
         } elseif ($type === 'food') {
             $name = $item['name'] ?? '';
             $folder = str_replace(' ', '_', trim($name)) . '_' . $id;
@@ -813,16 +731,15 @@ if (!function_exists('buildItemGallery')) {
     }
 
     function getMainImage($type, $id, $item = null) {
-        global $house_galleries, $food_galleries, $tour_galleries;
+        global $house_galleries, $food_galleries;
 
         if ($type === 'house' && !empty($house_galleries[$id])) return $house_galleries[$id][0];
         if ($type === 'food'  && !empty($food_galleries[$id]))  return $food_galleries[$id][0];
-        if ($type === 'tour'  && !empty($tour_galleries[$id]))  return $tour_galleries[$id][0];
 
         if ($item && is_array($item) && !empty($item['image'])) {
             $folder = 'uploads/' . $type . 's/';
             $gfolder = 'uploads/' . $type . 's/gallery/';
-            $defaults = ['house' => 'default-house.jpg', 'food' => 'default-food.jpg', 'tour' => 'default-tour.jpg'];
+            $defaults = ['house' => 'default-house.jpg', 'food' => 'default-food.jpg'];
             if (!isset($defaults[$type]) || $item['image'] !== $defaults[$type]) {
                 if (file_exists($folder . $item['image'])) return $folder . $item['image'];
                 if (file_exists($gfolder . $item['image'])) return $gfolder . $item['image'];
@@ -842,12 +759,6 @@ $food_galleries = [];
 foreach ($food_items as $fi) {
     if (is_array($fi) && isset($fi['id'])) {
         $food_galleries[$fi['id']] = buildItemGallery('food', $fi);
-    }
-}
-$tour_galleries = [];
-foreach ($tours as $t) {
-    if (is_array($t) && isset($t['id'])) {
-        $tour_galleries[$t['id']] = buildItemGallery('tour', $t);
     }
 }
 
@@ -886,22 +797,6 @@ foreach ($houses as $h) {
     } catch (PDOException $e) {
         $house_booked_dates[$h['id']] = [];
         $house_hard_dates[$h['id']] = [];
-    }
-}
-
-// --- TOUR BOOKED DATES --- ✅ FIXED: Now uses $blocking_placeholders
-$tour_booked_dates = [];
-foreach ($tours as $t) {
-    if (!is_array($t) || !isset($t['id'])) continue;
-    try {
-        $stmt = $pdo->prepare("SELECT booking_date FROM tour_bookings WHERE tour_id = ? AND booking_status IN ({$blocking_placeholders})");
-        $stmt->execute([$t['id']]);
-        $result = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'tour' AND item_id = ? AND block_date >= CURDATE()");
-        $bst->execute([$t['id']]);
-        $tour_booked_dates[$t['id']] = array_values(array_unique(array_merge(is_array($result) ? $result : [], $bst->fetchAll(PDO::FETCH_COLUMN))));
-    } catch (PDOException $e) {
-        $tour_booked_dates[$t['id']] = [];
     }
 }
 
@@ -973,28 +868,12 @@ foreach ($food_items as $fi) {
     ];
 }
 
-foreach ($tours as $t) {
-    if (!is_array($t) || !isset($t['id'])) continue;
-    $items_detail['tour_' . $t['id']] = [
-        'type' => 'tour',
-        'id' => (int)$t['id'],
-        'name' => $t['tour_name'] ?? '',
-        'description' => $t['description'] ?? '',
-        'price' => (float)($t['price_per_boat'] ?? 0),
-        'price_unit' => 'per boat',
-        'capacity' => (int)($t['max_guests'] ?? 0),
-        'destinations' => '12–14 islands',
-        'amenities' => parseListHelper($t['inclusions'] ?? $t['amenities'] ?? ''),
-        'gallery' => $tour_galleries[$t['id']] ?? []
-    ];
-}
 
 // ============================================================
 // Pre-compute main images for cart display
 // ============================================================
 $cart_house_img = null;
 $cart_food_img  = null;
-$cart_tour_img  = null;
 
 if ($has_house && isset($cart['house']['id'])) {
     $hid = (int)$cart['house']['id'];
@@ -1008,13 +887,6 @@ if ($has_food && isset($cart['food']['id'])) {
     foreach ($food_items as $ff) { if (isset($ff['id']) && (int)$ff['id'] === $fid) { $found_food = $ff; break; } }
     $cart_food_img = getMainImage('food', $fid, $found_food);
 }
-if ($has_tour && isset($cart['tour']['id'])) {
-    $tid = (int)$cart['tour']['id'];
-    $found_tour = null;
-    foreach ($tours as $tt) { if (isset($tt['id']) && (int)$tt['id'] === $tid) { $found_tour = $tt; break; } }
-    $cart_tour_img = getMainImage('tour', $tid, $found_tour);
-}
-
 // ============================================================
 // ✅ UPDATED: Build data for JS edit-persistence (with times)
 // ============================================================
@@ -1026,7 +898,9 @@ $cart_data_js = [
         'check_out' => $cart['house']['check_out'] ?? '',
         'check_out_time' => $cart['house']['check_in_time'] ?? '14:00',  // check-out time follows check-in time
         'guests' => (int)($cart['house']['guests'] ?? 0),
-        'guest_names' => array_values(array_filter(array_map('trim', explode("\n", (string)($cart['house']['guest_names'] ?? '')))))
+        'senior_citizens' => array_key_exists('senior_citizens', $cart['house']) ? $cart['house']['senior_citizens'] : null,
+        'has_health_condition' => array_key_exists('has_health_condition', $cart['house']) ? $cart['house']['has_health_condition'] : null,
+        'health_condition_details' => $cart['house']['health_condition_details'] ?? ''
     ] : null,
     'food' => $has_food ? [
         'id' => (int)($cart['food']['id'] ?? 0),
@@ -1040,15 +914,7 @@ $cart_data_js = [
         'size_variant' => $cart['food']['size_variant'] ?? '',
         'quantity' => max(1, (int)($cart['food']['quantity'] ?? 1))
     ] : null,
-    'tour' => $has_tour ? [
-        'id' => (int)($cart['tour']['id'] ?? 0),
-        'booking_date' => $cart['tour']['booking_date'] ?? '',
-        'preferred_time' => $cart['tour']['preferred_time'] ?? '',
-        'number_of_guests' => (int)($cart['tour']['number_of_guests'] ?? 0),
-        'guest_name' => $cart['tour']['guest_name'] ?? '',
-        'contact_number' => preg_replace('/^\+63/', '', (string)($cart['tour']['contact_number'] ?? '')),
-        'special_requests' => $cart['tour']['special_requests'] ?? ''
-    ] : null
+
 ];
 ?>
 <!DOCTYPE html>
@@ -1201,7 +1067,6 @@ $cart_data_js = [
         .cart-item .item-thumb .thumb-fallback { color: rgba(255,255,255,0.9); font-size: 36px; display: flex; align-items: center; justify-content: center; }
         .cart-item .item-thumb.house { background: linear-gradient(135deg, #4DA6D9, #3a8bbf); }
         .cart-item .item-thumb.food  { background: linear-gradient(135deg, #f59e0b, #d97706); }
-        .cart-item .item-thumb.tour  { background: linear-gradient(135deg, #10b981, #059669); }
         .cart-item .item-body { flex: 1; min-width: 0; }
         .cart-item .item-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
         .cart-item .item-title { font-size: 18px; font-weight: 700; color: #0B2447; margin: 0; }
@@ -1315,23 +1180,6 @@ $cart_data_js = [
             .fulfillment-option-label small { font-size: 9.5px; }
         }
 
-        .guest-names-field { background: #f8fafc; border-radius: 12px; padding: 15px; margin: 10px 0; border: 1px solid #e2e8f0; }
-        .guest-names-field .guest-names-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
-        .guest-names-field .guest-names-header label { font-weight: 600; color: #1e293b; font-size: 13px; margin: 0; }
-        .guest-names-field .guest-count-badge { background: #e8f0fe; color: #4DA6D9; padding: 2px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; }
-        .guest-names-field .guest-count-badge.match { background: #d1fae5; color: #065f46; }
-        .guest-names-field .guest-count-badge.over { background: #fee2e2; color: #991b1b; }
-        .guest-names-field .guest-count-badge.under { background: #fef3c7; color: #92400e; }
-        .guest-names-field .guest-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-        .guest-names-field .guest-name-row .guest-badge { min-width: 28px; height: 28px; background: #4DA6D9; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
-        .guest-names-field .guest-name-row .guest-name-input { flex: 1; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; font-family: inherit; background: white; transition: all 0.2s; min-width: 0; }
-        .guest-names-field .guest-name-row .guest-name-input:focus { outline: none; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
-        .guest-names-field .guest-name-row .guest-name-input.invalid { border-color: #ef4444; background: #fef2f2; }
-        .guest-names-field .guest-name-row .guest-name-input.valid { border-color: #10b981; }
-        .guest-names-field .help-text { font-size: 11px; color: #94a3b8; margin-top: 5px; display: flex; align-items: center; gap: 4px; line-height: 1.4; }
-        .guest-names-field .help-text.error { color: #ef4444; font-weight: 600; }
-        .guest-names-field .help-text.ok { color: #10b981; font-weight: 600; }
-        @media (max-width: 480px) { .guest-names-field { padding: 12px; } }
 
         .calendar-container { background: white; border-radius: 16px; padding: 20px; margin: 15px 0; border: 1px solid #e8f0fe; }
         .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 8px; }
@@ -1342,10 +1190,12 @@ $cart_data_js = [
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
         .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px 0; text-transform: uppercase; }
         .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; color: #334155; }
-        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.past) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.blocked):not(.past):not(.available) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day.available { background: #dcfce7; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
+        .calendar-grid .day.available:hover:not(.disabled):not(.booked):not(.blocked):not(.past) { background: #bbf7d0; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; border-radius: 8px; font-weight: 700; }
         .calendar-grid .day.in-range { background: #dbeafe; color: #0B2447; }
-        .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
+        .calendar-grid .day.booked, .calendar-grid .day.blocked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
         .calendar-grid .day.disabled { cursor: not-allowed; opacity: 0.5; }
         .pkg-window-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; overflow-wrap: anywhere; }
@@ -1393,12 +1243,6 @@ $cart_data_js = [
         .stay-summary-box .stay-row.total-row { border-bottom: none; padding-top: 5px; font-size: 18px; }
         .stay-summary-box .stay-row.total-row strong { color: #10b981; }
 
-        .tour-summary-box { background: #f0f9ff; border: 1px solid #bae6fd; padding: 18px 22px; border-radius: 14px; margin: 20px 0; }
-        .tour-summary-box .tour-summary-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 15px; color: #0f172a; gap: 10px; }
-        .tour-summary-box .tour-summary-row:first-child { border-bottom: 1px solid #e0f2fe; padding-bottom: 10px; margin-bottom: 6px; }
-        .tour-summary-box .tour-summary-row .tour-total-value { color: #10b981; font-weight: 800; font-size: 20px; }
-        .tour-warning { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 10px; font-size: 12.5px; color: #92400e; margin: 16px 0 0; display: flex; gap: 8px; line-height: 1.5; }
-        .tour-warning i { color: #f59e0b; flex-shrink: 0; margin-top: 2px; }
 
         .btn-primary-submit { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; box-shadow: 0 4px 15px rgba(244, 180, 0, 0.35); font-family: inherit; margin-top: 20px; }
         .btn-primary-submit:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244, 180, 0, 0.5); }
@@ -1422,7 +1266,6 @@ $cart_data_js = [
         .item-pick-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .item-pick-thumb .thumb-icon { color: rgba(255,255,255,0.85); font-size: 32px; }
         .item-pick-thumb.food { background: linear-gradient(135deg, #f59e0b, #d97706); }
-        .item-pick-thumb.tour { background: linear-gradient(135deg, #10b981, #059669); }
         .item-pick-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 2px 0; }
         .item-pick-info strong { color: #0B2447; font-size: 15px; font-weight: 700; line-height: 1.25; word-break: break-word; display: block; }
         .item-pick-info .ip-price { color: #10b981; font-size: 14px; font-weight: 700; }
@@ -1439,8 +1282,6 @@ $cart_data_js = [
         .item-pick .btn-item-view.house:hover { background: #bae6fd; color: #075985; }
         .item-pick .btn-item-view.food { background: #fef3c7; color: #b45309; border-color: #fcd34d; }
         .item-pick .btn-item-view.food:hover { background: #fde68a; color: #92400e; }
-        .item-pick .btn-item-view.tour { background: #d1fae5; color: #065f46; border-color: #a7f3d0; }
-        .item-pick .btn-item-view.tour:hover { background: #a7f3d0; color: #064e3b; }
         .item-pick .ip-arrow { color: #cbd5e1; font-size: 14px; transition: all 0.2s; }
         .item-pick:hover .ip-arrow { color: #4DA6D9; transform: translateX(3px); }
 
@@ -1503,7 +1344,6 @@ $cart_data_js = [
         .hd-footer .btn-hd-close { flex: 1; padding: 14px; background: #e2e8f0; color: #475569; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; font-family: inherit; }
         .hd-footer .btn-hd-select { flex: 2; padding: 14px; background: linear-gradient(135deg, #F4B400, #e6a800); color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; box-shadow: 0 4px 15px rgba(244,180,0,0.35); font-family: inherit; }
         .hd-footer .btn-hd-select.food { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; }
-        .hd-footer .btn-hd-select.tour { background: linear-gradient(135deg, #10b981, #059669); color: white; }
 
         @media (max-width: 768px) {
             .house-detail-modal { padding: 12px; }
@@ -1816,7 +1656,7 @@ $cart_data_js = [
 <div class="hero pb-hero">
     <div class="hero-content">
         <h1><i class="fas fa-box-open"></i> Build Your Package</h1>
-        <p>Stay, tours and food in one booking, with one reservation fee.</p>
+        <p>Stay and food in one booking, with one reservation fee.</p>
     </div>
 </div>
 
@@ -1830,7 +1670,7 @@ $cart_data_js = [
 <?php endif; ?>
 
 <?php
-$h = $cart['house'] ?? []; $f = $cart['food'] ?? []; $t = $cart['tour'] ?? [];
+$h = $cart['house'] ?? []; $f = $cart['food'] ?? [];
 $pb_fee = PaymentService::feeFor($grand_total > 0 ? $grand_total : PaymentService::RESERVATION_FEE);
 $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
 ?>
@@ -1839,16 +1679,12 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
         <span class="pb-dot"><span class="n">1</span><i class="fas fa-check"></i></span>
         <span class="pb-step-label">Stay<small><?php echo $has_house ? 'Added' : 'Choose'; ?></small></span>
     </button>
-    <button type="button" class="pb-step<?php echo $has_tour ? ' done' : ''; ?>" data-step="2" onclick="pbGo(2)">
+    <button type="button" class="pb-step<?php echo $has_food ? ' done' : ''; ?>" data-step="2" onclick="pbGo(2)">
         <span class="pb-dot"><span class="n">2</span><i class="fas fa-check"></i></span>
-        <span class="pb-step-label">Tours<small><?php echo $has_tour ? 'Added' : 'Optional'; ?></small></span>
-    </button>
-    <button type="button" class="pb-step<?php echo $has_food ? ' done' : ''; ?>" data-step="3" onclick="pbGo(3)">
-        <span class="pb-dot"><span class="n">3</span><i class="fas fa-check"></i></span>
         <span class="pb-step-label">Food<small><?php echo $has_food ? 'Added' : 'Optional'; ?></small></span>
     </button>
-    <button type="button" class="pb-step" data-step="4" onclick="pbGo(4)"<?php echo $has_any ? '' : ' disabled'; ?>>
-        <span class="pb-dot"><span class="n">4</span><i class="fas fa-check"></i></span>
+    <button type="button" class="pb-step" data-step="3" onclick="pbGo(3)"<?php echo $has_any ? '' : ' disabled'; ?>>
+        <span class="pb-dot"><span class="n">3</span><i class="fas fa-check"></i></span>
         <span class="pb-step-label">Review<small>Confirm</small></span>
     </button>
 </nav>
@@ -1859,7 +1695,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
     <!-- STEP 1: STAY -->
     <section class="pb-panel" data-panel="1" aria-labelledby="pbT1">
         <div class="pb-panel-head">
-            <span class="pb-kicker">Step 1 of 4</span>
+            <span class="pb-kicker">Step 1 of 3</span>
             <h2 id="pbT1"><i class="fas fa-home"></i> Choose Your Stay</h2>
             <p>Pick a house and your check-in and check-out dates.</p>
         </div>
@@ -1868,7 +1704,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="pb-empty-icon" style="background:linear-gradient(135deg,#4DA6D9,#3a8bbf);"><i class="fas fa-home"></i></div>
             <div class="pb-empty-body">
                 <h4>No stay selected yet</h4>
-                <p>Browse our transient houses and choose your dates. You can also skip this and build a tour or food package.</p>
+                <p>Browse our transient houses and choose your dates. You can also skip this and build a food package.</p>
             </div>
             <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('house')"><i class="fas fa-home"></i> Choose a Stay</button>
         </div>
@@ -1928,10 +1764,14 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="item-detail"><i class="fas fa-users"></i>
                 <span><strong>Guests:</strong> <?php echo (int)($h['guests'] ?? 0); ?> pax</span>
             </div>
-            <?php if (!empty($h['guest_names'])): ?>
-            <div class="item-detail"><i class="fas fa-user-friends"></i>
-                <span><strong>Names:</strong> <?php echo htmlspecialchars(str_replace("\n", ", ", $h['guest_names'])); ?></span>
+            <div class="item-detail"><i class="fas fa-user-check"></i>
+                <span><strong>Senior citizens:</strong> <?php echo $house_needs_group_details ? 'Not provided yet' : (int)($h['senior_citizens'] ?? 0); ?></span>
             </div>
+            <div class="item-detail"><i class="fas fa-heartbeat"></i>
+                <span><strong>Health condition:</strong> <?php echo $house_needs_group_details ? 'Answer required' : (!empty($h['has_health_condition']) ? 'Yes' : 'No'); ?><?php if (!$house_needs_group_details && !empty($h['has_health_condition']) && !empty($h['health_condition_details'])): ?> — <?php echo htmlspecialchars($h['health_condition_details']); ?><?php endif; ?></span>
+            </div>
+            <?php if ($house_needs_group_details): ?>
+            <div class="alert alert-warning" role="alert" style="margin:10px 0 0;">This saved house selection predates the new group-details fields. Click <strong>Edit</strong> and complete them before confirming the package.</div>
             <?php endif; ?>
 
             <span class="item-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
@@ -1940,93 +1780,19 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
     <?php endif; ?>
         <div class="pb-nav">
             <span></span>
-            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(2)">Continue to Tours <i class="fas fa-arrow-right"></i></button>
-        </div>
-    </section>
-
-    <!-- STEP 2: TOURS -->
-    <section class="pb-panel" data-panel="2" aria-labelledby="pbT2">
-        <div class="pb-panel-head">
-            <span class="pb-kicker">Step 2 of 4</span>
-            <h2 id="pbT2"><i class="fas fa-umbrella-beach"></i> Add Tours &amp; Activities</h2>
-            <p>Add an island adventure to your trip. This step is optional.</p>
-        </div>
-        <?php if ($pkg_window): ?>
-        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your tour and food schedules must be within your house stay period.</div>
-        <?php endif; ?>
-        <?php if (!$has_tour): ?>
-        <div class="pb-empty">
-            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#10b981,#059669);"><i class="fas fa-umbrella-beach"></i></div>
-            <div class="pb-empty-body">
-                <h4>No tour selected yet</h4>
-                <p>Choose an island tour or activity and the date you want to go.</p>
-            </div>
-            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('tour')"><i class="fas fa-umbrella-beach"></i> Choose a Tour</button>
-        </div>
-        <?php endif; ?>
-    <?php if ($has_tour): $t = $cart['tour']; ?>
-    <div class="cart-item">
-        <div class="item-thumb tour">
-            <?php if ($cart_tour_img): ?>
-                <img src="<?php echo htmlspecialchars($cart_tour_img); ?>?v=<?php echo time(); ?>" alt="<?php echo htmlspecialchars($t['name'] ?? ''); ?>" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                <span class="thumb-fallback" style="display:none;"><i class="fas fa-umbrella-beach"></i></span>
-            <?php else: ?>
-                <span class="thumb-fallback"><i class="fas fa-umbrella-beach"></i></span>
-            <?php endif; ?>
-        </div>
-        <div class="item-body">
-            <div class="item-header">
-                <div>
-                    <span class="item-type-label" style="background: #d1fae5; color: #059669;">Tour Booking</span>
-                    <h4 class="item-title"><?php echo htmlspecialchars($t['name'] ?? ''); ?></h4>
-                </div>
-                <div class="item-actions">
-                    <button type="button" class="btn-view-item" onclick="openItemDetail('tour_<?php echo (int)($t['id'] ?? 0); ?>')">
-                        <i class="fas fa-eye"></i> View
-                    </button>
-                    <button type="button" class="btn-edit-item" onclick="editTour()">
-                        <i class="fas fa-pen"></i> Edit
-                    </button>
-                    <button type="button" class="btn-remove-item" onclick="openRemoveModal('tour', '<?php echo htmlspecialchars($t['name'] ?? '', ENT_QUOTES); ?>')">
-                        <i class="fas fa-times"></i> Remove
-                    </button>
-                </div>
-            </div>
-
-            <div class="item-detail"><i class="fas fa-calendar-alt"></i>
-                <span><strong>Date:</strong> <?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?></span>
-            </div>
-            <div class="item-detail"><i class="fas fa-clock"></i>
-                <span><strong>Time:</strong> <?php echo date('h:i A', strtotime($t['preferred_time'] ?? 'now')); ?></span>
-            </div>
-            <div class="item-detail"><i class="fas fa-users"></i>
-                <span><strong>Pax:</strong> <?php echo (int)($t['number_of_guests'] ?? 0); ?></span>
-            </div>
-            <?php if (!empty($t['guest_name'])): ?>
-            <div class="item-detail"><i class="fas fa-user"></i>
-                <span><strong>Lead Guest:</strong> <?php echo htmlspecialchars($t['guest_name']); ?></span>
-            </div>
-            <?php endif; ?>
-
-            <span class="item-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
-        </div>
-    </div>
-    <?php endif; ?>
-        <div class="pb-nav">
-            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(1)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(3)">Continue to Food <i class="fas fa-arrow-right"></i></button>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(2)">Continue to Food <i class="fas fa-arrow-right"></i></button>
         </div>
     </section>
 
     <!-- STEP 3: FOOD -->
-    <section class="pb-panel" data-panel="3" aria-labelledby="pbT3">
+    <section class="pb-panel" data-panel="2" aria-labelledby="pbT3">
         <div class="pb-panel-head">
-            <span class="pb-kicker">Step 3 of 4</span>
+            <span class="pb-kicker">Step 2 of 3</span>
             <h2 id="pbT3"><i class="fas fa-utensils"></i> Add Food</h2>
             <p>Add a meal or food package for your stay. This step is optional.</p>
         </div>
         <?php if ($pkg_window): ?>
-        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your tour and food schedules must be within your house stay period.</div>
+        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your food schedule must be within your house stay period.</div>
         <?php endif; ?>
         <?php if (!$has_food): ?>
         <div class="pb-empty">
@@ -2101,16 +1867,16 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
     </div>
     <?php endif; ?>
         <div class="pb-nav">
-            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(2)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(4)"<?php echo $has_any ? '' : ' disabled'; ?>>Review Package <i class="fas fa-arrow-right"></i></button>
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(1)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(3)"<?php echo $has_any ? '' : ' disabled'; ?>>Review Package <i class="fas fa-arrow-right"></i></button>
         </div>
-        <?php if (!$has_any): ?><p class="pb-hint"><i class="fas fa-info-circle"></i> Add a stay, tour or food item to review your package.</p><?php endif; ?>
+        <?php if (!$has_any): ?><p class="pb-hint"><i class="fas fa-info-circle"></i> Add a stay or food item to review your package.</p><?php endif; ?>
     </section>
 
-    <!-- STEP 4: REVIEW -->
-    <section class="pb-panel" data-panel="4" aria-labelledby="pbT4">
+    <!-- STEP 3: REVIEW -->
+    <section class="pb-panel" data-panel="3" aria-labelledby="pbT4">
         <div class="pb-panel-head">
-            <span class="pb-kicker">Step 4 of 4</span>
+            <span class="pb-kicker">Step 3 of 3</span>
             <h2 id="pbT4"><i class="fas fa-clipboard-check"></i> Review Your Package</h2>
             <p>Check everything below, then confirm your package.</p>
         </div>
@@ -2120,18 +1886,9 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="pb-review-row">
                 <div><span class="pb-review-type"><i class="fas fa-home"></i> Stay</span>
                 <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
-                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax</small></div>
+                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax · <?php echo $house_needs_group_details ? 'senior/health details required' : ((int)($h['senior_citizens'] ?? 0) . ' senior citizen(s) · Health condition: ' . (!empty($h['has_health_condition']) ? 'Yes' : 'No')); ?><?php if (!$house_needs_group_details && !empty($h['has_health_condition']) && !empty($h['health_condition_details'])): ?> · <?php echo htmlspecialchars($h['health_condition_details']); ?><?php endif; ?></small></div>
                 <span class="pb-review-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
                 <button type="button" class="pb-link" onclick="pbGo(1)">Change</button>
-            </div>
-            <?php endif; ?>
-            <?php if ($has_tour): ?>
-            <div class="pb-review-row">
-                <div><span class="pb-review-type"><i class="fas fa-umbrella-beach"></i> Tour</span>
-                <strong><?php echo htmlspecialchars($t['name'] ?? ''); ?></strong>
-                <small><?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($t['preferred_time'] ?? 'now')); ?> · <?php echo (int)($t['number_of_guests'] ?? 0); ?> pax</small></div>
-                <span class="pb-review-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
-                <button type="button" class="pb-link" onclick="pbGo(2)">Change</button>
             </div>
             <?php endif; ?>
             <?php if ($has_food): ?>
@@ -2140,7 +1897,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                 <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
                 <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?> · <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> · Qty <?php echo (int)$f['quantity']; ?><?php endif; ?></small></div>
                 <span class="pb-review-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
-                <button type="button" class="pb-link" onclick="pbGo(3)">Change</button>
+                <button type="button" class="pb-link" onclick="pbGo(2)">Change</button>
             </div>
             <?php endif; ?>
             <div class="pb-review-total"><span>Package Total</span><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
@@ -2152,11 +1909,11 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div><i class="fas fa-info-circle"></i> The reservation fee is non-refundable. If your plans change, you can rebook your package to a new date.</div>
         </div>
         <?php else: ?>
-        <div class="pb-empty"><div class="pb-empty-body"><h4>Your package is empty</h4><p>Go back and add a stay, tour or food item first.</p></div></div>
+        <div class="pb-empty"><div class="pb-empty-body"><h4>Your package is empty</h4><p>Go back and add a stay or food item first.</p></div></div>
         <?php endif; ?>
 
         <div class="pb-nav">
-            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(3)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(2)"><i class="fas fa-arrow-left"></i> Back</button>
             <button type="button" class="pb-btn pb-btn-confirm" onclick="openBookingTermsModal()"<?php echo $has_any ? '' : ' disabled'; ?>><i class="fas fa-check-circle"></i> Confirm Package</button>
         </div>
         <p class="terms-note pb-terms"><i class="fas fa-info-circle"></i> By confirming, you agree to our Terms &amp; Conditions. You will upload your payment proof right after.</p>
@@ -2175,14 +1932,6 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
             <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d', strtotime($h['check_out'] ?? 'now')); ?></small>
             <span class="pb-sum-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
-        <?php else: ?><em>Not added yet</em><?php endif; ?>
-    </div>
-    <div class="pb-sum-line">
-        <span class="pb-sum-label"><i class="fas fa-umbrella-beach"></i> Tours</span>
-        <?php if ($has_tour): ?>
-            <strong><?php echo htmlspecialchars($t['name'] ?? ''); ?></strong>
-            <small><?php echo date('M d, Y', strtotime($t['booking_date'] ?? 'now')); ?></small>
-            <span class="pb-sum-price">₱<?php echo number_format((float)($t['price'] ?? 0), 2); ?></span>
         <?php else: ?><em>Not added yet</em><?php endif; ?>
     </div>
     <div class="pb-sum-line">
@@ -2299,7 +2048,6 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <input type="hidden" name="check_in" id="h_check_in" required>
             <input type="hidden" name="nights" id="h_nights">
             <input type="hidden" name="total_price" id="h_total_price">
-            <input type="hidden" name="guest_names_json" id="h_guest_names_json">
 
             <button type="button" class="btn-back-list" onclick="backToHouseList()">
                 <i class="fas fa-arrow-left"></i> Back to list
@@ -2363,19 +2111,28 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                 <label><i class="fas fa-users"></i> Number of Pax * <small style="color:#94a3b8; font-weight:400;">(max <span id="h_max_capacity">20</span>)</small></label>
                 <input type="number" name="guests" id="h_guests" class="form-control"
                        min="1" max="20" placeholder="Enter number of pax" required
-                       onchange="rebuildGuestNameInputs(); calcHouseTotal();"
+                       onchange="calcHouseTotal()"
                        oninput="validatePax(this)">
             </div>
 
-            <div class="guest-names-field">
-                <div class="guest-names-header">
-                    <label><i class="fas fa-users"></i> Guest Names</label>
-                    <span class="guest-count-badge" id="guestCountBadge">0 / 0</span>
+            <div class="form-row">
+                <div class="form-group">
+                    <label><i class="fas fa-user-check"></i> Senior citizens in the group *</label>
+                    <input type="number" name="senior_citizens" id="h_senior_citizens" class="form-control" min="0" max="20" value="0" required>
+                    <small class="time-helper">Enter how many of the guests are senior citizens. This cannot exceed total pax.</small>
                 </div>
-                <div id="guestNamesList"></div>
-                <div class="help-text" id="guestNamesHelp">
-                    <i class="fas fa-info-circle"></i> Enter the number of pax above to add guest name fields
+                <div class="form-group">
+                    <label><i class="fas fa-heartbeat"></i> Does any guest have a health condition? *</label>
+                    <select name="has_health_condition" id="h_has_health_condition" class="form-control" required onchange="toggleHouseHealthCondition()">
+                        <option value="" selected>Choose Yes or No</option>
+                        <option value="0">No</option>
+                        <option value="1">Yes</option>
+                    </select>
                 </div>
+            </div>
+            <div class="form-group" id="h_health_condition_details_group" style="display:none;">
+                <label><i class="fas fa-notes-medical"></i> Health condition details (optional)</label>
+                <textarea name="health_condition_details" id="h_health_condition_details" class="form-control" rows="2" maxlength="1000" placeholder="Briefly describe any condition staff should know about."></textarea>
             </div>
 
             <div class="stay-summary-box">
@@ -2654,203 +2411,6 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
 
             <button type="submit" class="btn-primary-submit">
                 <i class="fas fa-check-circle"></i> Submit Reservation
-            </button>
-        </form>
-
-        <?php endif; ?>
-    </div>
-</div>
-
-<!-- ============================================================ -->
-<!-- MODAL: ADD TOUR (unchanged)                                  -->
-<!-- ============================================================ -->
-<div class="modal" id="tourModal">
-    <div class="modal-content modal-lg">
-        <div class="modal-header">
-            <h3><i class="fas fa-ship"></i> Book This Tour</h3>
-            <button type="button" class="close" onclick="closeModal('tour')">&times;</button>
-        </div>
-
-        <?php if (isset($modal_error) && $open_modal === 'tour'): ?>
-        <div class="modal-error" style="background:#fee2e2;border-left:4px solid #ef4444;color:#991b1b;padding:12px 16px;border-radius:10px;margin-bottom:18px;font-size:13px;display:flex;gap:10px;">
-            <i class="fas fa-exclamation-circle" style="color:#ef4444;font-size:16px;flex-shrink:0;margin-top:2px;"></i>
-            <span><?php echo htmlspecialchars($modal_error); ?></span>
-        </div>
-        <?php endif; ?>
-
-        <?php if (empty($tours)): ?>
-            <div style="text-align:center;padding:40px 20px;color:#94a3b8;">
-                <i class="fas fa-umbrella-beach" style="font-size:48px;color:#cbd5e1;display:block;margin-bottom:15px;"></i>
-                <p>No tours available at the moment.</p>
-            </div>
-        <?php else: ?>
-
-        <div id="tourStep1">
-            <p style="color:#64748b; font-size:13px; margin-bottom:15px; line-height:1.5;">
-                <i class="fas fa-info-circle" style="color:#4DA6D9;"></i>
-                Tap a tour to book it. Click <strong>View</strong> to see full details.
-            </p>
-            <div class="item-pick-list">
-                <?php foreach ($tours as $tour):
-                    if (!is_array($tour)) continue;
-                    $thumbSrc = null;
-                    if (!empty($tour_galleries[$tour['id']][0])) $thumbSrc = $tour_galleries[$tour['id']][0];
-                    elseif (!empty($tour['image']) && $tour['image'] !== 'default-tour.jpg' && file_exists('uploads/tours/' . $tour['image'])) $thumbSrc = 'uploads/tours/' . $tour['image'];
-
-                    $shortDesc = trim($tour['description'] ?? '');
-                    if (mb_strlen($shortDesc) > 80) $shortDesc = mb_substr($shortDesc, 0, 80) . '…';
-                ?>
-                <div class="item-pick"
-                     data-id="<?php echo (int)$tour['id']; ?>"
-                     data-name="<?php echo htmlspecialchars($tour['tour_name'] ?? '', ENT_QUOTES); ?>"
-                     data-price="<?php echo (float)($tour['price_per_boat'] ?? 0); ?>"
-                     data-max="<?php echo (int)($tour['max_guests'] ?? 0); ?>"
-                     onclick="selectTour(this)">
-
-                    <div class="item-pick-thumb tour">
-                        <?php if ($thumbSrc): ?>
-                            <img src="<?php echo htmlspecialchars($thumbSrc); ?>?v=<?php echo time(); ?>"
-                                 alt="<?php echo htmlspecialchars($tour['tour_name'] ?? ''); ?>"
-                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                            <span class="thumb-icon" style="display:none;"><i class="fas fa-umbrella-beach"></i></span>
-                        <?php else: ?>
-                            <span class="thumb-icon"><i class="fas fa-umbrella-beach"></i></span>
-                        <?php endif; ?>
-                    </div>
-
-                    <div class="item-pick-info">
-                        <strong><?php echo htmlspecialchars($tour['tour_name'] ?? ''); ?></strong>
-                        <div class="ip-price">₱<?php echo number_format((float)($tour['price_per_boat'] ?? 0)); ?><small>/boat</small></div>
-                        <div class="ip-meta">
-                            <span class="ip-chip green"><i class="fas fa-users"></i> max <?php echo (int)($tour['max_guests'] ?? 0); ?> pax</span>
-                            <span class="ip-chip"><i class="fas fa-map-marked-alt"></i> 12–14 islands</span>
-                        </div>
-                        <?php if ($shortDesc): ?>
-                            <div class="ip-desc"><?php echo htmlspecialchars($shortDesc); ?></div>
-                        <?php endif; ?>
-                    </div>
-
-                    <div class="item-pick-actions">
-                        <button type="button" class="btn-item-view tour"
-                                onclick="event.stopPropagation(); openItemDetail('tour_<?php echo (int)$tour['id']; ?>')"
-                                title="View full details">
-                            <i class="fas fa-eye"></i> View
-                        </button>
-                        <i class="fas fa-chevron-right ip-arrow"></i>
-                    </div>
-                </div>
-                <?php endforeach; ?>
-            </div>
-        </div>
-
-        <form method="POST" id="tourForm" style="display:none;">
-            <input type="hidden" name="add_tour_to_package" value="1">
-            <input type="hidden" name="tour_id" id="t_tour_id">
-            <input type="hidden" name="total_price" id="t_total_price">
-            <input type="hidden" name="booking_date" id="t_booking_date" required>
-
-            <button type="button" class="btn-back-list" onclick="backToTourList()">
-                <i class="fas fa-arrow-left"></i> Back to list
-            </button>
-            <div class="pkg-window-note" id="t_window_note" style="display:none;"></div>
-
-            <div class="form-group">
-                <label><i class="fas fa-ship"></i> Tour Package</label>
-                <input type="text" id="t_display_tour" class="form-control" readonly>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-tag"></i> Price per Boat</label>
-                <input type="text" id="t_display_price" class="form-control" readonly>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-calendar-alt"></i> Booking Date *</label>
-                <div class="calendar-container">
-                    <div class="calendar-header">
-                        <h4 id="tourCalendarMonthYear"></h4>
-                        <div class="calendar-nav">
-                            <button type="button" onclick="changeTourMonth(-1)"><i class="fas fa-chevron-left"></i></button>
-                            <button type="button" onclick="changeTourMonth(1)"><i class="fas fa-chevron-right"></i></button>
-                        </div>
-                    </div>
-                    <div class="calendar-grid" id="tourCalendarGrid"></div>
-                    <div class="calendar-legend">
-                        <span><span class="dot available"></span> Available</span>
-                        <span><span class="dot booked"></span> Booked</span>
-                        <span><span class="dot selected"></span> Selected</span>
-                    </div>
-                    <div class="calendar-info" id="tourCalendarInfo">Select a date for your tour</div>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-user"></i> Guest Name *</label>
-                <input type="text" name="guest_name" id="t_guest_name" class="form-control" required placeholder="Full name of lead guest" maxlength="100">
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-phone"></i> Contact Number *</label>
-                <div class="phone-input-group">
-                    <select class="phone-suffix-select" disabled>
-                        <option value="+63" selected>+63 🇵🇭</option>
-                    </select>
-                    <div class="phone-input-wrapper">
-                        <i class="fas fa-phone phone-icon"></i>
-                        <input type="tel" name="contact_number" id="t_contact" class="form-control" placeholder="9123456789" maxlength="10" inputmode="numeric" required oninput="validatePhone(this, 't_contact_count')">
-                        <span class="digit-count" id="t_contact_count">0/10</span>
-                    </div>
-                </div>
-                <div class="helper-text"><i class="fas fa-info-circle"></i> Enter 10-digit PH mobile number (e.g., 9123456789)</div>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-clock"></i> Preferred Time *</label>
-                <select name="preferred_time" id="t_preferred_time" class="form-control" required>
-                    <option value="">Select Time Slot</option>
-                    <option value="06:00:00">6:00 AM — Sunrise</option>
-                    <option value="07:00:00">7:00 AM</option>
-                    <option value="08:00:00">8:00 AM</option>
-                    <option value="09:00:00">9:00 AM</option>
-                    <option value="10:00:00">10:00 AM</option>
-                    <option value="11:00:00">11:00 AM</option>
-                    <option value="12:00:00">12:00 PM</option>
-                    <option value="13:00:00">1:00 PM</option>
-                    <option value="14:00:00">2:00 PM</option>
-                    <option value="15:00:00">3:00 PM</option>
-                    <option value="16:00:00">4:00 PM — Sunset</option>
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-users"></i> Number of Pax *</label>
-                <input type="number" name="number_of_guests" id="t_guests" class="form-control" min="1" value="1" required>
-                <div class="helper-text">Max capacity: <span id="t_max_label">0</span> pax</div>
-            </div>
-
-            <div class="form-group">
-                <label><i class="fas fa-comment"></i> Special Requests</label>
-                <textarea name="special_requests" id="t_special_requests" class="form-control" rows="2" placeholder="Any dietary restrictions, special occasions..."></textarea>
-            </div>
-
-            <div class="tour-summary-box">
-                <div class="tour-summary-row">
-                    <span><i class="fas fa-users" style="color:#4DA6D9;"></i> Number of Pax:</span>
-                    <strong id="t_summary_pax">1</strong>
-                </div>
-                <div class="tour-summary-row">
-                    <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> Total amount:</span>
-                    <span class="tour-total-value" id="t_summary_total">₱0.00</span>
-                </div>
-            </div>
-
-            <div class="tour-warning">
-                <i class="fas fa-info-circle"></i>
-                <span><strong>Note:</strong> Your booking will be reviewed by admin. Please upload your payment proof after confirmation.</span>
-            </div>
-
-            <button type="submit" class="btn-submit-modal">
-                <i class="fas fa-check"></i> Add Tour to Package
             </button>
         </form>
 
@@ -3245,13 +2805,13 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                     <h3>👥 Guest Policy</h3>
                     <ul>
                         <li>The number of guests must not exceed the <strong>declared pax count</strong>.</li>
-                        <li>All guest names must be <strong>accurate and complete</strong>.</li>
+                        <li>The number of guests and senior citizens must be accurate. Please disclose relevant health conditions for staff safety.</li>
                         <li>Additional guests beyond the declared pax will not be accommodated.</li>
                     </ul>
 
                     <h3>📋 Package Booking</h3>
                     <ul>
-                        <li>All items in this package (House, Food, Tour) will be booked together.</li>
+                        <li>All selected items (House and Food) will be booked together.</li>
                         <li>Partial cancellation of package items is <strong>not allowed</strong>.</li>
                         <li>Changes to any item must be made before confirming.</li>
                     </ul>
@@ -3291,7 +2851,6 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
 <script>
 const HOUSE_BOOKED_DATES = <?php echo json_encode($house_booked_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const HOUSE_HARD_DATES = <?php echo json_encode($house_hard_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
-const TOUR_BOOKED_DATES  = <?php echo json_encode($tour_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const FOOD_BOOKED_DATES  = <?php echo json_encode($food_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 // House stay window (null when the package has no house). The server enforces it; this only guides the pickers.
 const PKG_WINDOW = <?php echo json_encode($pkg_window, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
@@ -3310,12 +2869,12 @@ function pkgApplyTimes(selectId, dateStr) {
     });
     if (sel.value && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
 }
-// Banner + start month of the calendar for a tour/food form
+// Banner and time guidance for the food form
 function pkgShowWindowNote(noteId, label) {
     var n = document.getElementById(noteId);
     if (!n) return;
     if (!PKG_WINDOW) { n.style.display = 'none'; return; }
-    n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> ' + PKG_WINDOW.start_label + ' to ' + PKG_WINDOW.end_label + '.<br>Your tour and food schedules must be within your house stay period.';
+    n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> ' + PKG_WINDOW.start_label + ' to ' + PKG_WINDOW.end_label + '.<br>Your food schedule must be within your house stay period.';
     n.style.display = 'block';
 }
 const ITEMS_DETAIL = <?php echo json_encode($items_detail, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
@@ -3338,10 +2897,6 @@ function openModal(type, editId) {
     if (type === 'food') {
         document.getElementById('foodStep1').style.display = 'block';
         document.getElementById('foodForm').style.display = 'none';
-    }
-    if (type === 'tour') {
-        document.getElementById('tourStep1').style.display = 'block';
-        document.getElementById('tourForm').style.display = 'none';
     }
     document.getElementById(type + 'Modal').classList.add('show');
     document.body.style.overflow = 'hidden';
@@ -3526,16 +3081,10 @@ function editHouse() {
             guestsInput.value = d.guests;
             document.getElementById('h_max_capacity').textContent = guestsInput.max;
 
-            rebuildGuestNameInputs();
-            var nameInputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-            d.guest_names.forEach(function(name, i) {
-                if (nameInputs[i]) {
-                    nameInputs[i].value = name;
-                    nameInputs[i].classList.add('valid');
-                }
-            });
-            updateGuestCountBadge();
-            syncGuestNamesHidden();
+            document.getElementById('h_senior_citizens').value = d.senior_citizens == null ? '' : String(d.senior_citizens);
+            document.getElementById('h_has_health_condition').value = d.has_health_condition == null ? '' : String(d.has_health_condition);
+            document.getElementById('h_health_condition_details').value = d.health_condition_details || '';
+            toggleHouseHealthCondition();
 
             houseSelectedStart = d.check_in;
             houseSelectedEnd = d.check_out;
@@ -3609,45 +3158,6 @@ function editFood() {
     }, 150);
 }
 
-function editTour() {
-    if (!CART_DATA || !CART_DATA.tour) return;
-    var d = CART_DATA.tour;
-
-    openModal('tour');
-
-    var pick = document.querySelector('#tourModal .item-pick[data-id="' + d.id + '"]');
-    if (!pick) return;
-
-    setTimeout(function() {
-        pick.click();
-
-        setTimeout(function() {
-            tourSelectedDate = d.booking_date;
-            document.getElementById('t_booking_date').value = d.booking_date;
-            renderTourCalendar(tourCalMonth, tourCalYear);
-            var infoEl = document.getElementById('tourCalendarInfo');
-            if (infoEl) infoEl.innerHTML = '✅ Date selected: <strong>' + formatDateDisplay(d.booking_date) + '</strong>';
-
-            pkgApplyTimes('t_preferred_time', d.booking_date);
-            document.getElementById('t_preferred_time').value = d.preferred_time;
-            document.getElementById('t_guest_name').value = d.guest_name;
-
-            var phoneVal = (d.contact_number || '').replace(/^\+63/, '').replace(/^0/, '');
-            document.getElementById('t_contact').value = phoneVal;
-            validatePhone(document.getElementById('t_contact'), 't_contact_count');
-
-            document.getElementById('t_guests').value = d.number_of_guests;
-            updateTourSummary();
-
-            document.getElementById('t_special_requests').value = d.special_requests || '';
-        }, 120);
-    }, 150);
-}
-
-var hdImages = [];
-var hdIndex = 0;
-var hdCurrentItemId = 0;
-var hdCurrentItemType = '';
 
 function openItemDetail(detailKey) {
     var item = ITEMS_DETAIL[detailKey];
@@ -3674,9 +3184,6 @@ function openItemDetail(detailKey) {
         if (item.category) tagsHtml += '<span class="hd-tag gold"><i class="fas fa-tag"></i> ' + escapeHtml(item.category.replace(/_/g, ' ')) + '</span>';
         if (item.pax_range) tagsHtml += '<span class="hd-tag green"><i class="fas fa-users"></i> ' + escapeHtml(item.pax_range) + '</span>';
         if (item.variations && item.variations.length) tagsHtml += '<span class="hd-tag"><i class="fas fa-box"></i> ' + item.variations.length + ' sizes available</span>';
-    } else if (itemType === 'tour') {
-        if (item.capacity) tagsHtml += '<span class="hd-tag green"><i class="fas fa-users"></i> Max ' + item.capacity + ' pax</span>';
-        if (item.amenities && item.amenities.length) tagsHtml += '<span class="hd-tag gold"><i class="fas fa-check-circle"></i> ' + item.amenities.length + ' inclusions</span>';
     }
     document.getElementById('hdQuickTags').innerHTML = tagsHtml;
 
@@ -3698,10 +3205,6 @@ function openItemDetail(detailKey) {
         if (item.pax_range) specsHtml += '<div class="hd-spec-item"><i class="fas fa-users"></i><span class="hd-spec-value">' + escapeHtml(item.pax_range) + '</span><span class="hd-spec-label">Pax Range</span></div>';
         if (item.variations && item.variations.length) specsHtml += '<div class="hd-spec-item"><i class="fas fa-box"></i><span class="hd-spec-value">' + item.variations.length + '</span><span class="hd-spec-label">Sizes</span></div>';
         specsHtml += '<div class="hd-spec-item"><i class="fas fa-money-bill-wave"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Base Price</span></div>';
-    } else if (itemType === 'tour') {
-        specsHtml += '<div class="hd-spec-item"><i class="fas fa-users"></i><span class="hd-spec-value">' + (item.capacity || '—') + '</span><span class="hd-spec-label">Max Pax</span></div>';
-        specsHtml += '<div class="hd-spec-item"><i class="fas fa-map-marked-alt"></i><span class="hd-spec-value">' + escapeHtml(item.destinations || '12–14 islands') + '</span><span class="hd-spec-label">Destinations</span></div>';
-        specsHtml += '<div class="hd-spec-item"><i class="fas fa-tag"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Per Boat</span></div>';
     }
     document.getElementById('hdSpecs').innerHTML = specsHtml;
     document.getElementById('hdSpecsSection').style.display = specsHtml ? 'block' : 'none';
@@ -3722,7 +3225,6 @@ function openItemDetail(detailKey) {
 
     var amenHtml = '';
     var amenTitle = 'Inclusions & Amenities';
-    if (itemType === 'tour') amenTitle = 'Tour Inclusions';
     if (itemType === 'food') amenTitle = 'What\'s Included';
     document.getElementById('hdAmenitiesTitle').innerHTML = '<i class="fas fa-check-circle"></i> ' + amenTitle;
 
@@ -3747,9 +3249,6 @@ function openItemDetail(detailKey) {
     } else if (itemType === 'food') {
         selectBtn.className = 'btn-hd-select food';
         selectBtn.innerHTML = '<i class="fas fa-plus-circle"></i> Select This Food';
-    } else if (itemType === 'tour') {
-        selectBtn.className = 'btn-hd-select tour';
-        selectBtn.innerHTML = '<i class="fas fa-plus-circle"></i> Select This Tour';
     }
 
     selectBtn.onclick = function() {
@@ -3875,10 +3374,10 @@ function selectHouse(el) {
     document.getElementById('h_guests').max = currentHouseCapacity;
     document.getElementById('h_max_capacity').textContent = currentHouseCapacity;
 
-    var listEl = document.getElementById('guestNamesList');
-    listEl.innerHTML = '';
-    listEl.dataset.freshReset = '1';
-    rebuildGuestNameInputs();
+    document.getElementById('h_senior_citizens').value = '0';
+    document.getElementById('h_has_health_condition').value = '';
+    document.getElementById('h_health_condition_details').value = '';
+    toggleHouseHealthCondition();
 
     var today = new Date();
     houseCalMonth = today.getMonth();
@@ -3918,8 +3417,13 @@ function renderHouseCalendar(month, year) {
         var d = document.createElement('div');
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
-        if (dateObj < today) d.classList.add('past');
-        if (houseCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        var isPast = dateObj < today;
+        var isBooked = houseCurrentBooked.indexOf(dateStr) !== -1;
+        var isHardBlocked = houseCurrentHard.indexOf(dateStr) !== -1;
+        if (isPast) d.classList.add('past');
+        if (isBooked) d.classList.add('booked');
+        if (isHardBlocked) d.classList.add('blocked');
+        if (!isPast && !isBooked && !isHardBlocked) d.classList.add('available');
 
         if (houseSelectedStart === dateStr || houseSelectedEnd === dateStr) d.classList.add('selected');
         else if (startObj && endObj && dateObj > startObj && dateObj < endObj) d.classList.add('in-range');
@@ -3942,7 +3446,7 @@ function selectHouseDate(el) {
     // A booked night can still be chosen as the CHECK-OUT day (12 NN check-out / 2 PM check-in);
     // the nights in between are checked below.
     var asCheckOut = !!(houseSelectedStart && !houseSelectedEnd && date > houseSelectedStart);
-    if (el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('past') || el.classList.contains('disabled') || el.classList.contains('blocked')) return;
     if (el.classList.contains('booked') && !asCheckOut) return;
     var pickedDate = new Date(date + 'T00:00:00');
 
@@ -4044,140 +3548,29 @@ function calcHouseTotal() {
     document.getElementById('h_display_total').textContent = total.toLocaleString('en-US', {minimumFractionDigits: 2});
 }
 
-function sanitizeName(value) {
-    return value.replace(/[^a-zA-ZÀ-ÿ\s\-'.]/g, '').replace(/\s{2,}/g, ' ').slice(0, 50);
-}
 
 function validatePax(input) {
-    let raw = input.value.trim();
-    if (raw === '') { rebuildGuestNameInputs(); return; }
-    let val = parseInt(raw);
-    let maxCap = currentHouseCapacity || 20;
-    if (isNaN(val) || val < 1) input.value = 1;
-    else if (val > maxCap) { input.value = maxCap; alert('Maximum of ' + maxCap + ' guests allowed for this house.'); }
-    rebuildGuestNameInputs();
+    if (input.value.trim() === '') { calcHouseTotal(); return; }
+    var n = parseInt(input.value, 10);
+    if (!Number.isFinite(n) || n < 1) n = 1;
+    if (n > currentHouseCapacity) n = currentHouseCapacity;
+    input.value = String(n);
+    var seniorInput = document.getElementById('h_senior_citizens');
+    if (seniorInput) seniorInput.max = String(n);
+    if (seniorInput && parseInt(seniorInput.value || '0', 10) > n) seniorInput.value = String(n);
     calcHouseTotal();
 }
 
-function rebuildGuestNameInputs() {
-    const paxInput = document.getElementById('h_guests');
-    const listEl = document.getElementById('guestNamesList');
-    const badgeEl = document.getElementById('guestCountBadge');
-    const helpEl = document.getElementById('guestNamesHelp');
-    if (!paxInput || !listEl || !badgeEl) return;
-
-    const isFreshReset = listEl.dataset.freshReset === '1';
-    let currentNames = [];
-    if (!isFreshReset) {
-        const existingInputs = listEl.querySelectorAll('.guest-name-input');
-        if (existingInputs.length > 0) currentNames = Array.from(existingInputs).map(inp => inp.value);
-    } else delete listEl.dataset.freshReset;
-
-    const pax = parseInt(paxInput.value) || 0;
-    listEl.innerHTML = '';
-
-    if (pax <= 0) {
-        badgeEl.textContent = '0 / 0';
-        badgeEl.classList.remove('match', 'over', 'under');
-        badgeEl.classList.add('under');
-        if (helpEl) {
-            helpEl.classList.remove('error', 'ok');
-            helpEl.innerHTML = '<i class="fas fa-info-circle"></i> Enter the number of pax above to add guest name fields';
-        }
-        syncGuestNamesHidden();
-        return;
-    }
-
-    for (let i = 0; i < pax; i++) {
-        const row = document.createElement('div');
-        row.className = 'guest-name-row';
-
-        const badge = document.createElement('span');
-        badge.className = 'guest-badge';
-        badge.textContent = (i + 1);
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'guest-name-input';
-        input.placeholder = 'Guest ' + (i + 1) + ' full name';
-        input.maxLength = 50;
-        input.autocomplete = 'off';
-        input.value = currentNames[i] || '';
-
-        input.addEventListener('input', function() {
-            const before = this.value;
-            const after = sanitizeName(before);
-            if (before !== after) {
-                const pos = this.selectionStart;
-                const diff = before.length - after.length;
-                this.value = after;
-                try { this.setSelectionRange(pos - diff, pos - diff); } catch (e) {}
-            }
-            this.classList.toggle('invalid', this.value.trim().length > 0 && this.value.trim().length < 2);
-            this.classList.toggle('valid', this.value.trim().length >= 2);
-            updateGuestCountBadge();
-            syncGuestNamesHidden();
-        });
-
-        input.addEventListener('keypress', function(e) {
-            const char = String.fromCharCode(e.which);
-            if (!/[a-zA-ZÀ-ÿ\s\-'.]/.test(char)) e.preventDefault();
-        });
-
-        input.addEventListener('paste', function(e) {
-            e.preventDefault();
-            const pasted = (e.clipboardData || window.clipboardData).getData('text');
-            const cleaned = sanitizeName(pasted);
-            const start = this.selectionStart;
-            const end = this.selectionEnd;
-            this.value = this.value.slice(0, start) + cleaned + this.value.slice(end);
-            updateGuestCountBadge();
-            syncGuestNamesHidden();
-        });
-
-        row.appendChild(badge);
-        row.appendChild(input);
-        listEl.appendChild(row);
-    }
-
-    updateGuestCountBadge();
-    syncGuestNamesHidden();
+function toggleHouseHealthCondition() {
+    var select = document.getElementById('h_has_health_condition');
+    var group = document.getElementById('h_health_condition_details_group');
+    var details = document.getElementById('h_health_condition_details');
+    if (!select || !group || !details) return;
+    var needsDetails = select.value === '1';
+    group.style.display = needsDetails ? 'block' : 'none';
+    details.required = false;
+    if (!needsDetails) details.value = '';
 }
-
-function updateGuestCountBadge() {
-    const badgeEl = document.getElementById('guestCountBadge');
-    const helpEl = document.getElementById('guestNamesHelp');
-    if (!badgeEl) return;
-    const inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    const filled = Array.from(inputs).filter(i => i.value.trim().length >= 2).length;
-    const total = inputs.length;
-
-    badgeEl.textContent = filled + ' / ' + total;
-    badgeEl.classList.remove('match', 'over', 'under');
-
-    if (total === 0) { badgeEl.classList.add('under'); return; }
-    if (filled === total && total > 0) {
-        badgeEl.classList.add('match');
-        if (helpEl) { helpEl.classList.remove('error'); helpEl.classList.add('ok'); helpEl.innerHTML = '<i class="fas fa-check-circle"></i> All guest names filled. Ready to add!'; }
-    } else {
-        badgeEl.classList.add('under');
-        if (helpEl) { helpEl.classList.remove('ok'); helpEl.classList.add('error'); helpEl.innerHTML = '<i class="fas fa-exclamation-circle"></i> Please fill all ' + total + ' guest name(s).'; }
-    }
-}
-
-function syncGuestNamesHidden() {
-    const inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    const names = Array.from(inputs).map(i => i.value.trim()).filter(n => n.length > 0);
-    const hidden = document.getElementById('h_guest_names_json');
-    if (hidden) hidden.value = JSON.stringify(names);
-}
-
-var foodCalMonth = new Date().getMonth();
-var foodCalYear = new Date().getFullYear();
-var foodSelectedDate = null;
-var foodCurrentBooked = [];
-var selectedFood = null;
-var selectedFoodVariations = [];
 
 function selectFood(el) {
     selectedFood = { id: el.dataset.id, name: el.dataset.name, price: parseFloat(el.dataset.price) };
@@ -4259,9 +3652,13 @@ function renderFoodCalendar(month, year) {
         var d = document.createElement('div');
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
-        if (dateObj < today) d.classList.add('past');
-        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
-        if (foodCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        var isPast = dateObj < today;
+        var isOutsideStay = !pkgDateInWindow(dateStr);
+        var isBooked = foodCurrentBooked.indexOf(dateStr) !== -1;
+        if (isPast) d.classList.add('past');
+        if (isOutsideStay) { d.classList.add('outside-stay'); d.title = 'Outside your house stay'; }
+        if (isBooked) d.classList.add('booked');
+        if (!isPast && !isOutsideStay && !isBooked) d.classList.add('available');
         if (foodSelectedDate === dateStr) d.classList.add('selected');
 
         d.onclick = function() { selectFoodDate(this); };
@@ -4277,7 +3674,7 @@ function changeFoodMonth(delta) {
 }
 
 function selectFoodDate(el) {
-    if (el.classList.contains('booked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('booked') || el.classList.contains('blocked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
     var date = el.dataset.date;
     if (!date) return;
 
@@ -4374,113 +3771,6 @@ function toggleDelivery() {
     group.style.display = 'none'; addr.required = false; addr.value = '';
 }
 
-var tourCalMonth = new Date().getMonth();
-var tourCalYear = new Date().getFullYear();
-var tourSelectedDate = null;
-var tourCurrentBooked = [];
-var selectedTour = null;
-
-function selectTour(el) {
-    selectedTour = { id: el.dataset.id, name: el.dataset.name, price: parseFloat(el.dataset.price), max: parseInt(el.dataset.max) };
-    document.getElementById('t_tour_id').value = selectedTour.id;
-    document.getElementById('t_display_tour').value = selectedTour.name;
-    document.getElementById('t_display_price').value = '₱' + selectedTour.price.toLocaleString('en-US', {minimumFractionDigits: 2});
-    document.getElementById('t_max_label').textContent = selectedTour.max;
-    document.getElementById('t_guests').max = selectedTour.max;
-    document.getElementById('t_total_price').value = selectedTour.price;
-
-    document.getElementById('tourStep1').style.display = 'none';
-    document.getElementById('tourForm').style.display = 'block';
-
-    tourCurrentBooked = TOUR_BOOKED_DATES[selectedTour.id] || [];
-    tourSelectedDate = null;
-    document.getElementById('t_booking_date').value = '';
-    document.getElementById('tourCalendarInfo').textContent = 'Select a date for your tour';
-    updateTourSummary();
-
-    var today = new Date();
-    tourCalMonth = today.getMonth();
-    tourCalYear = today.getFullYear();
-    if (PKG_WINDOW) { var _w = PKG_WINDOW.start.split(/[- ]/); tourCalMonth = parseInt(_w[1], 10) - 1; tourCalYear = parseInt(_w[0], 10); }
-    pkgShowWindowNote('t_window_note', 'tour');
-    pkgApplyTimes('t_preferred_time', '');
-    renderTourCalendar(tourCalMonth, tourCalYear);
-}
-
-function backToTourList() {
-    document.getElementById('tourStep1').style.display = 'block';
-    document.getElementById('tourForm').style.display = 'none';
-}
-
-function renderTourCalendar(month, year) {
-    var firstDay = new Date(year, month, 1).getDay();
-    var daysInMonth = new Date(year, month + 1, 0).getDate();
-    var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    document.getElementById('tourCalendarMonthYear').textContent = monthNames[month] + ' ' + year;
-
-    var grid = document.getElementById('tourCalendarGrid');
-    grid.innerHTML = '';
-
-    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(n) {
-        var d = document.createElement('div'); d.className = 'day-name'; d.textContent = n; grid.appendChild(d);
-    });
-
-    var today = new Date(); today.setHours(0,0,0,0);
-    for (var i = 0; i < firstDay; i++) {
-        var e = document.createElement('div'); e.className = 'day disabled'; grid.appendChild(e);
-    }
-
-    for (var day = 1; day <= daysInMonth; day++) {
-        var dateObj = new Date(year, month, day);
-        var dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
-        var d = document.createElement('div');
-        d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
-
-        if (dateObj < today) d.classList.add('past');
-        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
-        if (tourCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
-        if (tourSelectedDate === dateStr) d.classList.add('selected');
-
-        d.onclick = function() { selectTourDate(this); };
-        grid.appendChild(d);
-    }
-}
-
-function changeTourMonth(delta) {
-    tourCalMonth += delta;
-    if (tourCalMonth < 0) { tourCalMonth = 11; tourCalYear--; }
-    else if (tourCalMonth > 11) { tourCalMonth = 0; tourCalYear++; }
-    renderTourCalendar(tourCalMonth, tourCalYear);
-}
-
-function selectTourDate(el) {
-    if (el.classList.contains('booked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
-    var date = el.dataset.date;
-    if (!date) return;
-
-    if (tourSelectedDate === date) {
-        tourSelectedDate = null; el.classList.remove('selected');
-        document.getElementById('t_booking_date').value = '';
-        document.getElementById('tourCalendarInfo').textContent = 'Select a date for your tour';
-        pkgApplyTimes('t_preferred_time', '');
-        return;
-    }
-
-    document.querySelectorAll('#tourCalendarGrid .day.selected').forEach(function(d) { d.classList.remove('selected'); });
-
-    tourSelectedDate = date; el.classList.add('selected');
-    document.getElementById('t_booking_date').value = date;
-    document.getElementById('tourCalendarInfo').innerHTML = '✅ Date selected: <strong>' + formatDateDisplay(date) + '</strong>';
-    pkgApplyTimes('t_preferred_time', date);
-}
-
-function updateTourSummary() {
-    var paxInput = document.getElementById('t_guests');
-    var pax = parseInt(paxInput.value) || 1;
-    document.getElementById('t_summary_pax').textContent = pax;
-    var total = selectedTour ? selectedTour.price : 0;
-    document.getElementById('t_summary_total').textContent = '₱' + total.toLocaleString('en-US', {minimumFractionDigits: 2});
-}
 
 function validatePhone(input, counterId) {
     let cleaned = input.value.replace(/[^0-9]/g, '');
@@ -4493,17 +3783,6 @@ function validatePhone(input, counterId) {
         counter.classList.toggle('complete', cleaned.length === 10);
     }
 }
-
-document.addEventListener('DOMContentLoaded', function() {
-    var tContact = document.getElementById('t_contact');
-    if (tContact) tContact.addEventListener('input', function() { validatePhone(this, 't_contact_count'); });
-
-    var tGuests = document.getElementById('t_guests');
-    if (tGuests) {
-        tGuests.addEventListener('input', updateTourSummary);
-        tGuests.addEventListener('change', updateTourSummary);
-    }
-});
 
 document.getElementById('foodForm').addEventListener('submit', function(e) {
     var date = document.getElementById('f_preferred_date').value;
@@ -4519,20 +3798,6 @@ document.getElementById('foodForm').addEventListener('submit', function(e) {
     return true;
 });
 
-document.getElementById('tourForm').addEventListener('submit', function(e) {
-    var date = document.getElementById('t_booking_date').value;
-    if (!date) { e.preventDefault(); alert('Please select a booking date from the calendar.'); return false; }
-    var guestName = document.getElementById('t_guest_name').value.trim();
-    if (guestName.length < 2) { e.preventDefault(); alert('Please enter the lead guest full name.'); return false; }
-    var contact = document.getElementById('t_contact').value;
-    if (!/^[0-9]{10}$/.test(contact)) { e.preventDefault(); alert('PH mobile number must be exactly 10 digits (e.g., 9123456789).'); return false; }
-    var time = document.getElementById('t_preferred_time').value;
-    if (!time) { e.preventDefault(); alert('Please select a preferred time slot.'); return false; }
-    var guests = parseInt(document.getElementById('t_guests').value);
-    if (!guests || guests < 1) { e.preventDefault(); alert('Please enter the number of pax (minimum 1).'); return false; }
-    if (guests > selectedTour.max) { e.preventDefault(); alert('Maximum guests for this tour is ' + selectedTour.max + '.'); return false; }
-    return true;
-});
 
 // ✅ UPDATED: houseForm submit validates times too
 // Business rule: check-out TIME always follows check-in TIME (the date still follows the nights).
@@ -4569,24 +3834,15 @@ document.getElementById('houseForm').addEventListener('submit', function(e) {
         return false;
     }
 
-    var inputs = document.querySelectorAll('#guestNamesList .guest-name-input');
-    var names = [];
-    var hasError = false;
-
-    if (inputs.length !== pax) { alert('Please wait a moment while guest fields update, then try again.'); return false; }
-
-    for (var i = 0; i < inputs.length; i++) {
-        var val = inputs[i].value.trim();
-        if (val === '') { alert('Please enter guest name #' + (i + 1) + '.'); inputs[i].focus(); hasError = true; break; }
-        if (val.length < 2) { alert('Guest name #' + (i + 1) + ' is too short.'); inputs[i].focus(); hasError = true; break; }
-        if (!/^[a-zA-ZÀ-ÿ\s\-'.]+$/.test(val)) { alert('Guest name #' + (i + 1) + ' contains invalid characters.'); inputs[i].focus(); hasError = true; break; }
-        names.push(val);
+    var seniorInput = document.getElementById('h_senior_citizens');
+    var seniorCount = parseInt(seniorInput.value, 10);
+    if (seniorInput.value.trim() === '' || isNaN(seniorCount) || seniorCount < 0 || seniorCount > pax) {
+        alert('Senior-citizen count must be between 0 and the total number of guests.');
+        seniorInput.focus();
+        return false;
     }
-
-    if (hasError) return false;
-    if (names.length !== pax) { alert('Please provide exactly ' + pax + ' guest name(s).'); return false; }
-
-    document.getElementById('h_guest_names_json').value = JSON.stringify(names);
+    var healthSelect = document.getElementById('h_has_health_condition');
+    var healthDetails = document.getElementById('h_health_condition_details');
     this.submit();
     return true;
 });
@@ -4675,18 +3931,18 @@ function dismissAlert() {
 <script>
 (function () {
     var KEY = 'pb_step', ADV = 'pb_adv';
-    var has = { house: <?php echo $has_house ? 'true' : 'false'; ?>, tour: <?php echo $has_tour ? 'true' : 'false'; ?>, food: <?php echo $has_food ? 'true' : 'false'; ?> };
-    var hasAny = has.house || has.tour || has.food;
+    var has = { house: <?php echo $has_house ? 'true' : 'false'; ?>, food: <?php echo $has_food ? 'true' : 'false'; ?> };
+    var hasAny = has.house || has.food;
     var errType = <?php echo (isset($modal_error) && !empty($open_modal)) ? json_encode($open_modal) : 'null'; ?>;
-    var typeStep = { house: 1, tour: 2, food: 3 };
+    var typeStep = { house: 1, food: 2 };
     function ss(k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) {} }
     function gs(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
     document.body.classList.add('pb-js');
     var panels = document.querySelectorAll('.pb-panel'), steps = document.querySelectorAll('.pb-step');
     function show(n, user) {
         n = parseInt(n, 10) || 1;
-        if (n < 1) n = 1; if (n > 4) n = 4;
-        if (n === 4 && !hasAny) n = 3;
+        if (n < 1) n = 1; if (n > 3) n = 3;
+        if (n === 3 && !hasAny) n = 2;
         for (var i = 0; i < panels.length; i++) panels[i].classList.toggle('active', +panels[i].getAttribute('data-panel') === n);
         for (var j = 0; j < steps.length; j++) {
             var on = +steps[j].getAttribute('data-step') === n;
@@ -4709,7 +3965,7 @@ function dismissAlert() {
     if (errType) start = typeStep[errType] || 1;
     else if (adv && has[adv]) start = typeStep[adv] + 1;
     else start = parseInt(gs(KEY), 10) || 1;
-    if (!hasAny) start = Math.min(start, 3);
+    if (!hasAny) start = Math.min(start, 2);
     if (!hasAny && !errType && !adv) start = 1;
     show(start, false);
 })();

@@ -22,7 +22,7 @@ class BookingFilters
     public const MAX_SPAN   = 366;    // longest custom range, in days
     public const SEARCH_MAX = 100;
 
-    public const SERVICE_LABELS = ['all' => 'All services', 'house' => 'House', 'tour' => 'Tour', 'food' => 'Food', 'package' => 'Package'];
+    public const SERVICE_LABELS = ['all' => 'All services', 'house' => 'House', 'tour' => 'Tour (past bookings)', 'food' => 'Food', 'package' => 'Package'];
     public const DATE_LABELS    = ['' => 'Any date', 'today' => 'Today', 'next7' => 'Next 7 days', 'custom' => 'Custom range'];
     public const QUICK_LABELS   = ['soon' => 'Starting soon (3 days)', 'verify' => 'Payment verification needed', 'rebooked' => 'Rebooked'];
 

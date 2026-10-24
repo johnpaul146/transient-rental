@@ -2,7 +2,7 @@
 /**
  * ============================================================================
  * PaymentService — reservation fee, balance, cancellation-credit and package
- * payment rules for Transient House & Tours.
+ * payment rules for Jerry Dino's Stay.
  * ============================================================================
  * BUSINESS RULES
  *  - A ₱1,000 reservation fee secures a booking (or the booking total if it is

@@ -56,8 +56,9 @@ if (!function_exists('walkInChip')) {
  */
 if (!function_exists('bookingCancelAllowed')) {
     function bookingCancelAllowed(array $row): bool {
-        if (($_SESSION['role'] ?? '') !== 'admin') return false;
-        return in_array((string)($row['booking_status'] ?? ''), ['pending', 'confirmed'], true);
+        // The Cancel button is intentionally hidden for Admin and Staff (Reject is the decline action).
+        // UI visibility only: the admin_cancel_booking handler below and all cancellation data are untouched.
+        return false;
     }
 }
 
@@ -1007,6 +1008,9 @@ try {
                     hb.check_out_time AS house_check_out_time,
                     hb.number_of_guests AS house_guests,
                     hb.guest_names AS house_guest_names,
+                    hb.senior_citizens AS house_senior_citizens,
+                    hb.has_health_condition AS house_has_health_condition,
+                    hb.health_condition_details AS house_health_condition_details,
                     t.tour_name, tb.reference_number as tour_ref,
                     tb.booking_date AS tour_date,
                     tb.preferred_time AS tour_time,
@@ -1327,7 +1331,10 @@ foreach($cal_house as $booking) {
             'guests' => $booking['number_of_guests'], 'total' => $booking['total_amount'],
             'status' => $booking['booking_status'], 'payment' => $booking['payment_status'],
             'email' => $booking['email'], 'proof' => $booking['payment_proof'],
-            'gcash_reference' => $booking['gcash_reference'] ?? '', 'guest_names' => $booking['guest_names'] ?? ''
+            'gcash_reference' => $booking['gcash_reference'] ?? '', 'guest_names' => $booking['guest_names'] ?? '',
+            'senior_citizens' => $booking['senior_citizens'] ?? null,
+            'has_health_condition' => $booking['has_health_condition'] ?? null,
+            'health_condition_details' => $booking['health_condition_details'] ?? ''
         ]
     ];
 }
@@ -1386,7 +1393,11 @@ foreach($cal_package as $pkg) {
             'check_in' => $pkg_date, 'check_out' => $pkg_date, 'guests' => 1,
             'total' => $pkg['grand_total'], 'status' => $pkg['booking_status'],
             'payment' => $pkg['payment_status'], 'email' => $pkg['email'],
-            'proof' => $pkg['payment_proof'], 'gcash_reference' => $pkg['gcash_reference'] ?? ''
+            'proof' => $pkg['payment_proof'], 'gcash_reference' => $pkg['gcash_reference'] ?? '',
+            'house_senior_citizens' => $pkg['house_senior_citizens'] ?? null,
+            'house_has_health_condition' => $pkg['house_has_health_condition'] ?? null,
+            'house_health_condition_details' => $pkg['house_health_condition_details'] ?? '',
+            'house_guest_names' => $pkg['house_guest_names'] ?? ''
         ]
     ];
 }
@@ -4171,7 +4182,13 @@ function viewBooking(type, booking) {
                     html += '<div class="pkg-item-detail"><i class="fas fa-calendar-alt"></i> ' + escapeHtml(pkgCheckIn) + ' &rarr; ' + escapeHtml(pkgCheckOut) + '</div>';
                 }
                 if (bookingData.house_guests) html += '<div class="pkg-item-detail"><i class="fas fa-users"></i> ' + escapeHtml(bookingData.house_guests) + ' guest(s)</div>';
-                if (bookingData.house_guest_names) html += '<div class="pkg-item-detail"><i class="fas fa-user-friends"></i> ' + escapeHtml(formatGuestNamesDisplay(bookingData.house_guest_names)) + '</div>';
+                html += '<div class="pkg-item-detail"><i class="fas fa-user-check"></i> Senior citizens: ' + (bookingData.house_senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.house_senior_citizens)) + '</div>';
+                var houseHealthValue = bookingData.house_has_health_condition;
+                var houseHasHealthCondition = String(houseHealthValue) === '1';
+                var houseHealthLabel = houseHealthValue == null || houseHealthValue === '' ? 'Not recorded' : (houseHasHealthCondition ? 'Yes' : 'No');
+                html += '<div class="pkg-item-detail"><i class="fas fa-heartbeat"></i> Health condition: ' + houseHealthLabel + '</div>'; 
+                if (houseHasHealthCondition && bookingData.house_health_condition_details) html += '<div class="pkg-item-detail"><i class="fas fa-notes-medical"></i> ' + escapeHtml(bookingData.house_health_condition_details) + '</div>';
+                if (bookingData.house_guest_names) html += '<div class="pkg-item-detail"><i class="fas fa-user-friends"></i> Historical guest names: ' + escapeHtml(formatGuestNamesDisplay(bookingData.house_guest_names)) + '</div>';
                 if (bookingData.house_amount) html += '<div class="pkg-item-detail"><span class="pkg-item-subtotal">₱' + parseFloat(bookingData.house_amount).toLocaleString('en-US', {minimumFractionDigits:2}) + '</span></div>';
                 html += '</div>';
             }
@@ -4268,6 +4285,11 @@ function viewBooking(type, booking) {
                 if (bookingData.check_out_time) checkOutDisplay += ' • ' + formatTimeDisplay(bookingData.check_out_time);
                 details.push({ label: 'Check Out', value: escapeHtml(checkOutDisplay) });
                 details.push({ label: 'Number of Pax', value: escapeHtml(bookingData.number_of_guests || '1') });
+                details.push({ label: 'Senior Citizens', value: bookingData.senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.senior_citizens) });
+                var healthValue = bookingData.has_health_condition;
+                var hasHealthCondition = String(healthValue) === '1';
+                details.push({ label: 'Health Condition', value: healthValue == null || healthValue === '' ? 'Not recorded' : (hasHealthCondition ? 'Yes' : 'No') });
+                if (hasHealthCondition && bookingData.health_condition_details) details.push({ label: 'Health Condition Details', value: '<span style="white-space:pre-wrap;">' + escapeHtml(bookingData.health_condition_details) + '</span>' });
             } else if (type === 'tour') {
                 if (bookingData.tour_name) {
                     var tourInfo = '<div style="background:#f0f7fb; border-left:3px solid #10b981; border-radius:8px; padding:10px 12px; text-align:left;">';
@@ -4648,6 +4670,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     payment_status: props.payment, booking_status: props.status,
                     payment_proof: props.proof, gcash_reference: props.gcash_reference || '',
                     guest_names: props.guest_names || '',
+                    house_senior_citizens: props.house_senior_citizens == null ? null : props.house_senior_citizens,
+                    house_has_health_condition: props.house_has_health_condition == null ? null : props.house_has_health_condition,
+                    house_health_condition_details: props.house_health_condition_details || '',
+                    house_guest_names: props.house_guest_names || '',
+                    senior_citizens: props.senior_citizens == null ? null : props.senior_citizens,
+                    has_health_condition: props.has_health_condition == null ? null : props.has_health_condition,
+                    health_condition_details: props.health_condition_details || '',
                     fulfillment_method: props.fulfillment_method || 'pickup',
                     delivery_address: props.delivery_address || '',
                     contact_number: props.contact_number || ''

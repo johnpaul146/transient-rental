@@ -1131,6 +1131,9 @@ if($guest) {
                 hb.number_of_guests AS house_guests,
                 hb.total_amount AS house_amount,
                 hb.guest_names AS house_guest_names,
+                hb.senior_citizens AS house_senior_citizens,
+                hb.has_health_condition AS house_has_health_condition,
+                hb.health_condition_details AS house_health_condition_details,
                 tb.tour_id, t.tour_name,
                 tb.booking_date AS tour_date,
                 tb.preferred_time AS tour_time,
@@ -2644,7 +2647,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                 });
                 ?>
                 <?php if(empty($active_tour)): ?>
-                    <p style="text-align:center;padding:40px 15px;color:#94a3b8;">No active tour bookings. <a href="tours.php" style="color:#4DA6D9;font-weight:600;">Browse Tours</a></p>
+                    <p style="text-align:center;padding:40px 15px;color:#94a3b8;">No active tour bookings. Tours/Boat booking is no longer available online.</p>
                 <?php else: ?>
                     <div class="table-responsive desktop-table">
                         <table>
@@ -4737,7 +4740,12 @@ function viewBooking(type, booking) {
         details.push({ label: 'Check Out', value: escapeHtml(checkOutDisplay) });
 
         details.push({ label: 'Number of Pax', value: escapeHtml(bookingData.number_of_guests || '1') });
-        details.push({ label: 'Guest Names', value: escapeHtml(guestNamesDisplay) });
+        details.push({ label: 'Senior Citizens', value: bookingData.senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.senior_citizens) });
+        var healthValue = bookingData.has_health_condition;
+        var hasHealthCondition = String(healthValue) === '1';
+        details.push({ label: 'Health Condition', value: healthValue == null || healthValue === '' ? 'Not recorded' : (hasHealthCondition ? 'Yes' : 'No') });
+        if (hasHealthCondition && bookingData.health_condition_details) details.push({ label: 'Health Condition Details', value: '<span style="white-space:pre-wrap;">' + escapeHtml(bookingData.health_condition_details) + '</span>' });
+        if (bookingData.guest_names) details.push({ label: 'Historical Guest Names', value: escapeHtml(guestNamesDisplay) });
     } else if (type === 'tour') {
         details.push({ label: 'Tour', value: escapeHtml(bookingData.tour_name || 'N/A') });
         if (bookingData.guest_name) details.push({ label: 'Guest Name', value: '<span style="color:#0369a1; font-weight:600;"><i class="fas fa-user"></i> ' + escapeHtml(bookingData.guest_name) + '</span>' });
@@ -4775,9 +4783,13 @@ function viewBooking(type, booking) {
             if (bookingData.house_guests) {
                 houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-users" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_guests) + ' guest(s)</div>';
             }
-            if (bookingData.house_guest_names) {
-                houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-friends" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_guest_names) + '</div>';
-            }
+            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-check" style="color:#4DA6D9; width:14px;"></i> Senior citizens: ' + (bookingData.house_senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.house_senior_citizens)) + '</div>';
+            var houseHealthValue = bookingData.house_has_health_condition;
+            var houseHasHealthCondition = String(houseHealthValue) === '1';
+            var houseHealthLabel = houseHealthValue == null || houseHealthValue === '' ? 'Not recorded' : (houseHasHealthCondition ? 'Yes' : 'No');
+            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-heartbeat" style="color:#4DA6D9; width:14px;"></i> Health condition: ' + houseHealthLabel + '</div>'; 
+            if (houseHasHealthCondition && bookingData.house_health_condition_details) houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px; white-space:pre-wrap;"><i class="fas fa-notes-medical" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_health_condition_details) + '</div>';
+            if (bookingData.house_guest_names) houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-friends" style="color:#4DA6D9; width:14px;"></i> Historical guest names: ' + escapeHtml(bookingData.house_guest_names) + '</div>';
             if (bookingData.house_amount) {
                 houseInfo += '<div style="font-size:12px; color:#10b981; font-weight:700; margin-top:4px;">₱' + parseFloat(bookingData.house_amount).toLocaleString('en-US', {minimumFractionDigits:2}) + '</div>';
             }

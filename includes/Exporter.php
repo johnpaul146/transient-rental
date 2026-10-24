@@ -1446,7 +1446,7 @@ class ReportExporter {
     }
 
     /** Stream a report table as CSV. Discards any buffered output first. */
-    public function exportReport($type, $filters, $siteName = 'Transient House & Tours') {
+    public function exportReport($type, $filters, $siteName = 'Jerry Dino\'s Stay') {
         $f = $this->ensureFilters($filters);
         $t = $this->getReportTable($type, $f);
         if ($f['q'] !== '') $t = self::applySearch($t, $f['q']);

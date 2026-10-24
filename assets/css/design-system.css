@@ -885,6 +885,8 @@ ul, ol { list-style: none; }
   gap: var(--space-5);
 }
 
+/* 3-card variant (Tours/Boat removed from the homepage) — declared before the breakpoints so they still win */
+.experience-grid--3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 992px) { .experience-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .experience-grid { grid-template-columns: 1fr; } }
 

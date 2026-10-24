@@ -1,0 +1,4051 @@
+<?php
+session_start();
+require_once 'database.php';
+require_once 'includes/TermsGate.php';
+TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
+require_once 'includes/PaymentService.php';
+require_once 'includes/GroupHealth.php';   // senior citizens + health condition (replaces guest-name list)
+require_once 'includes/GuestAvailability.php';   // read-only month availability for the green calendar dates
+GuestAvailability::handle($pdo);                 // answers ?ajax=avail_month and exits; otherwise does nothing
+
+if (file_exists('includes/SystemLogger.php')) {
+    require_once 'includes/SystemLogger.php';
+}
+
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php?redirect=packages.php");
+    exit();
+}
+
+// ============================================================
+// ✅ AUTO-ADD package_id COLUMN (safety check)
+// ============================================================
+try {
+    foreach (['house_bookings', 'tour_bookings', 'food_bookings'] as $table) {
+        $cols = $pdo->query("SHOW COLUMNS FROM `$table` LIKE 'package_id'")->fetchAll();
+        if (empty($cols)) {
+            $pdo->exec("ALTER TABLE `$table` ADD COLUMN package_id INT DEFAULT NULL");
+        }
+    }
+} catch(PDOException $e) {}
+
+// ============================================================
+// ✅ NEW: AUTO-ADD check_in_time / check_out_time
+// ============================================================
+try {
+    $cols = $pdo->query("SHOW COLUMNS FROM `house_bookings` LIKE 'check_in_time'")->fetchAll();
+    if (empty($cols)) {
+        $pdo->exec("ALTER TABLE `house_bookings` ADD COLUMN check_in_time TIME DEFAULT '14:00:00' AFTER check_in_date");
+    }
+    $cols = $pdo->query("SHOW COLUMNS FROM `house_bookings` LIKE 'check_out_time'")->fetchAll();
+    if (empty($cols)) {
+        $pdo->exec("ALTER TABLE `house_bookings` ADD COLUMN check_out_time TIME DEFAULT '12:00:00' AFTER check_out_date");
+    }
+} catch(PDOException $e) {}
+
+// ============================================================
+// ✅ BLOCKING STATUSES — ONLY these block dates (turn red)
+//    Pending bookings DO NOT block other guests
+//    Applies to: houses and food (tours were removed)
+// ============================================================
+$blocking_statuses = ['confirmed', 'approved', 'completed'];
+$blocking_placeholders = "'" . implode("','", $blocking_statuses) . "'";
+
+// ============================================================
+// HANDLE OVERALL FEEDBACK
+// ============================================================
+if (isset($_POST['submit_feedback']) && isset($_SESSION['user_id'])) {
+    try {
+        $rating       = (int)($_POST['rating'] ?? 0);
+        $comment      = trim($_POST['comment'] ?? '');
+        $user_id      = (int)$_SESSION['user_id'];
+        $is_anonymous = isset($_POST['is_anonymous']) ? 1 : 0;
+
+        if ($rating < 1 || $rating > 5) throw new Exception("Please select a rating between 1 and 5.");
+
+        $check = $pdo->prepare("SELECT id FROM overall_feedback WHERE user_id = ?");
+        $check->execute([$user_id]);
+        $is_update = (bool)$check->fetch();
+
+        if ($is_update) {
+            $stmt = $pdo->prepare("UPDATE overall_feedback SET rating = ?, comment = ?, updated_at = NOW(), is_anonymous = ? WHERE user_id = ?");
+            $stmt->execute([$rating, $comment, $is_anonymous, $user_id]);
+            $_SESSION['flash_feedback_success'] = "Thank you! Your feedback has been updated successfully.";
+        } else {
+            $stmt = $pdo->prepare("INSERT INTO overall_feedback (user_id, rating, comment, is_anonymous) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$user_id, $rating, $comment, $is_anonymous]);
+            $_SESSION['flash_feedback_success'] = "Thank you for your feedback! Your review has been submitted.";
+        }
+
+        if (class_exists('SystemLogger')) {
+            SystemLogger::log($pdo, $is_update ? 'update' : 'create', 'review',
+                "User '" . ($_SESSION['username'] ?? 'Unknown') . "' " . ($is_update ? "updated" : "submitted") . " overall review from Packages page — Rating: {$rating}/5" . ($is_anonymous ? " (Anonymous)" : ""),
+                null, 'overall_feedback', null,
+                ['rating' => $rating, 'anonymous' => $is_anonymous, 'has_comment' => !empty($comment), 'page' => 'packages.php']);
+        }
+
+        header("Location: packages.php?feedback_success=1");
+        exit();
+    } catch (Exception $e) {
+        $error = "Failed to submit feedback: " . $e->getMessage();
+    }
+}
+
+if (isset($_SESSION['flash_feedback_success'])) {
+    $success = $_SESSION['flash_feedback_success'];
+    unset($_SESSION['flash_feedback_success']);
+}
+
+// ============================================================
+// Initialize package cart
+// ============================================================
+if (!isset($_SESSION['package_cart'])) {
+    $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+}
+
+$cart = &$_SESSION['package_cart'];
+
+if (!is_array($cart['house']) || !isset($cart['house']['price'])) $cart['house'] = null;
+if (!is_array($cart['food'])  || !isset($cart['food']['price']))  $cart['food']  = null;
+
+// The Tours/Boat booking service was removed. A cart saved before that (session) may still hold a tour:
+// it is dropped here, on the server, so it can never be priced or booked. Everything else in the cart is kept.
+$tour_removed_notice = !empty($cart['tour']);
+$cart['tour'] = null;
+
+$has_house = !empty($cart['house']);
+$has_food  = !empty($cart['food']);
+$has_any   = $has_house || $has_food;
+
+// A house saved in the cart before the senior/health fields existed must be re-confirmed: never booked without them.
+$house_needs_group = $has_house && !array_key_exists('has_health_condition', $cart['house']);
+
+// Schedule rule (AvailabilityService::packageWindowError): with a house in the package, the
+// food must fall inside the house stay. These two helpers only adapt cart rows; the rule lives in the service.
+function pkgCartScheduleItems(array $cart) {
+    $items = [];
+    if (!empty($cart['food'])) $items[] = ['label' => 'Food', 'date' => (string)($cart['food']['preferred_date'] ?? ''), 'time' => (string)($cart['food']['preferred_time'] ?? '')];
+    return $items;
+}
+// Window shown to the UI (null when there is no house in the cart)
+$pkg_window = $has_house ? AvailabilityService::packageWindow($cart['house']) : null;
+$pkg_house_name = $has_house ? (string)($cart['house']['name'] ?? '') : '';
+
+// ============================================================
+// REMOVE / CLEAR
+// ============================================================
+if (isset($_GET['remove'])) {
+    $type = $_GET['remove'];
+    if (in_array($type, ['house', 'food', 'tour'])) {
+        unset($_SESSION['package_cart'][$type]);
+        // Food delivery address was filled automatically from the house: without the house it must be re-entered
+        if ($type === 'house' && !empty($_SESSION['package_cart']['food']['delivery_auto'])) {
+            $_SESSION['package_cart']['food']['delivery_address'] = null;
+            $_SESSION['package_cart']['food']['delivery_auto'] = false;
+        }
+        if (class_exists('SystemLogger')) {
+            SystemLogger::log($pdo, 'update', 'booking', "Guest removed {$type} from package cart", null, 'package', null, ['removed_item' => $type], 'warning');
+        }
+    }
+    header("Location: packages.php");
+    exit();
+}
+
+if (isset($_GET['clear'])) {
+    $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+    if (class_exists('SystemLogger')) {
+        SystemLogger::log($pdo, 'delete', 'booking', "Guest cleared entire package cart", null, 'package', null, null, 'warning');
+    }
+    header("Location: packages.php");
+    exit();
+}
+
+// ============================================================
+// ADD HOUSE TO PACKAGE  ✅ UPDATED with check-in/check-out times
+// ============================================================
+if (isset($_POST['add_house_to_package'])) {
+    try {
+        $house_id = (int)$_POST['house_id'];
+        $check_in = $_POST['check_in'] ?? '';
+        $check_out = $_POST['check_out'] ?? '';
+        $check_in_time  = $_POST['check_in_time']  ?? '14:00';   // check-out time is NOT read: it follows check-in
+        $guests = (int)($_POST['guests'] ?? 1);
+
+        if (empty($house_id)) throw new Exception("Please select a house.");
+        if (empty($check_in)) throw new Exception("Check-in date is required.");
+        if (empty($check_out)) throw new Exception("Check-out date is required.");
+
+        // Same rule everywhere: check-out TIME = check-in TIME (AvailabilityService::houseStayTimes)
+        try {
+            $stayTimes = AvailabilityService::houseStayTimes($check_in_time);
+        } catch (InvalidArgumentException $e) {
+            throw new Exception("Invalid check-in time format.");
+        }
+        $check_in_time  = substr($stayTimes['in'], 0, 5);
+        $check_out_time = substr($stayTimes['out'], 0, 5);
+
+        if ($guests < 1) $guests = 1;
+        if ($guests > 20) $guests = 20;
+
+        foreach ([$check_in, $check_out] as $_d) {
+            $dateErr = AvailabilityService::futureDateError($_d);
+            if ($dateErr !== null) throw new Exception($dateErr);
+        }
+        $check_in_dt = new DateTime($check_in);
+        $check_out_dt = new DateTime($check_out);
+        $today = new DateTime();
+        $today->setTime(0,0,0);
+
+        if ($check_in_dt < $today) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
+        if ($check_out_dt <= $check_in_dt) throw new Exception("Check-out must be after check-in.");
+
+        $nights = $check_out_dt->diff($check_in_dt)->days;
+        $days = $nights + 1;
+
+        // Senior citizens (0..guests) + explicit health-condition answer, validated on the server.
+        try { $group_info = GroupHealth::parse($_POST, $guests); }
+        catch (InvalidArgumentException $e) { throw new Exception($e->getMessage()); }
+
+        $stmt = $pdo->prepare("SELECT id, house_name, price_per_night, status, capacity FROM houses WHERE id = ?");
+        $stmt->execute([$house_id]);
+        $house = $stmt->fetch();
+        if (!$house) throw new Exception("House not found.");
+        if ($house['status'] !== 'available') throw new Exception("This house is not available.");
+        if ((int)($house['capacity'] ?? 0) > 0 && $guests > (int)$house['capacity']) throw new Exception("This house fits up to " . (int)$house['capacity'] . " guests. Please reduce the number of guests.");
+
+        // Same availability rule as standalone bookings (AvailabilityService: nights [in, out), blocked dates)
+        $house_conflict = AvailabilityService::houseConflict($pdo, $house_id, $check_in, $check_out, [], [], $stayTimes['in'], $stayTimes['out']);
+        if ($house_conflict !== null) throw new Exception("Selected dates are not available — " . $house_conflict . " Please choose different dates.");
+
+        // Food already in the cart must still fit the (new or changed) house stay
+        $newHouse = ['check_in' => $check_in, 'check_in_time' => $check_in_time, 'check_out' => $check_out];
+        $winErr = AvailabilityService::packageWindowError($newHouse, pkgCartScheduleItems($cart));
+        if ($winErr !== null) throw new Exception($winErr . " Remove or change that item first, or choose house dates that include it.");
+
+        $total_price = $house['price_per_night'] * $nights;
+
+        // Delivery food follows the booked house/unit
+        if (!empty($_SESSION['package_cart']['food']) && ($_SESSION['package_cart']['food']['fulfillment_method'] ?? '') === 'delivery') {
+            $_SESSION['package_cart']['food']['delivery_address'] = $house['house_name'];
+            $_SESSION['package_cart']['food']['delivery_auto'] = true;
+        }
+
+        $_SESSION['package_cart']['house'] = [
+            'id'            => $house['id'],
+            'name'          => $house['house_name'],
+            'check_in'      => $check_in,
+            'check_in_time' => $check_in_time,   // ✅ NEW
+            'check_out'     => $check_out,
+            'check_out_time'=> $check_out_time,  // ✅ NEW
+            'guests'        => $guests,
+            'senior_citizens'          => $group_info['senior'],
+            'has_health_condition'     => $group_info['has_health'],
+            'health_condition_details' => $group_info['details'],
+            'nights'        => $nights,
+            'days'          => $days,
+            'price'         => $total_price
+        ];
+
+        header("Location: packages.php");
+        exit();
+
+    } catch (Exception $e) {
+        $modal_error = $e->getMessage();
+        $open_modal = 'house';
+    }
+}
+
+// ============================================================
+// ADD FOOD TO PACKAGE
+// ============================================================
+if (isset($_POST['add_food_to_package'])) {
+    try {
+        $food_id = (int)$_POST['food_id'];
+        $preferred_date = $_POST['preferred_date'] ?? '';
+        $preferred_time = $_POST['preferred_time'] ?? '';
+        $fulfillment_method = $_POST['fulfillment_method'] ?? 'pickup';
+        $delivery_address = null;   // never taken from the browser: delivery goes to the package's booked house/unit
+        $contact_number = trim($_POST['contact_number'] ?? '');
+        $special_requests = trim($_POST['special_requests'] ?? '');
+
+        if (empty($food_id)) throw new Exception("Please select a food item.");
+        if (empty($preferred_date)) throw new Exception("Preferred date is required.");
+        if (empty($preferred_time)) throw new Exception("Preferred time is required.");
+        if (!in_array($fulfillment_method, ['delivery', 'pickup'])) $fulfillment_method = 'pickup';
+
+        $today = date('Y-m-d');
+        $dateErr = AvailabilityService::futureDateError($preferred_date);
+        if ($dateErr !== null) throw new Exception($dateErr);
+
+        $contact_number = preg_replace('/[^0-9]/', '', $contact_number);
+        if (substr($contact_number, 0, 1) === '0') $contact_number = substr($contact_number, 1);
+        if (empty($contact_number)) throw new Exception("Contact number is required.");
+        if (!preg_match('/^[0-9]{10}$/', $contact_number)) throw new Exception("PH mobile number must be exactly 10 digits (e.g., 9123456789).");
+        $contact_full = '+63' . $contact_number;
+
+        // Delivery is only available with a house stay: the package's house/unit is the delivery location
+        // (a typed address is ignored). A package without a house is pickup only.
+        $delivery_auto = false;
+        if ($fulfillment_method === 'delivery') {
+            if (!$has_house) throw new Exception("Delivery requires a selected house because the order will be delivered to your booked unit. Please add a house to your package, or choose Pickup.");
+            $delivery_address = (string)$cart['house']['name'];
+            $delivery_auto = true;
+        }
+
+        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, [['label' => 'Food', 'date' => $preferred_date, 'time' => $preferred_time]]);
+        if ($winErr !== null) throw new Exception($winErr);
+
+        $stmt = $pdo->prepare("SELECT id, name, price, is_available, size_variations FROM food_items WHERE id = ?");
+        $stmt->execute([$food_id]);
+        $food = $stmt->fetch();
+        if (!$food) throw new Exception("Food item not found.");
+        if (!$food['is_available']) throw new Exception("This food item is currently unavailable.");
+        $food_conflict = AvailabilityService::foodConflict($pdo, $food_id, $preferred_date);
+        if ($food_conflict !== null) throw new Exception("Not available on that date — " . $food_conflict . " Please choose a different date.");
+
+        // Price comes from the database (size price when the item has sizes); an unknown size is rejected.
+        // Line total = size price from the database x quantity (whole number 1..100, validated server-side).
+        // A posted total/price is never read. A missing quantity field means 1.
+        $line = PaymentService::foodLine($food, $_POST['size_variant'] ?? null, $_POST['quantity'] ?? 1);
+        $price = $line['total'];
+        $size_variant_text = $line['size'];
+        $size_variant_index = $line['size_index'];
+
+        $_SESSION['package_cart']['food'] = [
+            'id'                  => $food['id'],
+            'name'                => $food['name'],
+            'preferred_date'      => $preferred_date,
+            'preferred_time'      => $preferred_time,
+            'fulfillment_method'  => $fulfillment_method,
+            'delivery_address'    => $fulfillment_method === 'delivery' ? $delivery_address : null,
+            'delivery_auto'       => $fulfillment_method === 'delivery' && $delivery_auto,
+            'contact_number'      => $contact_full,
+            'special_requests'    => $special_requests,
+            'size_variant'        => $size_variant_text,
+            'size_variant_index'  => $size_variant_index,
+            'quantity'            => $line['quantity'],
+            'unit_price'          => $line['unit'],
+            'price'               => $price      // line total (unit price x quantity), like the other cart items
+        ];
+
+        header("Location: packages.php");
+        exit();
+    } catch (Exception $e) {
+        $modal_error = $e->getMessage();
+        $open_modal = 'food';
+    }
+}
+
+// ============================================================
+// ADD TOUR TO PACKAGE — REMOVED. The Tours/Boat booking service is no longer offered; a hand-made POST is refused here.
+// ============================================================
+if (isset($_POST['add_tour_to_package'])) {
+    $modal_error = "Tour/boat bookings are no longer available. You can still add a house or food to your package.";
+    $open_modal = 'house';
+}
+
+// ============================================================
+// FINAL PACKAGE BOOKING CONFIRMATION
+// ============================================================
+$booking_success = null;
+$booking_error = null;
+
+if (isset($_POST['confirm_package_booking'])) {
+    try {
+        // A package needs at least one item (house or food). Checked on the server, before anything is written.
+        if (!$has_any) throw new Exception("Please add at least one item to your package before confirming.");
+        if ($house_needs_group) throw new Exception("Please edit your house in the package and fill in the senior-citizen count and health-condition answer before confirming.");
+
+        $pdo->beginTransaction();
+
+        // Never trust the stored cart: re-apply the house-window rule to what is about to be booked
+        $winErr = AvailabilityService::packageWindowError($has_house ? $cart['house'] : null, pkgCartScheduleItems($cart));
+        if ($winErr !== null) throw new Exception($winErr);
+
+        $stmt = $pdo->prepare("SELECT id, full_name, contact_number FROM guests WHERE user_id = ?");
+        $stmt->execute([$_SESSION['user_id']]);
+        $guest = $stmt->fetch();
+        if (!$guest) throw new Exception("Guest profile not found. Please complete your profile.");
+        $guest_id = $guest['id'];
+
+        $package_ref = 'PKG-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(2)));
+        $house_amount = 0.00;
+        $tour_amount  = 0.00;   // Tours/Boat removed: always 0 / NULL (columns kept for historical packages)
+        $food_amount  = 0.00;
+        $created_bookings = [];
+        $house_booking_id = null;
+        $tour_booking_id  = null;
+        $food_booking_id  = null;
+        $package_contact  = $guest['contact_number'] ?? null;
+        $package_requests = [];
+
+        if ($has_house) {
+            $h = $cart['house'];
+
+            if ($h['check_in'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
+            // Re-apply the rule at submit time (also normalises a cart saved before this rule existed)
+            try { $stayTimes = AvailabilityService::houseStayTimes($h['check_in_time'] ?? '14:00'); }
+            catch (InvalidArgumentException $e) { throw new Exception("Invalid check-in time format."); }
+            if (AvailabilityService::houseConflict($pdo, $h['id'], $h['check_in'], $h['check_out'], [], [], $stayTimes['in'], $stayTimes['out']) !== null) {
+                throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
+            }
+
+            // Re-validate the group details at submit time (a saved cart is never trusted)
+            try { $group_info = GroupHealth::parse(['senior_citizens' => $h['senior_citizens'] ?? '', 'has_health_condition' => ($h['has_health_condition'] ?? null) === null ? '' : (int)$h['has_health_condition'], 'health_condition_details' => $h['health_condition_details'] ?? ''], (int)$h['guests']); }
+            catch (InvalidArgumentException $e) { throw new Exception($e->getMessage() . " Please edit your house in the package."); }
+
+            $ref = $package_ref . '-H';
+
+            // ✅ NEW: Include check-in/check-out time
+            $check_in_time_db  = $stayTimes['in'];
+            $check_out_time_db = $stayTimes['out'];   // = check-in time
+
+            // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
+            $stmt = $pdo->prepare("INSERT INTO house_bookings 
+                (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time,
+                 number_of_guests, total_amount, guest_names, payment_status, booking_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', 'pending', NOW())");   // guest_names: no longer collected
+            $stmt->execute([
+                $guest_id, $h['id'], $ref, 
+                $h['check_in'], $check_in_time_db,
+                $h['check_out'], $check_out_time_db,
+                $h['guests'], $h['price']
+            ]);
+            $house_booking_id = (int)$pdo->lastInsertId();
+            GroupHealth::save($pdo, $house_booking_id, $group_info);
+            $created_bookings[] = ['type' => 'house', 'id' => $house_booking_id, 'ref' => $ref, 'name' => $h['name']];
+            $house_amount += (float)$h['price'];
+        }
+
+        if ($has_food) {
+            $f = $cart['food'];
+            $ref = $package_ref . '-F';
+            if ($f['preferred_date'] < date('Y-m-d')) throw new Exception(AvailabilityService::PAST_DATE_MESSAGE);
+            if (AvailabilityService::foodConflict($pdo, $f['id'], $f['preferred_date']) !== null) throw new Exception("'{$f['name']}' is no longer available on " . date('M d, Y', strtotime($f['preferred_date'])) . ".");
+
+            // Food line (price x quantity) is recalculated from the database, never taken from the stored cart.
+            // A cart saved before quantity existed has no 'quantity' key and keeps its single-item price.
+            $f['quantity'] = (int)($f['quantity'] ?? 1);
+            if (array_key_exists('quantity', $cart['food'])) {
+                $fr = $pdo->prepare("SELECT id, name, price, is_available, size_variations FROM food_items WHERE id = ?");
+                $fr->execute([$f['id']]);
+                $frow = $fr->fetch();
+                if (!$frow) throw new Exception("'{$f['name']}' is no longer available.");
+                try { $fl = PaymentService::foodLine($frow, $f['size_variant_index'] ?? null, $cart['food']['quantity']); }
+                catch (InvalidArgumentException $e) { throw new Exception($e->getMessage() . " Please edit the food item in your package."); }
+                $f['quantity'] = $fl['quantity'];
+                $f['price'] = $fl['total'];
+                $f['size_variant'] = $fl['size'];
+            }
+
+            if (!empty($f['contact_number'])) $package_contact = $f['contact_number'];
+            if (!empty($f['special_requests'])) $package_requests[] = "Food: " . $f['special_requests'];
+
+            // Delivery goes to the booked house/unit (re-read from the DB, not the cart); pickup is untouched
+            if (($f['fulfillment_method'] ?? '') === 'delivery') {
+                // No house in the package = no delivery, whatever address an older saved cart may still carry
+                $f['delivery_address'] = '';
+                if ($has_house) {
+                    $hn = $pdo->prepare("SELECT house_name FROM houses WHERE id = ?");
+                    $hn->execute([$cart['house']['id']]);
+                    $f['delivery_address'] = (string)$hn->fetchColumn();
+                }
+                if (trim((string)$f['delivery_address']) === '') {
+                    throw new Exception("Delivery requires a selected house because the order will be delivered to your booked unit. Please add a house, or edit the food item and choose Pickup.");
+                }
+            }
+
+            $stmt = $pdo->prepare("INSERT INTO food_bookings 
+                (guest_id, guest_name, food_id, reference_number, quantity, size_variant,
+                 preferred_date, preferred_time, special_requests,
+                 contact_number, fulfillment_method, delivery_address,
+                 total_amount, booking_date, payment_status, booking_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 'pending', 'pending', NOW())");
+            $stmt->execute([
+                $guest_id, $guest['full_name'], $f['id'], $ref, $f['quantity'],
+                $f['size_variant'] ?? null, $f['preferred_date'], $f['preferred_time'],
+                $f['special_requests'] ?? null, $f['contact_number'], $f['fulfillment_method'],
+                $f['fulfillment_method'] === 'delivery' ? ($f['delivery_address'] ?? null) : null,
+                $f['price']
+            ]);
+            $food_booking_id = (int)$pdo->lastInsertId();
+            $created_bookings[] = ['type' => 'food', 'id' => $food_booking_id, 'ref' => $ref, 'name' => $f['name']];
+            $food_amount += (float)$f['price'];
+        }
+
+        $grand_total = $house_amount + $tour_amount + $food_amount;
+        $package_requests_text = !empty($package_requests) ? implode("\n", $package_requests) : null;
+
+        $stmt = $pdo->prepare("INSERT INTO package_bookings 
+            (reference_number, guest_id, house_booking_id, tour_booking_id, food_booking_id,
+             house_amount, tour_amount, food_amount, grand_total, reservation_fee_amount,
+             contact_number, special_requests,
+             payment_status, booking_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+        // One reservation fee for the whole package (components carry no money)
+        $stmt->execute([
+            $package_ref, $guest_id,
+            $house_booking_id, $tour_booking_id, $food_booking_id,
+            $house_amount, $tour_amount, $food_amount, $grand_total, PaymentService::feeFor($grand_total),
+            $package_contact, $package_requests_text
+        ]);
+        $package_id = (int)$pdo->lastInsertId();
+
+        if ($house_booking_id) $pdo->prepare("UPDATE house_bookings SET package_id = ? WHERE id = ?")->execute([$package_id, $house_booking_id]);
+        if ($food_booking_id)  $pdo->prepare("UPDATE food_bookings SET package_id = ? WHERE id = ?")->execute([$package_id, $food_booking_id]);
+
+        $pdo->commit();
+
+        if (class_exists('SystemLogger')) {
+            SystemLogger::log($pdo, 'create', 'booking',
+                "Guest created PACKAGE booking {$package_ref} — " . count($created_bookings) . " item(s), Total: ₱" . number_format($grand_total, 2),
+                $package_id, 'package', null,
+                ['package_reference' => $package_ref, 'items' => $created_bookings, 'grand_total' => $grand_total]);
+        }
+
+        $_SESSION['package_cart'] = ['house' => null, 'food' => null, 'tour' => null];
+        $_SESSION['last_package_booking'] = [
+            'id' => $package_id, 'reference' => $package_ref,
+            'total' => $grand_total, 'items_count' => count($created_bookings)
+        ];
+
+        // Fetch GCash settings
+        $gcash_popup_settings = [];
+        try {
+            $stmt = $pdo->query("SELECT content_key, content_value FROM site_content WHERE section_name = 'gcash'");
+            while ($row = $stmt->fetch()) {
+                $gcash_popup_settings[$row['content_key']] = $row['content_value'];
+            }
+        } catch (PDOException $e) {
+            error_log("GCash popup settings fetch failed: " . $e->getMessage());
+        }
+
+        $gcash_name_popup   = $gcash_popup_settings['account_name'] ?? '';
+        $gcash_number_popup = $gcash_popup_settings['number'] ?? '';
+        $gcash_qr_popup     = $gcash_popup_settings['qr_code'] ?? '';
+
+        $qr_path_popup   = '';
+        $qr_exists_popup = false;
+
+        if (!empty($gcash_qr_popup)) {
+            $candidate = 'uploads/gcash/' . $gcash_qr_popup;
+            if (file_exists($candidate) && !is_dir($candidate)) {
+                $qr_path_popup   = $candidate;
+                $qr_exists_popup = true;
+            }
+        }
+
+        if (!$qr_exists_popup) {
+            $latest_file = null;
+            $latest_time = 0;
+            $search_dirs = ['uploads/gcash/', 'uploads/'];
+
+            foreach ($search_dirs as $dir) {
+                if (!is_dir($dir)) continue;
+                foreach (glob($dir . 'gcash_qr.*') as $f) {
+                    $mtime = @filemtime($f);
+                    if ($mtime !== false && $mtime > $latest_time) {
+                        $latest_time = $mtime;
+                        $latest_file = $f;
+                    }
+                }
+                if ($latest_file !== null) break;
+            }
+
+            if ($latest_file !== null) {
+                $qr_path_popup   = $latest_file;
+                $qr_exists_popup = true;
+
+                try {
+                    $new_filename = basename($latest_file);
+                    $check = $pdo->prepare("SELECT id FROM site_content WHERE section_name = 'gcash' AND content_key = 'qr_code'");
+                    $check->execute();
+                    if ($check->fetch()) {
+                        $pdo->prepare("UPDATE site_content SET content_value = ? WHERE section_name = 'gcash' AND content_key = 'qr_code'")
+                            ->execute([$new_filename]);
+                    } else {
+                        $pdo->prepare("INSERT INTO site_content (section_name, content_key, content_value) VALUES ('gcash', 'qr_code', ?)")
+                            ->execute([$new_filename]);
+                    }
+                } catch (PDOException $e) {
+                    error_log("QR auto-save failed: " . $e->getMessage());
+                }
+            }
+        }
+
+        $booking_success = [
+            'id'             => $package_id,
+            'reference'      => $package_ref,
+            'total'          => $grand_total,
+            'items_count'    => count($created_bookings),
+            'package_name'   => 'Package Booking',
+            'guest_name'     => $guest['full_name'],
+            'gcash_name'     => $gcash_name_popup,
+            'gcash_number'   => $gcash_number_popup,
+            'qr_image'       => $qr_path_popup,
+            'qr_exists'      => $qr_exists_popup
+        ];
+
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        $booking_error = $e->getMessage();
+    }
+}
+
+// ============================================================
+// GET DYNAMIC CONTENT
+// ============================================================
+$content = [];
+try {
+    $stmt = $pdo->query("SELECT section_name, content_key, content_value FROM site_content");
+    while ($row = $stmt->fetch()) {
+        $content[$row['section_name']][$row['content_key']] = $row['content_value'];
+    }
+} catch (PDOException $e) {}
+
+$sidebar_logo = 'uploads/logos/logo.png';
+if (!empty($content['site_settings']['logo_path'])) $sidebar_logo = $content['site_settings']['logo_path'];
+$sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !is_dir($sidebar_logo);
+
+$hero_path = 'uploads/hero/hero-bg.jpg';
+if (!empty($content['site_settings']['hero_image_path'])) $hero_path = $content['site_settings']['hero_image_path'];
+$hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
+
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
+
+$facebook_link = $content['social']['facebook'] ?? '#';
+$location_address = $content['location']['address'] ?? $content['footer']['address'] ?? 'Inansuana, Lucap, Alaminos, Philippines, 2404';
+$google_maps_embed = $content['location']['google_maps_embed'] ?? '';
+
+function getGoogleMapsUrl($address) {
+    if (empty($address) || $address == '#') return '#';
+    return 'https://www.google.com/maps/search/?api=1&query=' . urlencode($address);
+}
+$maps_url = getGoogleMapsUrl($location_address);
+
+$default_map_url = 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3863.123456789!2d119.1234567!3d16.1234567!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x0%3A0x0!2zMTbCsDA3JzI0LjAiTiAxMTnCsDA3JzI0LjAiRQ!5e0!3m2!1sen!2sph!4v1234567890';
+$map_embed = !empty($google_maps_embed) && $google_maps_embed != '#' ? $google_maps_embed : $default_map_url;
+
+$grand_total = 0;
+if ($has_house && isset($cart['house']['price'])) $grand_total += (float)$cart['house']['price'];
+if ($has_food  && isset($cart['food']['price']))  $grand_total += (float)$cart['food']['price'];
+
+// ============================================================
+// FETCH ITEMS
+// ============================================================
+$houses = [];
+$food_items = [];
+
+$result = $pdo->query("SELECT * FROM houses WHERE status = 'available' ORDER BY house_name");
+if ($result !== false) {
+    $rows = $result->fetchAll(PDO::FETCH_ASSOC);
+    if (is_array($rows)) $houses = $rows;
+}
+
+$result = $pdo->query("SELECT * FROM food_items WHERE is_available = 1 ORDER BY category, name");
+if ($result !== false) {
+    $rows = $result->fetchAll(PDO::FETCH_ASSOC);
+    if (is_array($rows)) $food_items = $rows;
+}
+
+$open_modal = $open_modal ?? null;
+
+$user_has_feedback = false;
+$user_feedback = null;
+if (isset($_SESSION['user_id'])) {
+    $stmt = $pdo->prepare("SELECT * FROM overall_feedback WHERE user_id = ?");
+    $stmt->execute([$_SESSION['user_id']]);
+    $user_feedback = $stmt->fetch();
+    $user_has_feedback = ($user_feedback !== false);
+}
+
+// ============================================================
+// HELPER: Build photo gallery
+// ============================================================
+if (!function_exists('buildItemGallery')) {
+    function buildItemGallery($type, $item) {
+        $images = [];
+        if (!is_array($item)) return $images;
+        $id = (int)($item['id'] ?? 0);
+        if ($id <= 0) return $images;
+
+        if ($type === 'house') {
+            global $pdo;
+            try {
+                $stmt = $pdo->prepare("SELECT image FROM house_gallery WHERE house_id = ? ORDER BY is_main DESC, sort_order ASC, id ASC");
+                $stmt->execute([$id]);
+                $rows = $stmt->fetchAll();
+                if (is_array($rows)) {
+                    foreach ($rows as $row) {
+                        $f = $row['image'] ?? '';
+                        if (empty($f)) continue;
+                        $p1 = 'uploads/houses/gallery/' . $f;
+                        $p2 = 'uploads/houses/' . $f;
+                        if (file_exists($p1)) $images[] = $p1;
+                        elseif (file_exists($p2)) $images[] = $p2;
+                    }
+                }
+            } catch (PDOException $e) {}
+
+            if (empty($images) && !empty($item['image']) && $item['image'] !== 'default-house.jpg') {
+                $p1 = 'uploads/houses/' . $item['image'];
+                $p2 = 'uploads/houses/gallery/' . $item['image'];
+                if (file_exists($p1)) $images[] = $p1;
+                elseif (file_exists($p2)) $images[] = $p2;
+            }
+        } elseif ($type === 'food') {
+            $name = $item['name'] ?? '';
+            $folder = str_replace(' ', '_', trim($name)) . '_' . $id;
+            $base = 'uploads/foods/gallery/' . $folder . '/';
+            $exts = ['jpg','jpeg','png','gif','webp','bmp'];
+            if (is_dir($base)) {
+                foreach (scandir($base) as $file) {
+                    if (in_array(strtolower(pathinfo($file, PATHINFO_EXTENSION)), $exts)) $images[] = $base . $file;
+                }
+            }
+            if (empty($images) && !empty($item['image']) && $item['image'] !== 'default-food.jpg') {
+                $p1 = 'uploads/foods/' . $item['image'];
+                if (file_exists($p1)) $images[] = $p1;
+            }
+        }
+        return $images;
+    }
+
+    function getMainImage($type, $id, $item = null) {
+        global $house_galleries, $food_galleries;
+
+        if ($type === 'house' && !empty($house_galleries[$id])) return $house_galleries[$id][0];
+        if ($type === 'food'  && !empty($food_galleries[$id]))  return $food_galleries[$id][0];
+
+        if ($item && is_array($item) && !empty($item['image'])) {
+            $folder = 'uploads/' . $type . 's/';
+            $gfolder = 'uploads/' . $type . 's/gallery/';
+            $defaults = ['house' => 'default-house.jpg', 'food' => 'default-food.jpg'];
+            if (!isset($defaults[$type]) || $item['image'] !== $defaults[$type]) {
+                if (file_exists($folder . $item['image'])) return $folder . $item['image'];
+                if (file_exists($gfolder . $item['image'])) return $gfolder . $item['image'];
+            }
+        }
+        return null;
+    }
+}
+
+$house_galleries = [];
+foreach ($houses as $h) {
+    if (is_array($h) && isset($h['id'])) {
+        $house_galleries[$h['id']] = buildItemGallery('house', $h);
+    }
+}
+$food_galleries = [];
+foreach ($food_items as $fi) {
+    if (is_array($fi) && isset($fi['id'])) {
+        $food_galleries[$fi['id']] = buildItemGallery('food', $fi);
+    }
+}
+// ============================================================
+// ✅ FIXED: FETCH BOOKED DATES — only confirmed/approved/completed block
+//    Pending bookings do NOT block dates (do NOT turn red)
+// ============================================================
+
+// --- HOUSE BOOKED DATES ---
+$house_booked_dates = [];
+$house_hard_dates = [];
+foreach ($houses as $h) {
+    if (!is_array($h) || !isset($h['id'])) continue;
+    try {
+        $stmt = $pdo->prepare("
+            SELECT check_in_date, check_out_date 
+            FROM house_bookings 
+            WHERE house_id = ? 
+              AND booking_status IN ({$blocking_placeholders})
+        ");
+        $stmt->execute([$h['id']]);
+        $rows = $stmt->fetchAll();
+        $dates = [];
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                // nights only — the check-out day stays free for the next check-in
+                foreach (AvailabilityService::houseNights($row['check_in_date'], $row['check_out_date']) as $nd) $dates[] = $nd;
+            }
+        }
+        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'house' AND item_id = ? AND block_date >= CURDATE()");
+        $bst->execute([$h['id']]);
+        foreach ($bst->fetchAll(PDO::FETCH_COLUMN) as $bd) $dates[] = $bd;
+        $house_booked_dates[$h['id']] = array_values(array_unique($dates));
+        // Phase 7.9.1: HARD full-day blocks (owner blocks and orphan auto-blocks) cannot be a check-out day either (same rule as houseConflict()).
+        $house_hard_dates[$h['id']] = AvailabilityService::houseHardBlockDates($pdo, $h['id'], date('Y-m-d'), date('Y-m-d', strtotime('+5 years')));
+    } catch (PDOException $e) {
+        $house_booked_dates[$h['id']] = [];
+        $house_hard_dates[$h['id']] = [];
+    }
+}
+
+// --- FOOD BOOKED DATES --- ✅ FIXED: Now uses $blocking_placeholders
+// Previously used "booking_status != 'cancelled'" which incorrectly blocked
+// dates for pending bookings. Now only confirmed/approved/completed block.
+$food_booked_dates = [];
+foreach ($food_items as $fi) {
+    if (!is_array($fi) || !isset($fi['id'])) continue;
+    try {
+        $stmt = $pdo->prepare("SELECT preferred_date FROM food_bookings WHERE food_id = ? AND booking_status IN ({$blocking_placeholders})");
+        $stmt->execute([$fi['id']]);
+        $result = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $bst = $pdo->prepare("SELECT block_date FROM blocked_dates WHERE item_type = 'food' AND item_id = ? AND block_date >= CURDATE()");
+        $bst->execute([$fi['id']]);
+        $food_booked_dates[$fi['id']] = array_values(array_unique(array_merge(is_array($result) ? $result : [], $bst->fetchAll(PDO::FETCH_COLUMN))));
+    } catch (PDOException $e) {
+        $food_booked_dates[$fi['id']] = [];
+    }
+}
+
+// ============================================================
+// BUILD FULL ITEM DETAIL
+// ============================================================
+function parseListHelper($str) {
+    if (empty($str)) return [];
+    if (strpos($str, "\n") !== false) {
+        return array_values(array_filter(array_map('trim', explode("\n", $str))));
+    }
+    return array_values(array_filter(array_map('trim', explode(",", $str))));
+}
+
+$items_detail = [];
+
+foreach ($houses as $h) {
+    if (!is_array($h) || !isset($h['id'])) continue;
+    $items_detail['house_' . $h['id']] = [
+        'type' => 'house',
+        'id' => (int)$h['id'],
+        'name' => $h['house_name'] ?? '',
+        'description' => $h['description'] ?? '',
+        'price' => (float)($h['price_per_night'] ?? 0),
+        'price_unit' => 'per night',
+        'capacity' => (int)($h['capacity'] ?? 0),
+        'bedrooms' => (int)($h['bedrooms'] ?? 0),
+        'amenities' => parseListHelper($h['amenities'] ?? ''),
+        'gallery' => $house_galleries[$h['id']] ?? [],
+        'booked_dates' => $house_booked_dates[$h['id']] ?? []
+    ];
+}
+
+foreach ($food_items as $fi) {
+    if (!is_array($fi) || !isset($fi['id'])) continue;
+    $variations = !empty($fi['size_variations']) ? json_decode($fi['size_variations'], true) : [];
+    $has_var = !empty($variations) && is_array($variations);
+
+    $items_detail['food_' . $fi['id']] = [
+        'type' => 'food',
+        'id' => (int)$fi['id'],
+        'name' => $fi['name'] ?? '',
+        'description' => $fi['description'] ?? '',
+        'price' => (float)($fi['price'] ?? 0),
+        'price_unit' => 'per order',
+        'category' => $fi['category'] ?? '',
+        'pax_range' => $fi['pax_range'] ?? '',
+        'amenities' => [],
+        'variations' => $has_var ? $variations : [],
+        'gallery' => $food_galleries[$fi['id']] ?? []
+    ];
+}
+
+// ============================================================
+// Pre-compute main images for cart display
+// ============================================================
+$cart_house_img = null;
+$cart_food_img  = null;
+
+if ($has_house && isset($cart['house']['id'])) {
+    $hid = (int)$cart['house']['id'];
+    $found_house = null;
+    foreach ($houses as $hh) { if (isset($hh['id']) && (int)$hh['id'] === $hid) { $found_house = $hh; break; } }
+    $cart_house_img = getMainImage('house', $hid, $found_house);
+}
+if ($has_food && isset($cart['food']['id'])) {
+    $fid = (int)$cart['food']['id'];
+    $found_food = null;
+    foreach ($food_items as $ff) { if (isset($ff['id']) && (int)$ff['id'] === $fid) { $found_food = $ff; break; } }
+    $cart_food_img = getMainImage('food', $fid, $found_food);
+}
+// ============================================================
+// ✅ UPDATED: Build data for JS edit-persistence (with times)
+// ============================================================
+$cart_data_js = [
+    'house' => $has_house ? [
+        'id' => (int)($cart['house']['id'] ?? 0),
+        'check_in' => $cart['house']['check_in'] ?? '',
+        'check_in_time' => $cart['house']['check_in_time'] ?? '14:00',   // ✅ NEW
+        'check_out' => $cart['house']['check_out'] ?? '',
+        'check_out_time' => $cart['house']['check_in_time'] ?? '14:00',  // check-out time follows check-in time
+        'guests' => (int)($cart['house']['guests'] ?? 0),
+        'senior_citizens' => $cart['house']['senior_citizens'] ?? null,
+        'has_health_condition' => $cart['house']['has_health_condition'] ?? null,
+        'health_condition_details' => $cart['house']['health_condition_details'] ?? ''
+    ] : null,
+    'food' => $has_food ? [
+        'id' => (int)($cart['food']['id'] ?? 0),
+        'preferred_date' => $cart['food']['preferred_date'] ?? '',
+        'preferred_time' => $cart['food']['preferred_time'] ?? '',
+        'fulfillment_method' => $cart['food']['fulfillment_method'] ?? 'pickup',
+        'delivery_address' => $cart['food']['delivery_address'] ?? '',
+        'contact_number' => preg_replace('/^\+63/', '', (string)($cart['food']['contact_number'] ?? '')),
+        'special_requests' => $cart['food']['special_requests'] ?? '',
+        'size_variant_index' => $cart['food']['size_variant_index'] ?? null,
+        'size_variant' => $cart['food']['size_variant'] ?? '',
+        'quantity' => max(1, (int)($cart['food']['quantity'] ?? 1))
+    ] : null
+];
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0B2447">
+    <title>Build Your Package - <?php echo htmlspecialchars($site_name); ?></title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        html { scroll-behavior: smooth; }
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f7fb; min-height: 100vh; overflow-x: hidden; }
+
+        /* ✅ NEW: time-helper text */
+        .form-control.time-locked, .form-control.time-locked:focus { background: #f1f5f9; color: #475569; cursor: not-allowed; border-style: dashed; box-shadow: none; }
+        .time-helper { display: block; color: #94a3b8; font-size: 11px; margin-top: 4px; font-weight: 400; }
+        .time-helper i { color: #4DA6D9; }
+
+        .header { background: #0B2447; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 12px 0; position: sticky; top: 0; z-index: 100; border-bottom: 2px solid rgba(77, 166, 217, 0.2); }
+        .header-content { max-width: 1300px; margin: 0 auto; padding: 0 20px; display: flex; justify-content: space-between; align-items: center; gap: 15px; }
+        .logo-wrapper { display: flex; align-items: center; gap: 15px; text-decoration: none; flex-shrink: 0; min-width: 0; }
+        .logo-wrapper .logo-image { height: 50px; width: 50px; border-radius: 12px; object-fit: cover; border: 2px solid #4DA6D9; padding: 2px; background: white; flex-shrink: 0; transition: transform 0.3s; }
+        .logo-wrapper .logo-image:hover { transform: scale(1.05); }
+        .logo-wrapper .logo-image-placeholder { height: 50px; width: 50px; border-radius: 12px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; flex-shrink: 0; }
+        .brand-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+        .brand-text .brand-name { font-size: 20px; font-weight: 700; color: white; letter-spacing: -0.5px; white-space: nowrap; }
+        .brand-text .brand-tagline { font-size: 11px; color: #7bb8f0; font-weight: 500; white-space: nowrap; }
+
+        .desktop-nav { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; flex-shrink: 1; min-width: 0; max-width: 100%; }
+        .desktop-nav a { padding: 8px 12px; border-radius: 8px; color: #b3d9ff; text-decoration: none; font-weight: 500; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; flex-shrink: 0; line-height: 1.2; }
+        .desktop-nav a i { font-size: 13px; }
+        .desktop-nav a:hover { background: rgba(77, 166, 217, 0.2); color: white; }
+        .desktop-nav a.active-nav { background: rgba(77, 166, 217, 0.25); color: white; }
+        .desktop-nav .btn-package { background: #F4B400; color: #0B2447; border-radius: 8px; padding: 8px 14px; font-weight: 700; }
+        .desktop-nav .btn-package:hover { background: #e6a800; color: #0B2447; }
+        .desktop-nav .btn-logout { background: #ef4444; color: white; border-radius: 8px; padding: 8px 14px; }
+        .desktop-nav .btn-logout:hover { background: #dc2626; }
+        .desktop-nav .btn-rate { background: #F4B400; color: #0B2447; border-radius: 8px; padding: 8px 14px; }
+        .desktop-nav .btn-rate:hover { background: #e6a800; color: #0B2447; }
+
+        .menu-toggle { display: none; position: fixed; top: 12px; left: 12px; z-index: 1001; background: #0B2447; color: white; border: none; border-radius: 12px; width: 48px; height: 48px; font-size: 22px; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.3); align-items: center; justify-content: center; border: 1px solid rgba(77, 166, 217, 0.2); }
+        .menu-toggle:hover { background: rgba(77, 166, 217, 0.2); transform: scale(1.05); }
+        .menu-toggle.active .fa-bars { transform: rotate(90deg); }
+        body.sidebar-open-mobile .menu-toggle { opacity: 0; visibility: hidden; pointer-events: none; transform: scale(0.8); }
+
+        .sidebar { position: fixed; top: 0; left: -320px; width: 300px; height: 100vh; background: #0B2447; box-shadow: 4px 0 30px rgba(0,0,0,0.3); padding: 25px 0; transition: left 0.3s ease; z-index: 1000; overflow-y: auto; border-right: 2px solid rgba(77, 166, 217, 0.15); }
+        .sidebar.open { left: 0; }
+        .sidebar::-webkit-scrollbar { width: 5px; }
+        .sidebar::-webkit-scrollbar-thumb { background: rgba(77, 166, 217, 0.3); border-radius: 10px; }
+
+        .sidebar-header { padding: 0 20px 25px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 20px; }
+        .sidebar-header-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .sidebar-header .logo { font-size: 22px; font-weight: 700; color: white; text-decoration: none; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+        .sidebar-header .logo .logo-icon { width: 48px; height: 48px; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: white; flex-shrink: 0; overflow: hidden; }
+        .sidebar-header .logo img { width: 48px; height: 48px; border-radius: 14px; object-fit: cover; border: 2px solid #4DA6D9; padding: 2px; background: white; flex-shrink: 0; }
+        .sidebar-header .logo .logo-text { display: flex; flex-direction: column; min-width: 0; }
+        .sidebar-header .logo .logo-text .main { font-size: 18px; font-weight: 700; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sidebar-header .logo .logo-text .sub { font-size: 10px; color: #7bb8f0; }
+        .sidebar-close-btn { display: none; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #e0eeff; width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; flex-shrink: 0; align-items: center; justify-content: center; transition: all 0.2s; }
+        .sidebar-close-btn:hover { background: #ef4444; border-color: #ef4444; color: white; transform: rotate(90deg); }
+
+        .nav-menu { list-style: none; padding: 0; margin: 0; }
+        .nav-item { margin-bottom: 2px; }
+        .nav-link { display: flex; align-items: center; gap: 14px; padding: 12px 20px; color: #b3d9ff; text-decoration: none; transition: all 0.3s; border-left: 3px solid transparent; font-weight: 500; font-size: 14px; }
+        .nav-link i { width: 22px; font-size: 16px; text-align: center; flex-shrink: 0; }
+        .nav-link:hover { background: rgba(77, 166, 217, 0.15); color: white; border-left-color: #4DA6D9; }
+        .nav-link.active-nav { background: rgba(77, 166, 217, 0.2); color: white; border-left-color: #4DA6D9; }
+        .nav-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 15px 20px; }
+
+        .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 999; opacity: 0; transition: opacity 0.3s ease; }
+        .sidebar-overlay.active { display: block; opacity: 1; }
+
+        @media (max-width: 1200px) {
+            .desktop-nav .btn-logout .logout-text { display: none; }
+            .desktop-nav .btn-logout { padding: 8px 12px; }
+            .desktop-nav .btn-rate .rate-text { display: none; }
+            .desktop-nav .btn-rate { padding: 8px 12px; }
+        }
+        @media (max-width: 1100px) {
+            .desktop-nav { display: none !important; }
+            .menu-toggle { display: flex; }
+            .header-content { padding-left: 65px; }
+            .sidebar-close-btn { display: flex; }
+        }
+        @media (max-width: 768px) {
+            .header-content { padding-left: 60px; padding-right: 15px; gap: 10px; }
+            .logo-wrapper { gap: 10px; }
+            .logo-wrapper .logo-image, .logo-wrapper .logo-image-placeholder { height: 42px; width: 42px; }
+            .brand-text .brand-name { font-size: 17px; }
+            .brand-text .brand-tagline { font-size: 10px; }
+        }
+        @media (max-width: 480px) {
+            .menu-toggle { width: 42px; height: 42px; font-size: 18px; top: 10px; left: 10px; border-radius: 10px; }
+            .sidebar { width: 85%; max-width: 300px; }
+            .header-content { padding-left: 58px; padding-right: 10px; }
+            .logo-wrapper .logo-image, .logo-wrapper .logo-image-placeholder { height: 36px; width: 36px; border-radius: 10px; }
+            .brand-text .brand-name { font-size: 15px; }
+            .brand-text .brand-tagline { font-size: 9px; }
+        }
+
+        .hero { padding: 120px 20px 70px; color: white; text-align: center; position: relative; <?php if($hero_exists): ?> background: linear-gradient(rgba(11, 36, 71, 0.5), rgba(11, 36, 71, 0.6)), url('<?php echo htmlspecialchars($hero_path); ?>?<?php echo time(); ?>'); background-size: cover; background-position: center; <?php else: ?> background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); <?php endif; ?> }
+        .hero-content { max-width: 800px; margin: 0 auto; position: relative; z-index: 1; }
+        .hero h1 { font-size: 42px; font-weight: 700; margin-bottom: 15px; text-shadow: 0 2px 25px rgba(0,0,0,0.25); line-height: 1.2; }
+        .hero h1 i { color: #F4B400; }
+        .hero p { font-size: 17px; opacity: 0.95; text-shadow: 0 1px 15px rgba(0,0,0,0.15); }
+
+        @media (max-width: 768px) { .hero { padding: 100px 16px 50px; } .hero h1 { font-size: 30px; margin-bottom: 10px; } .hero p { font-size: 15px; } }
+        @media (max-width: 480px) { .hero { padding: 95px 14px 45px; } .hero h1 { font-size: 24px; } .hero h1 i { display: block; margin-bottom: 8px; } .hero p { font-size: 13.5px; } }
+
+        .main-container { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
+        @media (max-width: 768px) { .main-container { padding: 0 15px; margin: 20px auto; } }
+        @media (max-width: 480px) { .main-container { padding: 0 12px; margin: 18px auto; } }
+
+        .step-1 .choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 25px; margin-top: 30px; }
+        .choice-card { background: white; border-radius: 20px; padding: 35px 25px; text-align: center; text-decoration: none; color: #0B2447; border: 3px solid #e8f0fe; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; box-shadow: 0 10px 30px rgba(0,0,0,0.05); cursor: pointer; font-family: inherit; }
+        .choice-card:hover { transform: translateY(-8px); border-color: #4DA6D9; box-shadow: 0 20px 50px rgba(77, 166, 217, 0.25); color: #0B2447; }
+        .choice-card .choice-icon { width: 80px; height: 80px; border-radius: 50%; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; font-size: 34px; color: white; margin-bottom: 20px; }
+        .choice-card h3 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+        .choice-card p { font-size: 14px; color: #64748b; margin-bottom: 20px; }
+        .choice-card .btn-select { padding: 10px 24px; background: #F4B400; color: #0B2447; border-radius: 10px; font-weight: 700; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+
+        @media (max-width: 640px) {
+            .step-1 .choice-grid { grid-template-columns: 1fr; gap: 15px; margin-top: 20px; }
+            .choice-card { padding: 28px 20px; }
+            .choice-card .choice-icon { width: 65px; height: 65px; font-size: 28px; margin-bottom: 15px; }
+            .choice-card h3 { font-size: 19px; }
+            .choice-card p { font-size: 13px; margin-bottom: 15px; }
+        }
+
+        .package-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; flex-wrap: wrap; gap: 12px; }
+        .package-header h2 { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0; }
+        .btn-clear-all { padding: 8px 16px; background: #fee2e2; color: #ef4444; border: none; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; }
+        .btn-clear-all:hover { background: #fecaca; color: #dc2626; }
+
+        @media (max-width: 640px) {
+            .package-header { flex-direction: column; align-items: stretch; gap: 12px; }
+            .package-header h2 { font-size: 20px; text-align: center; }
+            .btn-clear-all { justify-content: center; width: 100%; padding: 10px 16px; }
+        }
+
+        .cart-item { background: white; border-radius: 16px; padding: 22px; margin-bottom: 18px; border: 2px solid #e8f0fe; display: flex; gap: 20px; align-items: flex-start; transition: all 0.3s; box-shadow: 0 4px 15px rgba(0,0,0,0.04); }
+        .cart-item:hover { border-color: #4DA6D9; box-shadow: 0 8px 25px rgba(77,166,217,0.15); }
+        .cart-item .item-thumb { width: 110px; height: 110px; border-radius: 14px; flex-shrink: 0; overflow: hidden; position: relative; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        .cart-item .item-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .cart-item .item-thumb .thumb-fallback { color: rgba(255,255,255,0.9); font-size: 36px; display: flex; align-items: center; justify-content: center; }
+        .cart-item .item-thumb.house { background: linear-gradient(135deg, #4DA6D9, #3a8bbf); }
+        .cart-item .item-thumb.food  { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .cart-item .item-thumb.tour  { background: linear-gradient(135deg, #10b981, #059669); }
+        .cart-item .item-body { flex: 1; min-width: 0; }
+        .cart-item .item-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        .cart-item .item-title { font-size: 18px; font-weight: 700; color: #0B2447; margin: 0; }
+        .cart-item .item-type-label { font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px; background: #eef2ff; color: #4DA6D9; }
+        .cart-item .item-detail { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: #475569; margin-bottom: 5px; }
+        .cart-item .item-detail i { width: 16px; color: #4DA6D9; padding-top: 2px; flex-shrink: 0; }
+        .cart-item .item-detail strong { color: #0B2447; }
+        .cart-item .item-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+        .cart-item .btn-view-item { padding: 8px 14px; background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; font-family: inherit; }
+        .cart-item .btn-view-item:hover { background: #bae6fd; color: #075985; }
+        .cart-item .btn-edit-item { padding: 8px 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; font-family: inherit; }
+        .cart-item .btn-edit-item:hover { background: #e6a800; color: #0B2447; }
+        .cart-item .btn-remove-item { padding: 8px 12px; background: #fee2e2; color: #ef4444; border: none; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; font-family: inherit; }
+        .cart-item .btn-remove-item:hover { background: #fecaca; color: #dc2626; }
+        .cart-item .item-price { font-size: 20px; font-weight: 700; color: #10b981; margin-top: 10px; display: block; }
+
+        @media (max-width: 640px) {
+            .cart-item { flex-direction: column; gap: 15px; padding: 18px; }
+            .cart-item .item-thumb { width: 100%; height: 200px; }
+            .cart-item .item-header { flex-direction: column; align-items: stretch; }
+            .cart-item .item-actions { width: 100%; justify-content: stretch; }
+            .cart-item .item-actions > * { flex: 1; justify-content: center; }
+            .cart-item .item-title { font-size: 16px; }
+            .cart-item .item-price { font-size: 18px; }
+        }
+
+        .add-more-section { background: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 16px; padding: 25px; margin-bottom: 25px; text-align: center; }
+        .add-more-section h3 { font-size: 15px; font-weight: 700; color: #475569; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .add-more-section .add-buttons { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+        .btn-add-more { padding: 12px 24px; background: white; color: #0B2447; border: 2px solid #4DA6D9; border-radius: 10px; font-weight: 700; font-size: 14px; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; transition: all 0.3s; cursor: pointer; font-family: inherit; }
+        .btn-add-more:hover { background: #4DA6D9; color: white; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(77,166,217,0.3); }
+
+        @media (max-width: 640px) { .add-more-section { padding: 18px; } .btn-add-more { width: 100%; justify-content: center; } }
+
+        .summary-box { background: linear-gradient(135deg, #0B2447, #4DA6D9); color: white; border-radius: 20px; padding: 28px; box-shadow: 0 15px 40px rgba(11,36,71,0.25); }
+        .summary-box .summary-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 14px; border-bottom: 1px solid rgba(255,255,255,0.15); gap: 10px; }
+        .summary-box .summary-row:last-of-type { border-bottom: none; }
+        .summary-box .summary-row span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .summary-box .summary-total { display: flex; justify-content: space-between; padding-top: 15px; margin-top: 10px; border-top: 2px solid rgba(255,255,255,0.3); font-size: 26px; font-weight: 700; }
+        .summary-box .summary-total .total-value { color: #F4B400; }
+
+        .btn-confirm { width: 100%; padding: 16px; background: #F4B400; color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 16px; cursor: pointer; margin-top: 20px; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 6px 20px rgba(244,180,0,0.3); font-family: inherit; }
+        .btn-confirm:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 10px 30px rgba(244,180,0,0.45); }
+        .terms-note { text-align: center; font-size: 12px; color: #94a3b8; margin-top: 15px; padding: 0 10px; line-height: 1.5; }
+
+        @media (max-width: 640px) {
+            .summary-box { padding: 22px 20px; border-radius: 16px; }
+            .summary-box .summary-total { font-size: 22px; }
+            .summary-box .summary-row { font-size: 13px; }
+            .btn-confirm { padding: 14px; font-size: 15px; }
+        }
+
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); z-index: 9999; align-items: center; justify-content: center; padding: 20px; animation: modalFadeIn 0.2s ease; }
+        .modal.show { display: flex; }
+        @keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .modal-content { background: white; border-radius: 24px; width: 100%; max-width: 550px; max-height: 92vh; overflow-y: auto; padding: 30px; animation: modalSlideIn 0.3s ease; box-shadow: 0 30px 80px rgba(0,0,0,0.4); -webkit-overflow-scrolling: touch; }
+        .modal-content.modal-lg { max-width: 800px; }
+        @keyframes modalSlideIn { from { opacity: 0; transform: translateY(-30px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 15px; border-bottom: 2px solid #e8f0fe; margin-bottom: 20px; gap: 10px; }
+        .modal-header h3 { font-size: 20px; font-weight: 700; color: #0B2447; margin: 0; display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .modal-header h3 i { color: #4DA6D9; flex-shrink: 0; }
+        .modal-header .close { font-size: 28px; cursor: pointer; color: #94a3b8; background: none; border: none; padding: 0 10px; line-height: 1; transition: color 0.3s; flex-shrink: 0; font-family: inherit; }
+        .modal-header .close:hover { color: #ef4444; }
+
+        @media (max-width: 600px) {
+            .modal { padding: 12px; }
+            .modal-content { padding: 20px 16px; border-radius: 20px; max-height: 94vh; }
+            .modal-header h3 { font-size: 16px; }
+            .modal-header .close { font-size: 24px; padding: 0 6px; }
+        }
+
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #1e293b; font-size: 13px; }
+        .form-group label i { color: #4DA6D9; margin-right: 4px; }
+        .form-control, .form-select { width: 100%; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; transition: border-color 0.3s; background: #fafafa; font-family: inherit; color: #0B2447; }
+        .form-control:focus, .form-select:focus { outline: none; border-color: #4DA6D9; background: white; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
+        .form-control[readonly] { background: #f1f5f9; font-weight: 600; color: #0B2447; }
+        .form-control.price-display { color: #10b981; font-weight: 700; font-size: 15px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; gap: 12px; } }
+
+        .phone-input-group { display: flex; gap: 8px; align-items: stretch; }
+        .phone-suffix-select { min-width: 100px; max-width: 115px; padding: 11px 8px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 13px; font-weight: 600; background: #f8fafc; color: #0B2447; cursor: not-allowed; opacity: 0.9; flex-shrink: 0; font-family: inherit; }
+        .phone-input-wrapper { position: relative; flex: 1; min-width: 0; }
+        .phone-input-wrapper .form-control { padding-left: 38px; padding-right: 58px; font-family: 'Courier New', monospace; font-weight: 600; letter-spacing: 0.5px; }
+        .phone-input-wrapper .phone-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: #94a3b8; font-size: 13px; pointer-events: none; }
+        .phone-input-wrapper .digit-count { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 10.5px; color: #94a3b8; background: #f1f5f9; padding: 2px 7px; border-radius: 10px; font-weight: 700; pointer-events: none; }
+        .phone-input-wrapper .digit-count.complete { color: #10b981; background: #d1fae5; }
+        @media (max-width: 400px) { .phone-suffix-select { min-width: 80px; font-size: 12px; padding: 10px 6px; } }
+
+        .helper-text { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: #94a3b8; margin-top: 5px; line-height: 1.4; }
+        .helper-text i { color: #4DA6D9; flex-shrink: 0; }
+
+        .fulfillment-method-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .fulfillment-option { position: relative; cursor: pointer; display: block; margin: 0; }
+        .fulfillment-option input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
+        .fulfillment-option-label { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 16px 12px; background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 12px; text-align: center; transition: all 0.2s; cursor: pointer; min-height: 92px; }
+        .fulfillment-option-label i { font-size: 22px; color: #94a3b8; transition: color 0.2s; }
+        .fulfillment-option-label strong { font-size: 13px; color: #1e293b; font-weight: 700; }
+        .fulfillment-option-label small { font-size: 10.5px; color: #94a3b8; line-height: 1.25; }
+        .fulfillment-option input[type="radio"]:checked + .fulfillment-option-label { background: #e0f0fa; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.15); }
+        .fulfillment-option input[type="radio"]:checked + .fulfillment-option-label i { color: #4DA6D9; }
+        .fulfillment-option:hover .fulfillment-option-label { border-color: #4DA6D9; background: #f0f7fb; }
+
+        @media (max-width: 400px) {
+            .fulfillment-method-group { gap: 8px; }
+            .fulfillment-option-label { padding: 12px 8px; min-height: 84px; }
+            .fulfillment-option-label i { font-size: 18px; }
+            .fulfillment-option-label strong { font-size: 12px; }
+            .fulfillment-option-label small { font-size: 9.5px; }
+        }
+
+        .guest-names-field { background: #f8fafc; border-radius: 12px; padding: 15px; margin: 10px 0; border: 1px solid #e2e8f0; }
+        .guest-names-field .guest-names-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+        .guest-names-field .guest-names-header label { font-weight: 600; color: #1e293b; font-size: 13px; margin: 0; }
+        .guest-names-field .guest-count-badge { background: #e8f0fe; color: #4DA6D9; padding: 2px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+        .guest-names-field .guest-count-badge.match { background: #d1fae5; color: #065f46; }
+        .guest-names-field .guest-count-badge.over { background: #fee2e2; color: #991b1b; }
+        .guest-names-field .guest-count-badge.under { background: #fef3c7; color: #92400e; }
+        .guest-names-field .guest-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .guest-names-field .guest-name-row .guest-badge { min-width: 28px; height: 28px; background: #4DA6D9; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+        .guest-names-field .guest-name-row .guest-name-input { flex: 1; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; font-family: inherit; background: white; transition: all 0.2s; min-width: 0; }
+        .guest-names-field .guest-name-row .guest-name-input:focus { outline: none; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
+        .guest-names-field .guest-name-row .guest-name-input.invalid { border-color: #ef4444; background: #fef2f2; }
+        .guest-names-field .guest-name-row .guest-name-input.valid { border-color: #10b981; }
+        .guest-names-field .help-text { font-size: 11px; color: #94a3b8; margin-top: 5px; display: flex; align-items: center; gap: 4px; line-height: 1.4; }
+        .guest-names-field .help-text.error { color: #ef4444; font-weight: 600; }
+        .guest-names-field .help-text.ok { color: #10b981; font-weight: 600; }
+        @media (max-width: 480px) { .guest-names-field { padding: 12px; } }
+
+        .calendar-container { background: white; border-radius: 16px; padding: 20px; margin: 15px 0; border: 1px solid #e8f0fe; }
+        .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 8px; }
+        .calendar-header h4 { font-size: 16px; font-weight: 600; color: #1e293b; margin: 0; }
+        .calendar-nav { display: flex; gap: 8px; }
+        .calendar-nav button { background: #f1f5f9; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.3s; color: #475569; font-family: inherit; }
+        .calendar-nav button:hover { background: #4DA6D9; color: white; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px 0; text-transform: uppercase; }
+        .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; color: #334155; }
+        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.past) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day.selected { background: #4DA6D9; color: white; border-radius: 8px; font-weight: 700; }
+        .calendar-grid .day.in-range { background: #dbeafe; color: #0B2447; }
+        .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
+        .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
+
+        /* Guest calendar: dates that are really bookable (not past / booked / blocked) are green. Set by JS from the same data the
+           booked / blocked styling uses; the server still re-validates every booking. Admin/Staff calendars are separate and unchanged. */
+        .calendar-grid .day.available:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #d1fae5; color: #065f46; font-weight: 600; }
+        .calendar-grid .day.available:hover:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #a7f3d0; }
+        .calendar-grid .day.disabled { cursor: not-allowed; opacity: 0.5; }
+        .pkg-window-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; overflow-wrap: anywhere; }
+        .pkg-window-note i { margin-right: 4px; }
+        .calendar-legend { display: flex; gap: 20px; margin-top: 12px; justify-content: center; font-size: 12px; color: #64748b; flex-wrap: wrap; }
+        .calendar-legend .dot { width: 14px; height: 14px; border-radius: 4px; display: inline-block; margin-right: 4px; vertical-align: middle; }
+        .calendar-legend .dot.available { background: #d1fae5; border: 1px solid #10b981; }
+        .calendar-legend .dot.booked { background: #fee2e2; border: 1px solid #dc2626; }
+        .calendar-legend .dot.selected { background: #4DA6D9; border: 1px solid #4DA6D9; }
+        .calendar-info { text-align: center; margin-top: 10px; font-size: 13px; color: #64748b; padding: 8px; background: #f8fafc; border-radius: 8px; line-height: 1.5; }
+        .calendar-info.success { color: #10b981; font-weight: 600; background: #f0fdf4; }
+
+        @media (max-width: 480px) {
+            .calendar-container { padding: 14px; }
+            .calendar-header h4 { font-size: 14px; }
+            .calendar-nav button { padding: 5px 9px; font-size: 12px; }
+            .calendar-grid { gap: 3px; }
+            .calendar-grid .day-name { font-size: 10px; padding: 4px 0; }
+            .calendar-grid .day { padding: 7px 0; font-size: 13px; }
+            .calendar-legend { gap: 12px; font-size: 11px; }
+            .calendar-info { font-size: 12px; padding: 6px; }
+        }
+
+        .qty-stepper { display: flex; align-items: stretch; gap: 8px; max-width: 240px; }
+        .qty-stepper .qty-btn { flex: 0 0 44px; min-height: 44px; border: 2px solid #e2e8f0; background: #f8fafc; border-radius: 10px; font-size: 20px; font-weight: 700; line-height: 1; color: #0B2447; cursor: pointer; transition: all 0.2s; }
+        .qty-stepper .qty-btn:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .qty-stepper input { flex: 1; min-width: 0; text-align: center; font-weight: 700; font-size: 16px; }
+        .qty-error { display: none; margin-top: 4px; font-size: 12px; color: #dc2626; }
+        .qty-error.show { display: block; }
+        .order-summary-box { background: linear-gradient(135deg, #f0f7fb 0%, #e8f4fc 100%); padding: 16px 20px; border-radius: 14px; margin: 18px 0; border: 2px dashed #4DA6D9; }
+        .order-summary-box .summary-row { display: flex; justify-content: space-between; align-items: center; font-size: 15px; color: #1e293b; gap: 10px; }
+        .order-summary-box .summary-row .total-amount { font-size: 22px; font-weight: 800; color: #10b981; }
+
+        @media (max-width: 480px) {
+            .order-summary-box { padding: 12px 14px; }
+            .order-summary-box .summary-row { font-size: 14px; }
+            .order-summary-box .summary-row .total-amount { font-size: 20px; }
+        }
+
+        .warning-banner { background: #fef3c7; padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 12.5px; color: #92400e; display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; }
+        .warning-banner i { color: #f59e0b; margin-top: 2px; flex-shrink: 0; }
+
+        .stay-summary-box { background: #f8fafc; padding: 20px; border-radius: 16px; margin: 20px 0; }
+        .stay-summary-box .stay-row { display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; font-size: 14px; gap: 10px; }
+        .stay-summary-box .stay-row.total-row { border-bottom: none; padding-top: 5px; font-size: 18px; }
+        .stay-summary-box .stay-row.total-row strong { color: #10b981; }
+
+        .tour-summary-box { background: #f0f9ff; border: 1px solid #bae6fd; padding: 18px 22px; border-radius: 14px; margin: 20px 0; }
+        .tour-summary-box .tour-summary-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 15px; color: #0f172a; gap: 10px; }
+        .tour-summary-box .tour-summary-row:first-child { border-bottom: 1px solid #e0f2fe; padding-bottom: 10px; margin-bottom: 6px; }
+        .tour-summary-box .tour-summary-row .tour-total-value { color: #10b981; font-weight: 800; font-size: 20px; }
+        .tour-warning { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 10px; font-size: 12.5px; color: #92400e; margin: 16px 0 0; display: flex; gap: 8px; line-height: 1.5; }
+        .tour-warning i { color: #f59e0b; flex-shrink: 0; margin-top: 2px; }
+
+        .btn-primary-submit { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; box-shadow: 0 4px 15px rgba(244, 180, 0, 0.35); font-family: inherit; margin-top: 20px; }
+        .btn-primary-submit:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244, 180, 0, 0.5); }
+        .btn-submit-modal { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; margin-top: 20px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s; box-shadow: 0 4px 15px rgba(244,180,0,0.3); font-family: inherit; }
+        .btn-submit-modal:hover { background: #e6a800; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(244,180,0,0.45); }
+
+        .selected-item-badge { display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, #e0f0fa, #d1eaf5); border-left: 4px solid #4DA6D9; padding: 14px 18px; border-radius: 10px; margin-bottom: 20px; font-weight: 700; color: #0B2447; font-size: 14px; flex-wrap: wrap; }
+        .selected-item-badge i { color: #4DA6D9; }
+        .selected-item-badge span { margin-left: auto; color: #10b981; font-size: 16px; font-weight: 700; }
+
+        .btn-back-list { background: none; border: none; color: #4DA6D9; font-weight: 600; cursor: pointer; margin-bottom: 15px; font-size: 13px; padding: 0; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; }
+        .btn-back-list:hover { color: #3a8bbf; text-decoration: underline; }
+
+        .item-pick-list { display: flex; flex-direction: column; gap: 10px; max-height: 55vh; overflow-y: auto; padding-right: 5px; -webkit-overflow-scrolling: touch; }
+        .item-pick-list::-webkit-scrollbar { width: 6px; }
+        .item-pick-list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+
+        .item-pick { display: flex; align-items: stretch; gap: 14px; padding: 12px; background: #ffffff; border: 2px solid #e8f0fe; border-radius: 14px; cursor: pointer; transition: all 0.2s ease; text-align: left; position: relative; overflow: hidden; }
+        .item-pick:hover { border-color: #4DA6D9; background: #f0f7fb; transform: translateY(-2px); box-shadow: 0 8px 20px rgba(77,166,217,0.18); }
+        .item-pick-thumb { width: 90px; height: 90px; border-radius: 10px; flex-shrink: 0; overflow: hidden; background: linear-gradient(135deg, #4DA6D9, #7bb8f0); display: flex; align-items: center; justify-content: center; position: relative; }
+        .item-pick-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .item-pick-thumb .thumb-icon { color: rgba(255,255,255,0.85); font-size: 32px; }
+        .item-pick-thumb.food { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .item-pick-thumb.tour { background: linear-gradient(135deg, #10b981, #059669); }
+        .item-pick-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 2px 0; }
+        .item-pick-info strong { color: #0B2447; font-size: 15px; font-weight: 700; line-height: 1.25; word-break: break-word; display: block; }
+        .item-pick-info .ip-price { color: #10b981; font-size: 14px; font-weight: 700; }
+        .item-pick-info .ip-price small { color: #94a3b8; font-size: 11px; font-weight: 500; margin-left: 2px; }
+        .item-pick-info .ip-desc { color: #64748b; font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 1px; }
+        .item-pick-info .ip-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+        .item-pick-info .ip-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: #eef2ff; color: #4DA6D9; white-space: nowrap; }
+        .item-pick-info .ip-chip.gold { background: #fef3c7; color: #b45309; }
+        .item-pick-info .ip-chip.green { background: #d1fae5; color: #065f46; }
+        .item-pick-info .ip-chip.gray { background: #f1f5f9; color: #475569; }
+        .item-pick-actions { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; }
+        .item-pick .btn-item-view { padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 11px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; transition: all 0.2s; cursor: pointer; border: 1px solid transparent; font-family: inherit; }
+        .item-pick .btn-item-view.house { background: #e0f2fe; color: #0369a1; border-color: #bae6fd; }
+        .item-pick .btn-item-view.house:hover { background: #bae6fd; color: #075985; }
+        .item-pick .btn-item-view.food { background: #fef3c7; color: #b45309; border-color: #fcd34d; }
+        .item-pick .btn-item-view.food:hover { background: #fde68a; color: #92400e; }
+        .item-pick .btn-item-view.tour { background: #d1fae5; color: #065f46; border-color: #a7f3d0; }
+        .item-pick .btn-item-view.tour:hover { background: #a7f3d0; color: #064e3b; }
+        .item-pick .ip-arrow { color: #cbd5e1; font-size: 14px; transition: all 0.2s; }
+        .item-pick:hover .ip-arrow { color: #4DA6D9; transform: translateX(3px); }
+
+        @media (max-width: 480px) {
+            .item-pick { gap: 10px; padding: 10px; }
+            .item-pick-thumb { width: 70px; height: 70px; }
+            .item-pick-thumb .thumb-icon { font-size: 24px; }
+            .item-pick-info strong { font-size: 13.5px; }
+            .item-pick-info .ip-price { font-size: 13px; }
+            .item-pick-info .ip-desc { font-size: 11px; -webkit-line-clamp: 1; }
+            .item-pick .btn-item-view { font-size: 10px; padding: 5px 10px; }
+            .item-pick .ip-arrow { display: none; }
+        }
+
+        .house-detail-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 100001; align-items: center; justify-content: center; padding: 20px; animation: modalFadeIn 0.2s ease; }
+        .house-detail-modal.show { display: flex; }
+        .house-detail-content { background: white; border-radius: 20px; width: 100%; max-width: 900px; max-height: 94vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 30px 90px rgba(0,0,0,0.5); animation: modalSlideIn 0.3s ease; position: relative; }
+        .house-detail-close { position: absolute; top: 15px; right: 15px; z-index: 10; width: 42px; height: 42px; border-radius: 50%; background: rgba(0,0,0,0.55); color: white; border: none; font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.25s; font-family: inherit; }
+        .house-detail-close:hover { background: #ef4444; transform: rotate(90deg); }
+        .house-detail-scroll { overflow-y: auto; flex: 1; min-height: 0; -webkit-overflow-scrolling: touch; }
+        .house-detail-scroll::-webkit-scrollbar { width: 6px; }
+        .house-detail-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .hd-gallery { position: relative; width: 100%; height: 420px; background: #0B2447; flex-shrink: 0; }
+        .hd-gallery img.hd-main-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .hd-gallery-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,0.5); color: white; border: none; width: 46px; height: 46px; border-radius: 50%; font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; z-index: 3; font-family: inherit; }
+        .hd-gallery-nav:hover { background: rgba(0,0,0,0.8); transform: translateY(-50%) scale(1.1); }
+        .hd-gallery-prev { left: 15px; }
+        .hd-gallery-next { right: 15px; }
+        .hd-gallery-counter { position: absolute; bottom: 15px; right: 15px; background: rgba(0,0,0,0.7); color: white; padding: 5px 14px; border-radius: 20px; font-size: 12.5px; font-weight: 600; z-index: 3; }
+        .hd-thumbs { display: flex; gap: 8px; padding: 12px 18px; overflow-x: auto; background: #f8fafc; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; -webkit-overflow-scrolling: touch; }
+        .hd-thumb { width: 78px; height: 58px; object-fit: cover; border-radius: 8px; cursor: pointer; transition: all 0.2s; border: 3px solid transparent; flex-shrink: 0; }
+        .hd-thumb.active { border-color: #F4B400; }
+        .hd-header-block { padding: 22px 28px 15px; border-bottom: 1px solid #e2e8f0; }
+        .hd-name { font-size: 24px; font-weight: 700; color: #0B2447; margin: 0 0 10px 0; line-height: 1.3; }
+        .hd-price-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+        .hd-price { font-size: 30px; font-weight: 800; color: #10b981; line-height: 1; }
+        .hd-price-unit { font-size: 14px; color: #64748b; font-weight: 500; }
+        .hd-quick-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .hd-tag { display: inline-flex; align-items: center; gap: 6px; background: #eef2ff; color: #4DA6D9; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .hd-tag.green { background: #d1fae5; color: #059669; }
+        .hd-tag.gold { background: #fef3c7; color: #b45309; }
+        .hd-section { padding: 20px 28px; border-bottom: 1px solid #f1f5f9; }
+        .hd-section:last-of-type { border-bottom: none; }
+        .hd-section-title { font-size: 15px; font-weight: 700; color: #0B2447; margin: 0 0 12px 0; display: flex; align-items: center; gap: 8px; }
+        .hd-section-title i { color: #4DA6D9; }
+        .hd-description { font-size: 14px; line-height: 1.7; color: #475569; white-space: pre-line; }
+        .hd-specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+        .hd-spec-item { background: #f8fafc; padding: 14px 12px; border-radius: 12px; text-align: center; border: 1px solid #e8f0fe; }
+        .hd-spec-item i { color: #4DA6D9; font-size: 20px; margin-bottom: 6px; display: block; }
+        .hd-spec-item .hd-spec-value { font-size: 16px; font-weight: 700; color: #0B2447; display: block; }
+        .hd-spec-item .hd-spec-label { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600; margin-top: 2px; display: block; }
+        .hd-amenities { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+        .hd-amenity { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #f8fafc; border-radius: 10px; border-left: 3px solid #10b981; font-size: 13px; color: #1e293b; font-weight: 500; }
+        .hd-amenity i { color: #10b981; font-size: 14px; flex-shrink: 0; }
+        .hd-variations { display: flex; flex-direction: column; gap: 8px; }
+        .hd-variation { display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 16px; font-size: 14px; gap: 10px; }
+        .hd-variation .hd-var-label { font-weight: 600; color: #0B2447; }
+        .hd-variation .hd-var-price { font-weight: 700; color: #10b981; font-size: 15px; }
+        .hd-footer { padding: 18px 28px 22px; background: #f8fafc; border-top: 1px solid #e2e8f0; flex-shrink: 0; display: flex; gap: 12px; }
+        .hd-footer .btn-hd-close { flex: 1; padding: 14px; background: #e2e8f0; color: #475569; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; font-family: inherit; }
+        .hd-footer .btn-hd-select { flex: 2; padding: 14px; background: linear-gradient(135deg, #F4B400, #e6a800); color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; box-shadow: 0 4px 15px rgba(244,180,0,0.35); font-family: inherit; }
+        .hd-footer .btn-hd-select.food { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; }
+        .hd-footer .btn-hd-select.tour { background: linear-gradient(135deg, #10b981, #059669); color: white; }
+
+        @media (max-width: 768px) {
+            .house-detail-modal { padding: 12px; }
+            .house-detail-content { max-height: 96vh; border-radius: 16px; }
+            .hd-gallery { height: 260px; }
+            .hd-name { font-size: 19px; }
+            .hd-price { font-size: 24px; }
+            .hd-header-block, .hd-section { padding-left: 18px; padding-right: 18px; }
+            .hd-footer { padding: 14px 18px 18px; flex-direction: column-reverse; }
+            .hd-footer .btn-hd-close, .hd-footer .btn-hd-select { flex: unset; width: 100%; }
+        }
+        @media (max-width: 480px) {
+            .hd-gallery { height: 220px; }
+            .hd-gallery-nav { width: 38px; height: 38px; font-size: 16px; }
+            .hd-name { font-size: 17px; }
+            .hd-price { font-size: 22px; }
+            .hd-thumb { width: 60px; height: 45px; }
+            .hd-specs { grid-template-columns: repeat(2, 1fr); }
+            .hd-amenities { grid-template-columns: 1fr; }
+        }
+
+        .confirmation-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, 0.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 99999; align-items: center; justify-content: center; padding: 20px; animation: logoutFadeIn 0.2s ease; overscroll-behavior: contain; }
+        .confirmation-modal-overlay.show { display: flex; }
+        @keyframes logoutFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .confirmation-modal { background: white; border-radius: 24px; max-width: 420px; width: 100%; padding: 35px 30px 25px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,0.4); animation: logoutSlideIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); border-top: 6px solid #ef4444; max-height: 90vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+        @keyframes logoutSlideIn { from { opacity: 0; transform: translateY(-30px) scale(0.9); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .confirmation-modal.gold { border-top-color: #F4B400; }
+        .confirmation-modal.gold .confirmation-modal-icon { background: linear-gradient(135deg, #fef3c7, #fcd34d); color: #d97706; }
+        .confirmation-modal.gold h3 { color: #92400e; }
+        .confirmation-modal.gold .btn-confirm-yes { background: linear-gradient(135deg, #F4B400, #e6a800); color: #0B2447; box-shadow: 0 4px 15px rgba(244, 180, 0, 0.35); }
+        .confirmation-modal.gold .btn-confirm-yes:hover { box-shadow: 0 8px 25px rgba(244, 180, 0, 0.5); }
+
+        .confirmation-modal-icon { width: 80px; height: 80px; background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 18px; font-size: 36px; color: #ef4444; animation: logoutPulse 2s ease-in-out infinite; }
+        @keyframes logoutPulse { 0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); } 50% { transform: scale(1.05); box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } }
+        .confirmation-modal h3 { font-size: 22px; font-weight: 700; color: #991b1b; margin-bottom: 8px; }
+        .confirmation-modal p { color: #64748b; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
+        .confirmation-modal-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        .btn-confirm-no, .btn-confirm-yes { flex: 1; min-width: 130px; min-height: 48px; padding: 13px 18px; border: none; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; transition: all 0.25s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; -webkit-tap-highlight-color: rgba(0,0,0,0.1); touch-action: manipulation; font-family: inherit; }
+        .btn-confirm-no { background: #e2e8f0; color: #475569; }
+        .btn-confirm-no:hover, .btn-confirm-no:active { background: #cbd5e1; transform: translateY(-2px); }
+        .btn-confirm-yes { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3); }
+        .btn-confirm-yes:hover, .btn-confirm-yes:active { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(239, 68, 68, 0.45); color: white; }
+
+        @media (max-width: 480px) {
+            .confirmation-modal-overlay { padding: 12px; }
+            .confirmation-modal { padding: 28px 22px 20px; border-radius: 20px; }
+            .confirmation-modal-icon { width: 65px; height: 65px; font-size: 28px; margin-bottom: 14px; }
+            .confirmation-modal h3 { font-size: 19px; }
+            .confirmation-modal p { font-size: 13px; margin-bottom: 20px; }
+            .confirmation-modal-actions { flex-direction: column-reverse; }
+            .btn-confirm-no, .btn-confirm-yes { width: 100%; }
+        }
+
+        .terms-modal { z-index: 100002 !important; }
+        .terms-modal-content { max-width: 720px !important; padding: 0 !important; overflow: hidden !important; display: flex !important; flex-direction: column; max-height: 92vh !important; background: white; border-radius: 24px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.4); animation: modalSlideIn 0.3s ease; }
+        .terms-modal-header { background: linear-gradient(135deg, #0B2447 0%, #0B3D91 50%, #4DA6D9 100%); color: white; padding: 25px 30px; text-align: center; position: relative; overflow: hidden; flex-shrink: 0; }
+        .terms-modal-icon { font-size: 42px; margin-bottom: 8px; position: relative; z-index: 1; color: #F4B400; }
+        .terms-modal-header h3 { font-size: 22px; font-weight: 700; margin: 0 0 4px 0; color: white; position: relative; z-index: 1; }
+        .terms-modal-header p { font-size: 13px; opacity: 0.9; margin: 0; color: #e0eeff; position: relative; z-index: 1; }
+        .terms-modal-close { position: absolute; top: 14px; right: 14px; background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.25); width: 38px; height: 38px; border-radius: 50%; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: all 0.25s ease; z-index: 5; font-family: inherit; }
+        .terms-modal-close:hover { background: #ef4444; border-color: #ef4444; transform: rotate(90deg); }
+        .terms-scroll-container { flex: 1; overflow-y: auto; padding: 25px 30px; background: white; min-height: 0; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
+        .terms-scroll-container::-webkit-scrollbar { width: 8px; }
+        .terms-scroll-container::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+        .terms-scroll-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .terms-section { margin-bottom: 25px; }
+        .terms-section:last-child { margin-bottom: 0; }
+        .terms-section-title { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; color: #0B2447; padding-bottom: 10px; border-bottom: 2px solid #4DA6D9; margin-bottom: 12px; }
+        .terms-section-title i { color: #4DA6D9; font-size: 18px; }
+        .terms-section-body { font-size: 13.5px; line-height: 1.7; color: #334155; }
+        .terms-section-body h3 { color: #0B2447; margin: 14px 0 6px; font-weight: 700; font-size: 15px; }
+        .terms-section-body p { margin: 0 0 10px; }
+        .terms-section-body ul { padding-left: 22px; margin: 6px 0 12px; }
+        .terms-section-body li { margin-bottom: 5px; }
+        .terms-scroll-hint { text-align: center; padding: 12px; background: #fef3c7; color: #92400e; font-size: 12.5px; font-weight: 600; border-top: 1px solid #fde68a; flex-shrink: 0; transition: all 0.3s; }
+        .terms-scroll-hint.done { background: #d1fae5; color: #065f46; border-top-color: #a7f3d0; }
+        #bookingTermsAcceptForm { padding: 15px 25px 20px; border-top: 2px solid #e2e8f0; background: #f8fafc; flex-shrink: 0; display: none; animation: slideUp 0.3s ease; }
+        #bookingTermsAcceptForm.visible { display: block; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .terms-checkbox-label { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; padding: 12px 14px; background: white; border: 2px solid #e2e8f0; border-radius: 10px; margin-bottom: 12px; transition: all 0.2s; font-weight: 500; font-size: 13.5px; color: #1e293b; line-height: 1.5; }
+        .terms-checkbox-label:hover { border-color: #4DA6D9; background: #f0f7fb; }
+        .terms-checkbox-label input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-color: #4DA6D9; margin-top: 1px; flex-shrink: 0; }
+        .terms-checkbox-text { flex: 1; }
+        .terms-accept-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); font-family: inherit; }
+        .terms-accept-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(16, 185, 129, 0.45); }
+        .terms-accept-btn:disabled { background: #cbd5e1; cursor: not-allowed; box-shadow: none; transform: none; color: #94a3b8; }
+        .terms-modal-footer-note { text-align: center; padding: 10px 20px 15px; font-size: 11.5px; color: #94a3b8; background: #f8fafc; margin: 0; flex-shrink: 0; }
+
+        @media (max-width: 600px) {
+            .terms-modal { padding: 10px !important; }
+            .terms-modal-content { max-width: 100% !important; max-height: 96vh !important; border-radius: 16px; }
+            .terms-modal-header { padding: 20px; }
+            .terms-modal-header h3 { font-size: 18px; }
+            .terms-modal-icon { font-size: 34px; }
+            .terms-modal-close { width: 32px; height: 32px; font-size: 14px; top: 10px; right: 10px; }
+            .terms-scroll-container { padding: 18px 20px; }
+            .terms-section-title { font-size: 15px; }
+            .terms-section-body { font-size: 13px; }
+            .terms-scroll-hint { font-size: 11.5px; padding: 10px; }
+            #bookingTermsAcceptForm { padding: 12px 18px 15px; }
+            .terms-checkbox-label { font-size: 12.5px; padding: 10px 12px; }
+            .terms-accept-btn { font-size: 14px; padding: 12px; }
+        }
+
+        .prev-rating-banner { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 18px; text-align: center; margin-bottom: 18px; }
+        .prev-rating-banner .prev-label { font-size: 14px; color: #475569; margin-bottom: 8px; font-weight: 500; }
+        .prev-rating-banner .prev-stars { display: flex; justify-content: center; gap: 6px; font-size: 26px; margin-bottom: 8px; line-height: 1; }
+        .prev-rating-banner .prev-hint { font-size: 12.5px; color: #94a3b8; }
+        .overall-rating-label { text-align: center; font-weight: 700; color: #0f172a; font-size: 15px; margin-bottom: 12px; display: block; }
+        .big-rating-input { display: flex; justify-content: center; gap: 8px; font-size: 40px; line-height: 1; margin-bottom: 4px; }
+        .big-rating-input i { color: #cbd5e1; transition: color 0.15s ease, transform 0.15s ease; user-select: none; cursor: pointer; }
+        .big-rating-input i.active { color: #f59e0b; }
+        .big-rating-input i.preview { color: #f59e0b; transform: scale(1.08); }
+        .rating-word { text-align: center; color: #64748b; font-size: 14px; margin: 4px 0 18px 0; min-height: 20px; font-weight: 500; }
+        .review-section-label { font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 8px; display: block; }
+        .review-textarea { width: 100%; padding: 12px 14px; border: 1px solid #d4e4f0; border-radius: 10px; background: #f8faff; color: #1a3a5c; font-family: inherit; font-size: 14px; resize: vertical; min-height: 85px; transition: border-color 0.2s; margin-bottom: 14px; }
+        .review-textarea:focus { outline: none; border-color: #4DA6D9; background: #ffffff; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.12); }
+        .anon-row { display: flex; align-items: center; gap: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; cursor: pointer; }
+        .anon-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #7c3aed; cursor: pointer; flex-shrink: 0; }
+        .anon-row .anon-text { font-weight: 600; color: #1e293b; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+        .anon-row .anon-note { margin-left: auto; font-size: 11.5px; color: #94a3b8; font-style: italic; }
+        .update-review-btn { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 10px; font-weight: 700; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; font-family: inherit; }
+        .btn-cancel-review { flex: 1; padding: 14px; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; font-family: inherit; }
+        .success-popup-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); z-index: 9999; align-items: center; justify-content: center; padding: 20px; }
+        .success-popup-overlay.show { display: flex; }
+        .success-popup { background: white; border-radius: 24px; max-width: 460px; width: 100%; padding: 40px 30px 30px; text-align: center; border-top: 6px solid #10b981; animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .success-popup .success-icon { font-size: 70px; color: #10b981; margin-bottom: 15px; }
+        .success-popup h3 { font-size: 24px; font-weight: 700; color: #10b981; margin-bottom: 10px; }
+        .success-popup p { color: #4a6a8c; font-size: 15px; margin-bottom: 20px; line-height: 1.6; }
+        .success-popup .package-ref { background: #f0f7fb; padding: 14px; border-radius: 12px; font-family: 'Courier New', monospace; font-weight: 700; color: #0B2447; font-size: 16px; margin-bottom: 20px; word-break: break-all; }
+        .success-popup .btn-view { width: 100%; padding: 14px; background: #F4B400; color: #0B2447; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit; }
+
+        @media (max-width: 480px) {
+            .big-rating-input { font-size: 34px; gap: 6px; }
+            .anon-row { flex-wrap: wrap; gap: 6px; }
+            .anon-row .anon-note { margin-left: 0; width: 100%; }
+            .success-popup { padding: 30px 22px 22px; border-radius: 20px; }
+            .success-popup .success-icon { font-size: 56px; }
+            .success-popup h3 { font-size: 20px; }
+            .success-popup p { font-size: 14px; }
+        }
+
+        .gcash-popup-overlay { display: none; position: fixed; inset: 0; background: rgba(11, 36, 71, 0.65); z-index: 99999; align-items: center; justify-content: center; padding: 20px; overflow-y: auto; }
+        .gcash-popup-overlay.show { display: flex; }
+        .gcash-popup { background: #ffffff; border-radius: 24px; max-width: 460px; width: 100%; padding: 32px 26px 24px; text-align: center; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4); border-top: 6px solid #10b981; animation: gcashPopIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); max-height: 94vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+        @keyframes gcashPopIn { from { opacity: 0; transform: translateY(-30px) scale(0.92); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .gcash-success-icon { width: 70px; height: 70px; border-radius: 50%; background: #10b981; color: white; display: flex; align-items: center; justify-content: center; font-size: 34px; margin: 0 auto 15px; box-shadow: 0 8px 25px rgba(16, 185, 129, 0.35); }
+        .gcash-title { font-size: 22px; font-weight: 800; color: #0B2447; margin-bottom: 6px; }
+        .gcash-subtitle { font-size: 14px; color: #64748b; margin-bottom: 18px; line-height: 1.5; }
+        .gcash-divider { height: 1px; background: linear-gradient(90deg, transparent, #e2e8f0, transparent); margin: 4px 0 16px; }
+        .gcash-ref-badge { display: inline-block; background: #d1fae5; color: #065f46; font-family: 'Courier New', monospace; font-weight: 700; font-size: 14px; padding: 8px 18px; border-radius: 20px; margin-bottom: 18px; word-break: break-all; }
+        .gcash-ref-badge i { margin-right: 4px; }
+        .gcash-detail-box { background: #f8fafc; border-radius: 12px; padding: 4px 16px; margin-bottom: 18px; text-align: left; }
+        .gcash-detail-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #e2e8f0; font-size: 14px; gap: 12px; }
+        .gcash-detail-row:last-child { border-bottom: none; }
+        .gcash-detail-row span { color: #64748b; }
+        .gcash-detail-row strong { color: #0B2447; font-weight: 700; }
+        .gcash-detail-row .gcash-amount { color: #10b981; font-size: 18px; font-weight: 800; }
+        .gcash-qr-box { background: #f1f5f9; border-radius: 16px; padding: 18px; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; min-height: 200px; }
+        .gcash-qr-box img { max-width: 200px; max-height: 200px; width: 100%; height: auto; display: block; border-radius: 8px; background: white; padding: 6px; }
+        .gcash-qr-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; gap: 8px; }
+        .gcash-qr-placeholder i { font-size: 72px; color: #cbd5e1; }
+        .gcash-qr-placeholder small { font-size: 12px; font-weight: 600; }
+        .gcash-account-box { background: #f8fafc; border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; text-align: left; }
+        .gcash-account-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 13.5px; gap: 10px; }
+        .gcash-account-row span { color: #64748b; }
+        .gcash-account-row strong { color: #0B2447; font-weight: 700; }
+        .gcash-howto-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; text-align: left; }
+        .gcash-howto-title { font-size: 13.5px; font-weight: 700; color: #92400e; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+        .gcash-howto-title i { color: #f59e0b; }
+        .gcash-howto-list { margin: 0; padding-left: 20px; font-size: 12.5px; color: #78350f; line-height: 1.7; }
+        .gcash-howto-list li { margin-bottom: 2px; }
+        .gcash-status-banner { background: #fef3c7; color: #92400e; padding: 10px 14px; border-radius: 10px; font-size: 13px; font-weight: 700; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .gcash-status-banner i { color: #f59e0b; }
+        .gcash-actions { display: flex; gap: 10px; }
+        .gcash-btn-upload, .gcash-btn-close { flex: 1; padding: 13px 16px; border-radius: 12px; font-weight: 700; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.25s; font-family: inherit; border: none; }
+        .gcash-btn-upload { flex: 2; background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }
+        .gcash-btn-upload:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(16, 185, 129, 0.45); color: white; }
+        .gcash-btn-close { background: #e2e8f0; color: #475569; }
+        .gcash-btn-close:hover { background: #cbd5e1; color: #334155; transform: translateY(-2px); }
+
+        @media (max-width: 480px) {
+            .gcash-popup-overlay { padding: 12px; }
+            .gcash-popup { padding: 26px 20px 20px; border-radius: 20px; }
+            .gcash-success-icon { width: 60px; height: 60px; font-size: 28px; margin-bottom: 12px; }
+            .gcash-title { font-size: 19px; }
+            .gcash-subtitle { font-size: 13px; margin-bottom: 14px; }
+            .gcash-qr-box { min-height: 170px; padding: 14px; }
+            .gcash-qr-box img { max-width: 170px; max-height: 170px; }
+            .gcash-actions { flex-direction: column-reverse; }
+            .gcash-btn-upload, .gcash-btn-close { flex: unset; width: 100%; }
+        }
+        .alert-overlay { display: none !important; }
+        /* ===== Package Builder: guided steps ===== */
+        .hero.pb-hero { min-height: 0; display: block; padding: 112px 20px 28px; }
+        .hero.pb-hero h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: normal; line-height: 1.2; }
+        .hero.pb-hero p { font-size: 15px; margin: 0; }
+        .hero.pb-hero h1 i { display: inline; margin: 0 6px 0 0; }
+        .main-container { max-width: 1180px; }
+        .pb-stepper { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(11,36,71,.05); scroll-margin-top: 90px; }
+        .pb-step { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 12px; background: transparent; cursor: pointer; font-family: inherit; text-align: left; min-height: 48px; min-width: 0; }
+        .pb-step:disabled { opacity: .5; cursor: not-allowed; }
+        .pb-step:not(:disabled):hover { background: #f1f5f9; }
+        .pb-dot { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; background: #e2e8f0; color: #475569; font-weight: 700; font-size: 14px; }
+        .pb-dot i { display: none; font-size: 13px; }
+        .pb-step.done .pb-dot { background: #10b981; color: #fff; }
+        .pb-step.done .pb-dot .n { display: none; }
+        .pb-step.done .pb-dot i { display: inline; }
+        .pb-step.active { background: #eef6ff; box-shadow: inset 0 0 0 2px #4DA6D9; }
+        .pb-step.active .pb-dot { background: #0B2447; color: #fff; }
+        .pb-step.active.done .pb-dot { background: #10b981; }
+        .pb-step-label { display: flex; flex-direction: column; font-weight: 700; font-size: 14px; color: #0B2447; line-height: 1.2; min-width: 0; }
+        .pb-step-label small { font-weight: 500; font-size: 11.5px; color: #64748b; }
+        .pb-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+        .pb-main { min-width: 0; }
+        .pb-js .pb-panel { display: none; }
+        .pb-js .pb-panel.active { display: block; animation: pbIn .25s ease; }
+        @keyframes pbIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+        .pb-panel-head { margin-bottom: 16px; }
+        .pb-kicker { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: #4DA6D9; margin-bottom: 4px; }
+        .pb-panel-head h2 { font-size: 24px; font-weight: 800; color: #0B2447; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .pb-panel-head h2 i { color: #4DA6D9; font-size: 20px; }
+        .pb-panel-head p { margin: 0; color: #64748b; font-size: 14px; }
+        .pb-empty { display: flex; align-items: center; gap: 16px; background: #fff; border: 2px dashed #cbd5e1; border-radius: 16px; padding: 20px; margin-bottom: 18px; flex-wrap: wrap; }
+        .pb-empty-icon { width: 56px; height: 56px; border-radius: 14px; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+        .pb-empty-body { flex: 1; min-width: 180px; }
+        .pb-empty-body h4 { margin: 0 0 4px; font-size: 16px; color: #0B2447; }
+        .pb-empty-body p { margin: 0; font-size: 13px; color: #64748b; line-height: 1.5; }
+        .pb-panel .cart-item { border-color: #86efac; background: linear-gradient(#f0fdf4,#fff 60%); }
+        .pb-panel .cart-item:hover { border-color: #10b981; }
+        .pb-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 11px 20px; border-radius: 12px; border: 0; font-family: inherit; font-weight: 700; font-size: 14.5px; cursor: pointer; transition: transform .15s, box-shadow .15s, background .15s; }
+        .pb-btn:disabled { opacity: .5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+        .pb-btn-primary { background: #0B2447; color: #fff; }
+        .pb-btn-primary:not(:disabled):hover { background: #0B3D91; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(11,36,71,.25); }
+        .pb-btn-ghost { background: #fff; color: #0B2447; box-shadow: inset 0 0 0 2px #cbd5e1; }
+        .pb-btn-ghost:hover { background: #f1f5f9; }
+        .pb-btn-confirm { background: linear-gradient(135deg,#10b981,#059669); color: #fff; box-shadow: 0 4px 14px rgba(16,185,129,.3); }
+        .pb-btn-confirm:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(16,185,129,.4); }
+        .pb-nav { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; }
+        .pb-hint { margin: 12px 0 0; font-size: 13px; color: #64748b; }
+        .pb-link { background: none; border: 0; color: #0369a1; font-weight: 700; font-size: 13px; cursor: pointer; font-family: inherit; padding: 6px 4px; min-height: 36px; }
+        .pb-link:hover { text-decoration: underline; }
+        .pb-review { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 6px 18px; margin-bottom: 16px; }
+        .pb-review-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 12px; align-items: center; padding: 14px 0; border-bottom: 1px solid #eef2f7; }
+        .pb-review-row strong { display: block; color: #0B2447; font-size: 15px; overflow-wrap: anywhere; }
+        .pb-review-row small { display: block; color: #64748b; font-size: 12.5px; margin-top: 2px; }
+        .pb-review-type { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #4DA6D9; margin-bottom: 2px; }
+        .pb-review-price { font-weight: 700; color: #0B2447; white-space: nowrap; }
+        .pb-review-total { display: flex; justify-content: space-between; align-items: center; padding: 16px 0 12px; font-weight: 700; color: #0B2447; }
+        .pb-review-total strong { font-size: 24px; color: #059669; }
+        .pb-paybox { background: #fffbeb; border: 1px solid #fde68a; border-radius: 14px; padding: 14px 16px; font-size: 13.5px; color: #78350f; display: grid; gap: 8px; }
+        .pb-paybox i { color: #f59e0b; width: 18px; }
+        .pb-terms { margin-top: 12px; }
+        .pb-summary { position: sticky; top: 90px; background: #fff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px; box-shadow: 0 10px 30px rgba(11,36,71,.08); }
+        .pb-sum-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+        .pb-sum-head h3 { margin: 0; font-size: 17px; color: #0B2447; display: flex; align-items: center; gap: 8px; }
+        .pb-sum-head h3 i { color: #4DA6D9; }
+        .pb-clear { color: #dc2626; margin-left: auto; }
+        .pb-sum-close { display: none; background: #f1f5f9; border: 0; width: 36px; height: 36px; border-radius: 50%; font-size: 20px; cursor: pointer; color: #475569; }
+        .pb-sum-line { padding: 12px 0; border-bottom: 1px solid #eef2f7; display: grid; gap: 2px; }
+        .pb-sum-label { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #64748b; }
+        .pb-sum-label i { color: #4DA6D9; width: 16px; }
+        .pb-sum-line strong { color: #0B2447; font-size: 14.5px; overflow-wrap: anywhere; }
+        .pb-sum-line small { color: #64748b; font-size: 12px; }
+        .pb-sum-line em { color: #94a3b8; font-size: 13px; }
+        .pb-sum-price { font-weight: 700; color: #059669; font-size: 14px; }
+        .pb-sum-total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 0 8px; font-weight: 700; color: #0B2447; }
+        .pb-sum-total strong { font-size: 24px; color: #059669; }
+        .pb-sum-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13.5px; color: #475569; }
+        .pb-sum-row strong { color: #0B2447; text-align: right; }
+        .pb-sum-note { margin-top: 8px; font-size: 12px; color: #64748b; text-align: right; }
+        .pb-bar { display: none; }
+        @media (max-width: 1024px) { .pb-layout { grid-template-columns: minmax(0,1fr) 300px; gap: 18px; } .pb-step { padding: 8px; gap: 8px; } .pb-step-label small { display: none; } }
+        @media (max-width: 900px) {
+            .pb-layout { grid-template-columns: 1fr; }
+            body.pb-js { padding-bottom: 84px; }
+            .pb-summary { position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 1200; border-radius: 20px 20px 0 0; max-height: 78vh; overflow-y: auto; transform: translateY(105%); transition: transform .28s ease; padding: 18px 18px 24px; visibility: hidden; }
+            .pb-summary.open { transform: none; visibility: visible; box-shadow: 0 -12px 40px rgba(11,36,71,.3); }
+            .pb-sum-close { display: inline-flex; align-items: center; justify-content: center; }
+            .pb-clear { margin-left: 0; }
+            .pb-bar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 1100; background: #fff; border-top: 1px solid #e2e8f0; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); align-items: center; justify-content: space-between; gap: 12px; box-shadow: 0 -6px 20px rgba(11,36,71,.1); }
+            .pb-bar-total small { display: block; font-size: 11px; color: #64748b; font-weight: 600; }
+            .pb-bar-total strong { font-size: 19px; color: #059669; }
+        }
+        @media (max-width: 640px) {
+            .hero.pb-hero { padding: 96px 14px 22px; }
+            .hero.pb-hero h1 { font-size: 24px; }
+            .hero.pb-hero h1 i { display: inline; margin: 0 6px 0 0; }
+            .hero.pb-hero p { font-size: 13px; }
+            .pb-stepper { gap: 4px; padding: 8px; }
+            .pb-step { flex-direction: column; justify-content: center; gap: 4px; padding: 6px 2px; text-align: center; }
+            .pb-step-label { align-items: center; font-size: 12px; }
+            .pb-panel-head h2 { font-size: 20px; }
+            .pb-nav { flex-direction: column-reverse; align-items: stretch; }
+            .pb-nav .pb-btn { width: 100%; }
+            .pb-nav > span { display: none; }
+            .pb-empty .pb-btn { width: 100%; }
+            .pb-review-row { grid-template-columns: minmax(0,1fr) auto; }
+            .pb-review-row .pb-link { grid-column: 1 / -1; justify-self: start; padding-left: 0; }
+        }
+        @media (max-width: 380px) { .pb-step-label { font-size: 11px; } .pb-dot { width: 28px; height: 28px; } .pb-btn { padding: 11px 14px; } }
+    </style>
+</head>
+<body>
+
+<?php include 'components/navbar.php'; ?>
+
+<!-- PAGE HERO -->
+<div class="hero pb-hero">
+    <div class="hero-content">
+        <h1><i class="fas fa-box-open"></i> Build Your Package</h1>
+        <p>Stay and food in one booking, with one reservation fee.</p>
+    </div>
+</div>
+
+<div class="main-container">
+
+<?php if ($booking_error): ?>
+    <div style="background: #fee2e2; color: #991b1b; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #ef4444; display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5;">
+        <i class="fas fa-exclamation-circle" style="font-size: 20px; flex-shrink: 0;"></i>
+        <span><?php echo htmlspecialchars($booking_error); ?></span>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($tour_removed_notice)): ?>
+    <div style="background: #fffbeb; color: #92400e; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #f59e0b; display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5;">
+        <i class="fas fa-info-circle" style="font-size: 20px; flex-shrink: 0;"></i>
+        <span>Tour/boat bookings are no longer offered, so the tour that was saved in your package has been removed. Your other items are unchanged.</span>
+    </div>
+<?php endif; ?>
+<?php if (!empty($house_needs_group)): ?>
+    <div style="background: #fffbeb; color: #92400e; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #f59e0b; display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5;">
+        <i class="fas fa-exclamation-triangle" style="font-size: 20px; flex-shrink: 0;"></i>
+        <span>Your saved house needs the new group details (senior citizens and health condition). Please click <strong>Edit</strong> on your house and complete them before confirming.</span>
+    </div>
+<?php endif; ?>
+<?php
+$h = $cart['house'] ?? []; $f = $cart['food'] ?? [];
+$pb_fee = PaymentService::feeFor($grand_total > 0 ? $grand_total : PaymentService::RESERVATION_FEE);
+$pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
+?>
+<nav class="pb-stepper" id="pbStepper" aria-label="Package steps">
+    <button type="button" class="pb-step<?php echo $has_house ? ' done' : ''; ?>" data-step="1" onclick="pbGo(1)">
+        <span class="pb-dot"><span class="n">1</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Stay<small><?php echo $has_house ? 'Added' : 'Choose'; ?></small></span>
+    </button>
+    <button type="button" class="pb-step<?php echo $has_food ? ' done' : ''; ?>" data-step="2" onclick="pbGo(2)">
+        <span class="pb-dot"><span class="n">2</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Food<small><?php echo $has_food ? 'Added' : 'Optional'; ?></small></span>
+    </button>
+    <button type="button" class="pb-step" data-step="3" onclick="pbGo(3)"<?php echo $has_any ? '' : ' disabled'; ?>>
+        <span class="pb-dot"><span class="n">3</span><i class="fas fa-check"></i></span>
+        <span class="pb-step-label">Review<small>Confirm</small></span>
+    </button>
+</nav>
+
+<div class="pb-layout">
+<div class="pb-main">
+
+    <!-- STEP 1: STAY -->
+    <section class="pb-panel" data-panel="1" aria-labelledby="pbT1">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 1 of 3</span>
+            <h2 id="pbT1"><i class="fas fa-home"></i> Choose Your Stay</h2>
+            <p>Pick a house and your check-in and check-out dates.</p>
+        </div>
+        <?php if (!$has_house): ?>
+        <div class="pb-empty">
+            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#4DA6D9,#3a8bbf);"><i class="fas fa-home"></i></div>
+            <div class="pb-empty-body">
+                <h4>No stay selected yet</h4>
+                <p>Browse our transient houses and choose your dates. You can also skip this and build a food-only package.</p>
+            </div>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('house')"><i class="fas fa-home"></i> Choose a Stay</button>
+        </div>
+        <?php endif; ?>
+    <?php if ($has_house): $h = $cart['house']; ?>
+    <div class="cart-item">
+        <div class="item-thumb house">
+            <?php if ($cart_house_img): ?>
+                <img src="<?php echo htmlspecialchars($cart_house_img); ?>?v=<?php echo time(); ?>" alt="<?php echo htmlspecialchars($h['name'] ?? ''); ?>" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <span class="thumb-fallback" style="display:none;"><i class="fas fa-home"></i></span>
+            <?php else: ?>
+                <span class="thumb-fallback"><i class="fas fa-home"></i></span>
+            <?php endif; ?>
+        </div>
+        <div class="item-body">
+            <div class="item-header">
+                <div>
+                    <span class="item-type-label">House Booking</span>
+                    <h4 class="item-title"><?php echo htmlspecialchars($h['name'] ?? ''); ?></h4>
+                </div>
+                <div class="item-actions">
+                    <button type="button" class="btn-view-item" onclick="openItemDetail('house_<?php echo (int)($h['id'] ?? 0); ?>')">
+                        <i class="fas fa-eye"></i> View
+                    </button>
+                    <button type="button" class="btn-edit-item" onclick="editHouse()">
+                        <i class="fas fa-pen"></i> Edit
+                    </button>
+                    <button type="button" class="btn-remove-item" onclick="openRemoveModal('house', '<?php echo htmlspecialchars($h['name'] ?? '', ENT_QUOTES); ?>')">
+                        <i class="fas fa-times"></i> Remove
+                    </button>
+                </div>
+            </div>
+
+            <!-- ✅ Check-in with TIME -->
+            <div class="item-detail"><i class="fas fa-calendar-alt"></i>
+                <span>
+                    <strong>Check-in:</strong>
+                    <?php echo date('M d, Y', strtotime($h['check_in'] ?? 'now')); ?>
+                    <?php if (!empty($h['check_in_time'])): ?>
+                        • <?php echo date('h:i A', strtotime($h['check_in_time'])); ?>
+                    <?php endif; ?>
+                </span>
+            </div>
+            <!-- ✅ Check-out with TIME -->
+            <div class="item-detail"><i class="fas fa-calendar-check"></i>
+                <span>
+                    <strong>Check-out:</strong>
+                    <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?>
+                    <?php if (!empty($h['check_out_time'])): ?>
+                        • <?php echo date('h:i A', strtotime($h['check_out_time'])); ?>
+                    <?php endif; ?>
+                </span>
+            </div>
+            <div class="item-detail"><i class="fas fa-moon"></i>
+                <span><strong>Duration:</strong> <?php echo (int)($h['days'] ?? (($h['nights'] ?? 0) + 1)); ?> day<?php echo ((int)($h['days'] ?? (($h['nights'] ?? 0) + 1))) > 1 ? 's' : ''; ?> / <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) > 1 ? 's' : ''; ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-users"></i>
+                <span><strong>Guests:</strong> <?php echo (int)($h['guests'] ?? 0); ?> pax</span>
+            </div>
+            <div class="item-detail"><i class="fas fa-user-clock"></i>
+                <span><strong>Senior citizens:</strong> <?php echo htmlspecialchars(GroupHealth::seniorLabel(['senior_citizens' => $h['senior_citizens'] ?? null])); ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-heartbeat"></i>
+                <span><strong>Health condition:</strong> <?php echo htmlspecialchars(GroupHealth::healthLabel(['has_health_condition' => $h['has_health_condition'] ?? null, 'health_condition_details' => $h['health_condition_details'] ?? ''])); ?></span>
+            </div>
+
+            <span class="item-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
+        </div>
+    </div>
+    <?php endif; ?>
+        <div class="pb-nav">
+            <span></span>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(2)">Continue to Food <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- STEP 2: FOOD -->
+    <section class="pb-panel" data-panel="2" aria-labelledby="pbT2">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 2 of 3</span>
+            <h2 id="pbT2"><i class="fas fa-utensils"></i> Add Food</h2>
+            <p>Add a meal or food package for your stay. This step is optional.</p>
+        </div>
+        <?php if ($pkg_window): ?>
+        <div class="pkg-window-note"><i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> <?php echo htmlspecialchars($pkg_window['start_label'] . ' to ' . $pkg_window['end_label']); ?>.<br>Your food schedule must be within your house stay period.</div>
+        <?php endif; ?>
+        <?php if (!$has_food): ?>
+        <div class="pb-empty">
+            <div class="pb-empty-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706);"><i class="fas fa-utensils"></i></div>
+            <div class="pb-empty-body">
+                <h4>No food selected yet</h4>
+                <p>Choose a meal or food package and when you want it.</p>
+            </div>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('food')"><i class="fas fa-utensils"></i> Choose Food</button>
+        </div>
+        <?php endif; ?>
+    <?php if ($has_food): $f = $cart['food']; ?>
+    <div class="cart-item">
+        <div class="item-thumb food">
+            <?php if ($cart_food_img): ?>
+                <img src="<?php echo htmlspecialchars($cart_food_img); ?>?v=<?php echo time(); ?>" alt="<?php echo htmlspecialchars($f['name'] ?? ''); ?>" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <span class="thumb-fallback" style="display:none;"><i class="fas fa-utensils"></i></span>
+            <?php else: ?>
+                <span class="thumb-fallback"><i class="fas fa-utensils"></i></span>
+            <?php endif; ?>
+        </div>
+        <div class="item-body">
+            <div class="item-header">
+                <div>
+                    <span class="item-type-label" style="background: #fef3c7; color: #d97706;">Food Order</span>
+                    <h4 class="item-title"><?php echo htmlspecialchars($f['name'] ?? ''); ?></h4>
+                </div>
+                <div class="item-actions">
+                    <button type="button" class="btn-view-item" onclick="openItemDetail('food_<?php echo (int)($f['id'] ?? 0); ?>')">
+                        <i class="fas fa-eye"></i> View
+                    </button>
+                    <button type="button" class="btn-edit-item" onclick="editFood()">
+                        <i class="fas fa-pen"></i> Edit
+                    </button>
+                    <button type="button" class="btn-remove-item" onclick="openRemoveModal('food', '<?php echo htmlspecialchars($f['name'] ?? '', ENT_QUOTES); ?>')">
+                        <i class="fas fa-times"></i> Remove
+                    </button>
+                </div>
+            </div>
+
+            <div class="item-detail"><i class="fas fa-calendar-alt"></i>
+                <span><strong>Date:</strong> <?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-clock"></i>
+                <span><strong>Time:</strong> <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?></span>
+            </div>
+            <div class="item-detail"><i class="fas fa-truck"></i>
+                <span><strong>Method:</strong> <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?></span>
+            </div>
+            <?php if (!empty($f['size_variant'])): ?>
+            <div class="item-detail"><i class="fas fa-box"></i>
+                <span><strong>Size:</strong> <?php echo htmlspecialchars($f['size_variant']); ?></span>
+            </div>
+            <?php endif; ?>
+            <?php $f_qty = max(1, (int)($f['quantity'] ?? 1)); ?>
+            <div class="item-detail"><i class="fas fa-hashtag"></i>
+                <span><strong>Quantity:</strong> <?php echo $f_qty; ?><?php if ($f_qty > 1): ?> × ₱<?php echo number_format((float)($f['price'] ?? 0) / $f_qty, 2); ?><?php endif; ?></span>
+            </div>
+            <?php if (!empty($f['delivery_address'])): ?>
+            <div class="item-detail"><i class="fas fa-map-marker-alt"></i>
+                <span><strong>Address:</strong> <?php echo htmlspecialchars($f['delivery_address']); ?></span>
+            </div>
+            <?php endif; ?>
+            <?php if (!empty($f['contact_number'])): ?>
+            <div class="item-detail"><i class="fas fa-phone"></i>
+                <span><strong>Contact:</strong> <?php echo htmlspecialchars($f['contact_number']); ?></span>
+            </div>
+            <?php endif; ?>
+
+            <span class="item-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
+        </div>
+    </div>
+    <?php endif; ?>
+        <div class="pb-nav">
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(1)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-primary" onclick="pbGo(3)"<?php echo $has_any ? '' : ' disabled'; ?>>Review Package <i class="fas fa-arrow-right"></i></button>
+        </div>
+        <?php if (!$has_any): ?><p class="pb-hint"><i class="fas fa-info-circle"></i> Add a stay or food item to review your package.</p><?php endif; ?>
+    </section>
+
+    <!-- STEP 3: REVIEW -->
+    <section class="pb-panel" data-panel="3" aria-labelledby="pbT3">
+        <div class="pb-panel-head">
+            <span class="pb-kicker">Step 3 of 3</span>
+            <h2 id="pbT3"><i class="fas fa-clipboard-check"></i> Review Your Package</h2>
+            <p>Check everything below, then confirm your package.</p>
+        </div>
+        <?php if ($has_any): ?>
+        <div class="pb-review">
+            <?php if ($has_house): ?>
+            <div class="pb-review-row">
+                <div><span class="pb-review-type"><i class="fas fa-home"></i> Stay</span>
+                <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
+                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax</small></div>
+                <span class="pb-review-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
+                <button type="button" class="pb-link" onclick="pbGo(1)">Change</button>
+            </div>
+            <?php endif; ?>
+            <?php if ($has_food): ?>
+            <div class="pb-review-row">
+                <div><span class="pb-review-type"><i class="fas fa-utensils"></i> Food</span>
+                <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
+                <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?> · <?php echo date('h:i A', strtotime($f['preferred_time'] ?? 'now')); ?> · <?php echo ucfirst($f['fulfillment_method'] ?? 'pickup'); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> · Qty <?php echo (int)$f['quantity']; ?><?php endif; ?></small></div>
+                <span class="pb-review-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
+                <button type="button" class="pb-link" onclick="pbGo(2)">Change</button>
+            </div>
+            <?php endif; ?>
+            <div class="pb-review-total"><span>Package Total</span><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
+        </div>
+
+        <div class="pb-paybox">
+            <div><i class="fas fa-receipt"></i> <strong>Reservation fee: ₱<?php echo number_format($pb_fee, 2); ?></strong> — one fee for the whole package, paid after you confirm.</div>
+            <div><i class="fas fa-wallet"></i> <strong>Remaining balance:</strong> pay upon arrival.</div>
+            <div><i class="fas fa-info-circle"></i> The reservation fee is non-refundable. If your plans change, you can rebook your package to a new date.</div>
+        </div>
+        <?php else: ?>
+        <div class="pb-empty"><div class="pb-empty-body"><h4>Your package is empty</h4><p>Go back and add a stay or food item first.</p></div></div>
+        <?php endif; ?>
+
+        <div class="pb-nav">
+            <button type="button" class="pb-btn pb-btn-ghost" onclick="pbGo(2)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" class="pb-btn pb-btn-confirm" onclick="openBookingTermsModal()"<?php echo $has_any ? '' : ' disabled'; ?>><i class="fas fa-check-circle"></i> Confirm Package</button>
+        </div>
+        <p class="terms-note pb-terms"><i class="fas fa-info-circle"></i> By confirming, you agree to our Terms &amp; Conditions. You will upload your payment proof right after.</p>
+    </section>
+</div><!-- /pb-main -->
+
+<aside class="pb-summary" id="pbSummary" aria-label="Your package">
+    <div class="pb-sum-head">
+        <h3><i class="fas fa-suitcase-rolling"></i> Your Package</h3>
+        <?php if ($has_any): ?><button type="button" class="pb-link pb-clear" onclick="openClearAllModal()"><i class="fas fa-trash-alt"></i> Clear all</button><?php endif; ?>
+        <button type="button" class="pb-sum-close" onclick="pbToggleSummary(false)" aria-label="Close summary">&times;</button>
+    </div>
+    <div class="pb-sum-line">
+        <span class="pb-sum-label"><i class="fas fa-home"></i> Accommodation</span>
+        <?php if ($has_house): ?>
+            <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
+            <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d', strtotime($h['check_out'] ?? 'now')); ?></small>
+            <span class="pb-sum-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
+        <?php else: ?><em>Not added yet</em><?php endif; ?>
+    </div>
+    <div class="pb-sum-line">
+        <span class="pb-sum-label"><i class="fas fa-utensils"></i> Food</span>
+        <?php if ($has_food): ?>
+            <strong><?php echo htmlspecialchars($f['name'] ?? ''); ?></strong>
+            <small><?php echo date('M d, Y', strtotime($f['preferred_date'] ?? 'now')); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> · Qty <?php echo (int)$f['quantity']; ?><?php endif; ?></small>
+            <span class="pb-sum-price">₱<?php echo number_format((float)($f['price'] ?? 0), 2); ?></span>
+        <?php else: ?><em>Not added yet</em><?php endif; ?>
+    </div>
+    <div class="pb-sum-total"><span>Package Total</span><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
+    <div class="pb-sum-row"><span>Reservation Fee</span><strong>₱<?php echo number_format($pb_fee, 2); ?></strong></div>
+    <div class="pb-sum-row"><span>Remaining Balance</span><strong>Pay upon arrival</strong></div>
+    <?php if ($grand_total > 0 && $pb_balance > 0): ?><div class="pb-sum-note">₱<?php echo number_format($pb_balance, 2); ?> due on arrival</div><?php endif; ?>
+</aside>
+</div><!-- /pb-layout -->
+
+<div class="pb-bar" id="pbBar">
+    <div class="pb-bar-total"><small>Package Total</small><strong>₱<?php echo number_format($grand_total, 2); ?></strong></div>
+    <button type="button" class="pb-btn pb-btn-ghost" onclick="pbToggleSummary()"><i class="fas fa-suitcase-rolling"></i> Your Package</button>
+</div>
+
+</div><!-- /main-container -->
+
+<!-- ============================================================ -->
+<!-- MODAL: ADD HOUSE  ✅ UPDATED with times                       -->
+<!-- ============================================================ -->
+<div class="modal" id="houseModal">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3><i class="fas fa-home"></i> Add House to Package</h3>
+            <button type="button" class="close" onclick="closeModal('house')">&times;</button>
+        </div>
+
+        <?php if (isset($modal_error) && $open_modal === 'house'): ?>
+        <div class="modal-error" style="background:#fee2e2;border-left:4px solid #ef4444;color:#991b1b;padding:12px 16px;border-radius:10px;margin-bottom:18px;font-size:13px;display:flex;align-items:flex-start;gap:10px;">
+            <i class="fas fa-exclamation-circle" style="color:#ef4444;font-size:16px;flex-shrink:0;margin-top:2px;"></i>
+            <span><?php echo htmlspecialchars($modal_error); ?></span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (empty($houses)): ?>
+            <div style="text-align:center;padding:40px 20px;color:#94a3b8;">
+                <i class="fas fa-home" style="font-size:48px;color:#cbd5e1;display:block;margin-bottom:15px;"></i>
+                <p>No houses available at the moment.</p>
+            </div>
+        <?php else: ?>
+
+        <div id="houseStep1">
+            <p style="color:#64748b; font-size:13px; margin-bottom:15px; line-height:1.5;">
+                <i class="fas fa-info-circle" style="color:#4DA6D9;"></i>
+                Tap a house to add it to your package. Click <strong>View</strong> to see full details.
+            </p>
+            <div class="item-pick-list">
+                <?php foreach ($houses as $h): 
+                    if (!is_array($h)) continue;
+                    $thumbSrc = null;
+                    if (!empty($h['image']) && $h['image'] !== 'default-house.jpg') {
+                        if (file_exists('uploads/houses/' . $h['image'])) $thumbSrc = 'uploads/houses/' . $h['image'];
+                        elseif (file_exists('uploads/houses/gallery/' . $h['image'])) $thumbSrc = 'uploads/houses/gallery/' . $h['image'];
+                    }
+                    if (!$thumbSrc && !empty($house_galleries[$h['id']][0])) $thumbSrc = $house_galleries[$h['id']][0];
+                    $shortDesc = trim($h['description'] ?? '');
+                    if (mb_strlen($shortDesc) > 80) $shortDesc = mb_substr($shortDesc, 0, 80) . '…';
+                ?>
+                <div class="item-pick"
+                     data-id="<?php echo (int)$h['id']; ?>"
+                     data-name="<?php echo htmlspecialchars($h['house_name'] ?? '', ENT_QUOTES); ?>"
+                     data-price="<?php echo (float)($h['price_per_night'] ?? 0); ?>"
+                     data-capacity="<?php echo (int)($h['capacity'] ?? 20); ?>"
+                     onclick="selectHouse(this)">
+
+                    <div class="item-pick-thumb house">
+                        <?php if ($thumbSrc): ?>
+                            <img src="<?php echo htmlspecialchars($thumbSrc); ?>?v=<?php echo time(); ?>"
+                                 alt="<?php echo htmlspecialchars($h['house_name'] ?? ''); ?>"
+                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                            <span class="thumb-icon" style="display:none;"><i class="fas fa-home"></i></span>
+                        <?php else: ?>
+                            <span class="thumb-icon"><i class="fas fa-home"></i></span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="item-pick-info">
+                        <strong><?php echo htmlspecialchars($h['house_name'] ?? ''); ?></strong>
+                        <div class="ip-price">₱<?php echo number_format((float)($h['price_per_night'] ?? 0)); ?><small>/night</small></div>
+                        <div class="ip-meta">
+                            <span class="ip-chip"><i class="fas fa-users"></i> <?php echo (int)($h['capacity'] ?? 0); ?> pax</span>
+                            <?php if (!empty($h['bedrooms'])): ?>
+                                <span class="ip-chip gray"><i class="fas fa-bed"></i> <?php echo (int)$h['bedrooms']; ?> bed<?php echo $h['bedrooms'] != 1 ? 's' : ''; ?></span>
+                            <?php endif; ?>
+                        </div>
+                        <?php if ($shortDesc): ?>
+                            <div class="ip-desc"><?php echo htmlspecialchars($shortDesc); ?></div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="item-pick-actions">
+                        <button type="button" class="btn-item-view house"
+                                onclick="event.stopPropagation(); openItemDetail('house_<?php echo (int)$h['id']; ?>')"
+                                title="View full details">
+                            <i class="fas fa-eye"></i> View
+                        </button>
+                        <i class="fas fa-chevron-right ip-arrow"></i>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <form method="POST" id="houseForm" style="display:none;">
+            <input type="hidden" name="add_house_to_package" value="1">
+            <input type="hidden" name="house_id" id="h_house_id">
+            <input type="hidden" name="check_in" id="h_check_in" required>
+            <input type="hidden" name="nights" id="h_nights">
+            <input type="hidden" name="total_price" id="h_total_price">
+
+            <button type="button" class="btn-back-list" onclick="backToHouseList()">
+                <i class="fas fa-arrow-left"></i> Back to list
+            </button>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label><i class="fas fa-home"></i> House</label>
+                    <input type="text" id="h_display_house" class="form-control" readonly>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-tag"></i> Price/Night</label>
+                    <input type="text" id="h_display_price" class="form-control" readonly>
+                </div>
+            </div>
+
+            <div class="calendar-container">
+                <div class="calendar-header">
+                    <h4 id="houseCalendarMonthYear"></h4>
+                    <div class="calendar-nav">
+                        <button type="button" onclick="changeHouseMonth(-1)"><i class="fas fa-chevron-left"></i></button>
+                        <button type="button" onclick="changeHouseMonth(1)"><i class="fas fa-chevron-right"></i></button>
+                    </div>
+                </div>
+                <div class="calendar-grid" id="houseCalendarGrid"></div>
+                <div class="calendar-legend">
+                    <span><span class="dot available"></span> Available</span>
+                    <span><span class="dot booked"></span> Booked</span>
+                    <span><span class="dot selected"></span> Selected</span>
+                </div>
+                <div class="calendar-info" id="houseCalendarInfo">Click a date to pick your check-in. Then click your check-out.</div>
+            </div>
+
+            <!-- ✅ Check-in / Check-out DATES -->
+            <div class="form-row">
+                <div class="form-group">
+                    <label><i class="fas fa-calendar-alt"></i> Check-in Date *</label>
+                    <input type="date" id="h_check_in_display" class="form-control" readonly>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-calendar-alt"></i> Check-out Date *</label>
+                    <input type="date" name="check_out" id="h_check_out" class="form-control" readonly required>
+                </div>
+            </div>
+
+            <!-- ✅ NEW: Check-in / Check-out TIMES -->
+            <div class="form-row">
+                <div class="form-group">
+                    <label><i class="fas fa-clock"></i> Check-in Time *</label>
+                    <input type="time" name="check_in_time" id="h_check_in_time" class="form-control" value="14:00" required oninput="syncHouseCheckoutTime()" onchange="syncHouseCheckoutTime()">
+                    <small class="time-helper"><i class="fas fa-info-circle"></i> Standard check-in: 2:00 PM</small>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-lock"></i> Check-out Time <small style="color:#94a3b8;font-weight:400;">(automatic)</small></label>
+                    <input type="time" name="check_out_time" id="h_check_out_time" class="form-control time-locked" value="14:00" required readonly tabindex="-1" aria-readonly="true">
+                    <small class="time-helper"><i class="fas fa-lock"></i> Checkout time follows your check-in time.</small>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-users"></i> Number of Pax * <small style="color:#94a3b8; font-weight:400;">(max <span id="h_max_capacity">20</span>)</small></label>
+                <input type="number" name="guests" id="h_guests" class="form-control"
+                       min="1" max="20" placeholder="Enter number of pax" required
+                       onchange="rebuildGuestNameInputs(); calcHouseTotal();"
+                       oninput="validatePax(this)">
+            </div>
+
+            <div class="guest-names-field group-info-field">
+                <div class="guest-names-header">
+                    <label for="h_senior_citizens"><i class="fas fa-user-clock"></i> Senior Citizens in the Group *</label>
+                </div>
+                <input type="number" name="senior_citizens" id="h_senior_citizens" class="form-control" min="0" max="20" step="1" inputmode="numeric" placeholder="Enter 0 if none" required oninput="validateSeniorCount(this)">
+                <div class="help-text" id="seniorHelp"><i class="fas fa-info-circle"></i> Senior citizens (60 years old and above) included in your number of pax. Cannot exceed the number of guests.</div>
+
+                <div class="group-health" style="margin-top:14px;">
+                    <label style="font-weight:600;"><i class="fas fa-heartbeat"></i> Does any guest have a health condition? *</label>
+                    <div style="display:flex; gap:18px; margin-top:6px; flex-wrap:wrap;">
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;"><input type="radio" name="has_health_condition" value="yes" onchange="toggleHealthDetails()"> Yes</label>
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;"><input type="radio" name="has_health_condition" value="no" onchange="toggleHealthDetails()"> No</label>
+                    </div>
+                    <div id="healthDetailsWrap" style="display:none; margin-top:10px;">
+                        <label for="h_health_details" style="font-weight:500;">Details <small style="color:#94a3b8; font-weight:400;">(optional)</small></label>
+                        <textarea name="health_condition_details" id="h_health_details" class="form-control" rows="2" maxlength="500" placeholder="e.g., a guest uses a wheelchair, has asthma, needs a ground-floor room"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stay-summary-box">
+                <div class="stay-row">
+                    <span><i class="fas fa-calendar-alt" style="color:#4DA6D9;"></i> Stay Duration:</span>
+                    <span><strong id="h_display_days">0</strong> day(s) / <strong id="h_display_nights">0</strong> night(s)</span>
+                </div>
+                <div class="stay-row total-row">
+                    <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> Total amount:</span>
+                    <span><strong>₱<span id="h_display_total">0.00</span></strong></span>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:10px;">
+                <button type="button" class="btn-cancel-review" style="flex:1;" onclick="backToHouseList()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <button type="submit" class="btn-submit-modal" style="flex:2; margin-top:0;">
+                    <i class="fas fa-plus-circle"></i> Add House to Package
+                </button>
+            </div>
+        </form>
+
+        <?php endif; ?>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- MODAL: ADD FOOD (unchanged)                                  -->
+<!-- ============================================================ -->
+<div class="modal" id="foodModal">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3><i class="fas fa-calendar-check"></i> Reserve Food Package</h3>
+            <button type="button" class="close" onclick="closeModal('food')">&times;</button>
+        </div>
+
+        <?php if (isset($modal_error) && $open_modal === 'food'): ?>
+        <div class="modal-error" style="background:#fee2e2;border-left:4px solid #ef4444;color:#991b1b;padding:12px 16px;border-radius:10px;margin-bottom:18px;font-size:13px;display:flex;gap:10px;">
+            <i class="fas fa-exclamation-circle" style="color:#ef4444;font-size:16px;flex-shrink:0;margin-top:2px;"></i>
+            <span><?php echo htmlspecialchars($modal_error); ?></span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (empty($food_items)): ?>
+            <div style="text-align:center;padding:40px 20px;color:#94a3b8;">
+                <i class="fas fa-utensils" style="font-size:48px;color:#cbd5e1;display:block;margin-bottom:15px;"></i>
+                <p>No food items available at the moment.</p>
+            </div>
+        <?php else: ?>
+
+        <div id="foodStep1">
+            <p style="color:#64748b; font-size:13px; margin-bottom:15px; line-height:1.5;">
+                <i class="fas fa-info-circle" style="color:#4DA6D9;"></i>
+                Tap a food item to add it. Click <strong>View</strong> to see full details.
+            </p>
+            <div class="item-pick-list">
+                <?php foreach ($food_items as $food):
+                    if (!is_array($food)) continue;
+                    $variations = !empty($food['size_variations']) ? json_decode($food['size_variations'], true) : [];
+                    $has_var = !empty($variations) && is_array($variations);
+                    $display_price = $has_var ? ($variations[0]['price'] ?? 0) : ($food['price'] ?? 0);
+
+                    $thumbSrc = null;
+                    if (!empty($food_galleries[$food['id']][0])) $thumbSrc = $food_galleries[$food['id']][0];
+                    elseif (!empty($food['image']) && $food['image'] !== 'default-food.jpg' && file_exists('uploads/foods/' . $food['image'])) $thumbSrc = 'uploads/foods/' . $food['image'];
+
+                    $shortDesc = trim($food['description'] ?? '');
+                    if (mb_strlen($shortDesc) > 80) $shortDesc = mb_substr($shortDesc, 0, 80) . '…';
+                ?>
+                <div class="item-pick"
+                     data-id="<?php echo (int)$food['id']; ?>"
+                     data-name="<?php echo htmlspecialchars($food['name'] ?? '', ENT_QUOTES); ?>"
+                     data-price="<?php echo (float)$display_price; ?>"
+                     data-variations='<?php echo htmlspecialchars(json_encode($has_var ? $variations : []), ENT_QUOTES); ?>'
+                     onclick="selectFood(this)">
+
+                    <div class="item-pick-thumb food">
+                        <?php if ($thumbSrc): ?>
+                            <img src="<?php echo htmlspecialchars($thumbSrc); ?>?v=<?php echo time(); ?>"
+                                 alt="<?php echo htmlspecialchars($food['name'] ?? ''); ?>"
+                                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                            <span class="thumb-icon" style="display:none;"><i class="fas fa-utensils"></i></span>
+                        <?php else: ?>
+                            <span class="thumb-icon"><i class="fas fa-utensils"></i></span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="item-pick-info">
+                        <strong><?php echo htmlspecialchars($food['name'] ?? ''); ?></strong>
+                        <div class="ip-price">₱<?php echo number_format($display_price); ?><?php if ($has_var): ?><small>· <?php echo count($variations); ?> sizes</small><?php endif; ?></div>
+                        <div class="ip-meta">
+                            <?php if (!empty($food['category'])): ?>
+                                <span class="ip-chip gold"><i class="fas fa-tag"></i> <?php echo htmlspecialchars(str_replace('_', ' ', $food['category'])); ?></span>
+                            <?php endif; ?>
+                            <?php if (!empty($food['pax_range'])): ?>
+                                <span class="ip-chip"><i class="fas fa-users"></i> <?php echo htmlspecialchars($food['pax_range']); ?></span>
+                            <?php endif; ?>
+                        </div>
+                        <?php if ($shortDesc): ?>
+                            <div class="ip-desc"><?php echo htmlspecialchars($shortDesc); ?></div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="item-pick-actions">
+                        <button type="button" class="btn-item-view food"
+                                onclick="event.stopPropagation(); openItemDetail('food_<?php echo (int)$food['id']; ?>')"
+                                title="View full details">
+                            <i class="fas fa-eye"></i> View
+                        </button>
+                        <i class="fas fa-chevron-right ip-arrow"></i>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <form method="POST" id="foodForm" style="display:none;">
+            <input type="hidden" name="add_food_to_package" value="1">
+            <input type="hidden" name="food_id" id="f_food_id">
+            <input type="hidden" name="total_price" id="f_total_price">
+
+            <button type="button" class="btn-back-list" onclick="backToFoodList()">
+                <i class="fas fa-arrow-left"></i> Back to list
+            </button>
+            <div class="pkg-window-note" id="f_window_note" style="display:none;"></div>
+
+            <div class="form-group">
+                <label><i class="fas fa-utensils"></i> Food Package</label>
+                <input type="text" id="f_display_name" class="form-control" readonly>
+            </div>
+
+            <div class="form-group" id="f_size_group" style="display:none;">
+                <label><i class="fas fa-arrows-alt-h"></i> Package Size / Variant *</label>
+                <select name="size_variant" id="f_size_variant" class="form-control" onchange="calcFoodTotal()" required></select>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-tag"></i> Price</label>
+                <input type="text" id="f_display_price" class="form-control price-display" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="f_quantity"><i class="fas fa-hashtag"></i> Quantity *</label>
+                <div class="qty-stepper">
+                    <button type="button" class="qty-btn" id="fQtyMinus" onclick="stepFoodQty(-1)" aria-label="Decrease quantity">&minus;</button>
+                    <input type="text" name="quantity" id="f_quantity" class="form-control" value="1" maxlength="3"
+                           inputmode="numeric" autocomplete="off" aria-describedby="f_qty_error" required>
+                    <button type="button" class="qty-btn" id="fQtyPlus" onclick="stepFoodQty(1)" aria-label="Increase quantity">+</button>
+                </div>
+                <div class="qty-error" id="f_qty_error" role="alert"></div>
+                <div class="helper-text"><i class="fas fa-info-circle"></i> 1 to <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>. Total = size price × quantity.</div>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-phone"></i> Contact Number *</label>
+                <div class="phone-input-group">
+                    <select class="phone-suffix-select" disabled aria-label="Country code">
+                        <option value="+63" selected>+63 🇵🇭</option>
+                    </select>
+                    <div class="phone-input-wrapper">
+                        <i class="fas fa-phone phone-icon"></i>
+                        <input type="tel"
+                               name="contact_number"
+                               id="f_contact"
+                               class="form-control"
+                               placeholder="9123456789"
+                               maxlength="10"
+                               inputmode="numeric"
+                               autocomplete="tel"
+                               required
+                               oninput="validatePhone(this, 'f_contact_count')">
+                        <span class="digit-count" id="f_contact_count">0/10</span>
+                    </div>
+                </div>
+                <div class="helper-text">
+                    <i class="fas fa-info-circle"></i> Enter 10-digit PH mobile number (e.g., 9123456789)
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-truck"></i> Fulfillment Method *</label>
+                <div class="fulfillment-method-group">
+                    <label class="fulfillment-option">
+                        <input type="radio" name="fulfillment_method" value="pickup" checked onchange="toggleDelivery()">
+                        <span class="fulfillment-option-label">
+                            <i class="fas fa-store"></i>
+                            <strong>Pickup</strong>
+                            <small>Pick up at our location</small>
+                        </span>
+                    </label>
+                    <label class="fulfillment-option" <?php echo $has_house ? '' : 'style="opacity:.5;cursor:not-allowed;"'; ?>>
+                        <input type="radio" name="fulfillment_method" value="delivery" onchange="toggleDelivery()" <?php echo $has_house ? '' : 'disabled'; ?>>
+                        <span class="fulfillment-option-label">
+                            <i class="fas fa-truck"></i>
+                            <strong>Delivery</strong>
+                            <small>To your booked house</small>
+                        </span>
+                    </label>
+                </div>
+                <div class="helper-text" style="margin-top:8px;">
+                    <i class="fas fa-info-circle"></i>
+                    <?php echo $has_house ? 'Delivery goes to your booked house/unit during your stay. Pickup is always available.' : 'Delivery requires a selected house because the order will be delivered to your booked unit. Pickup is always available.'; ?>
+                </div>
+            </div>
+
+            <div class="form-group" id="f_delivery_auto" style="display:none;">
+                <label><i class="fas fa-map-marker-alt"></i> Delivery Location</label>
+                <div class="pkg-window-note" style="margin-bottom:0;"><i class="fas fa-home"></i> Delivered to your booked house: <strong id="f_delivery_auto_name"></strong></div>
+            </div>
+
+            <div class="form-group" id="f_delivery_group" style="display:none;">
+                <!-- Kept hidden on purpose: delivery location is never typed, it is the booked house/unit -->
+                <textarea name="delivery_address" id="f_delivery_address" class="form-control" rows="2" tabindex="-1" disabled></textarea>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-calendar-alt"></i> Preferred Date *</label>
+                <div class="calendar-container">
+                    <div class="calendar-header">
+                        <h4 id="foodCalendarMonthYear"></h4>
+                        <div class="calendar-nav">
+                            <button type="button" onclick="changeFoodMonth(-1)"><i class="fas fa-chevron-left"></i></button>
+                            <button type="button" onclick="changeFoodMonth(1)"><i class="fas fa-chevron-right"></i></button>
+                        </div>
+                    </div>
+                    <div class="calendar-grid" id="foodCalendarGrid"></div>
+                    <div class="calendar-legend">
+                        <span><span class="dot available"></span> Available</span>
+                        <span><span class="dot selected"></span> Selected</span>
+                    </div>
+                    <div class="calendar-info" id="foodCalendarInfo">Select a date for your food order</div>
+                </div>
+                <input type="hidden" name="preferred_date" id="f_preferred_date" required>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-clock"></i> Preferred Time *</label>
+                <select name="preferred_time" id="f_preferred_time" class="form-control" required>
+                    <option value="">Select Time Slot</option>
+                    <option value="06:00:00">🌅 6:00 AM — Breakfast</option>
+                    <option value="07:00:00">☀️ 7:00 AM — Breakfast</option>
+                    <option value="08:00:00">☀️ 8:00 AM — Breakfast</option>
+                    <option value="09:00:00">☀️ 9:00 AM — Brunch</option>
+                    <option value="10:00:00">☀️ 10:00 AM — Brunch</option>
+                    <option value="11:00:00">☀️ 11:00 AM — Pre-Lunch</option>
+                    <option value="12:00:00">🍽️ 12:00 PM — Lunch</option>
+                    <option value="13:00:00">🍽️ 1:00 PM — Lunch</option>
+                    <option value="14:00:00">🌤️ 2:00 PM — Late Lunch</option>
+                    <option value="15:00:00">🌤️ 3:00 PM — Snack</option>
+                    <option value="16:00:00">🌤️ 4:00 PM — Snack</option>
+                    <option value="17:00:00">🌇 5:00 PM — Early Dinner</option>
+                    <option value="18:00:00">🌙 6:00 PM — Dinner</option>
+                    <option value="19:00:00">🌙 7:00 PM — Dinner</option>
+                    <option value="20:00:00">🌙 8:00 PM — Late Dinner</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label><i class="fas fa-comment"></i> Special Requests</label>
+                <textarea name="special_requests" id="f_special_requests" class="form-control" rows="3" placeholder="e.g., Food allergies, dietary restrictions, less spicy, extra rice..."></textarea>
+            </div>
+
+            <div class="order-summary-box">
+                <div class="summary-row">
+                    <span><i class="fas fa-money-bill-wave" style="color:#10b981;"></i> <strong>Total Amount:</strong></span>
+                    <span class="total-amount" id="f_price_display">₱0.00</span>
+                </div>
+                <div class="summary-row" style="margin-top:4px;"><small id="f_qtyline" style="color:#64748b;"></small></div>
+            </div>
+
+            <div class="warning-banner">
+                <i class="fas fa-info-circle"></i>
+                <span><strong>Note:</strong> One ₱1,000 reservation fee secures the whole package; upload its proof in your profile. The balance is paid upon arrival.</span>
+            </div>
+
+            <button type="submit" class="btn-primary-submit">
+                <i class="fas fa-check-circle"></i> Submit Reservation
+            </button>
+        </form>
+
+        <?php endif; ?>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SHOPEE-STYLE ITEM DETAIL MODAL                                -->
+<!-- ============================================================ -->
+<div class="house-detail-modal" id="houseDetailModal" onclick="if(event.target === this) closeHouseDetail()">
+    <div class="house-detail-content">
+        <button class="house-detail-close" onclick="closeHouseDetail()" aria-label="Close">
+            <i class="fas fa-times"></i>
+        </button>
+
+        <div class="house-detail-scroll">
+            <div class="hd-gallery">
+                <img id="hdMainImage" class="hd-main-img" src="" alt="Item Photo">
+                <button type="button" class="hd-gallery-nav hd-gallery-prev" onclick="changeHdImage(-1)">
+                    <i class="fas fa-chevron-left"></i>
+                </button>
+                <button type="button" class="hd-gallery-nav hd-gallery-next" onclick="changeHdImage(1)">
+                    <i class="fas fa-chevron-right"></i>
+                </button>
+                <div class="hd-gallery-counter" id="hdCounter">1 / 1</div>
+            </div>
+
+            <div class="hd-thumbs" id="hdThumbs"></div>
+
+            <div class="hd-header-block">
+                <h2 class="hd-name" id="hdName">Item Name</h2>
+                <div class="hd-price-row">
+                    <span class="hd-price" id="hdPrice">₱0</span>
+                    <span class="hd-price-unit" id="hdPriceUnit">per night</span>
+                </div>
+                <div class="hd-quick-tags" id="hdQuickTags"></div>
+            </div>
+
+            <div class="hd-section" id="hdDescSection">
+                <h3 class="hd-section-title"><i class="fas fa-info-circle"></i> Description</h3>
+                <p class="hd-description" id="hdDescription"></p>
+            </div>
+
+            <div class="hd-section" id="hdSpecsSection">
+                <h3 class="hd-section-title"><i class="fas fa-list-ul"></i> Specifications</h3>
+                <div class="hd-specs" id="hdSpecs"></div>
+            </div>
+
+            <div class="hd-section" id="hdVariationsSection" style="display:none;">
+                <h3 class="hd-section-title"><i class="fas fa-box"></i> Available Sizes & Pricing</h3>
+                <div class="hd-variations" id="hdVariations"></div>
+            </div>
+
+            <div class="hd-section" id="hdAmenitiesSection">
+                <h3 class="hd-section-title" id="hdAmenitiesTitle"><i class="fas fa-check-circle"></i> Inclusions</h3>
+                <div class="hd-amenities" id="hdAmenities"></div>
+            </div>
+        </div>
+
+        <div class="hd-footer">
+            <button type="button" class="btn-hd-close" onclick="closeHouseDetail()">
+                <i class="fas fa-times"></i> Close
+            </button>
+            <button type="button" class="btn-hd-select" id="hdSelectBtn">
+                <i class="fas fa-plus-circle"></i> Select This Item
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- OVERALL FEEDBACK MODAL (unchanged) -->
+<div class="modal" id="overallFeedbackModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>
+                <i class="fas fa-star" style="color: #f59e0b;"></i>
+                <?php echo $user_has_feedback ? 'Edit Your Review' : 'Rate Your Experience'; ?>
+            </h3>
+            <span class="close" onclick="closeOverallFeedbackModal()">&times;</span>
+        </div>
+
+        <div id="overallFeedbackContent">
+            <?php if(isset($_SESSION['user_id'])): ?>
+                <?php if($user_has_feedback): ?>
+                    <div class="prev-rating-banner">
+                        <div class="prev-label">You previously rated:</div>
+                        <div class="prev-stars">
+                            <?php for($i = 1; $i <= 5; $i++): ?>
+                                <i class="fas fa-star" style="color: <?php echo $i <= (int)($user_feedback['rating'] ?? 0) ? '#f59e0b' : '#cbd5e1'; ?>;"></i>
+                            <?php endfor; ?>
+                        </div>
+                        <div class="prev-hint">Update your rating and review below</div>
+                    </div>
+
+                    <label class="overall-rating-label">Your Overall Rating</label>
+
+                    <form method="POST" action="packages.php" id="overallFeedbackForm">
+                        <input type="hidden" name="submit_feedback" value="1">
+                        <input type="hidden" name="rating" id="overall_feedback_rating" value="<?php echo (int)($user_feedback['rating'] ?? 0); ?>" required>
+
+                        <div class="big-rating-input" id="bigRatingInput">
+                            <?php for ($i = 1; $i <= 5; $i++): ?>
+                                <i class="fas fa-star <?php echo (int)($user_feedback['rating'] ?? 0) >= $i ? 'active' : ''; ?>" data-rating="<?php echo $i; ?>" onclick="setBigRating(<?php echo $i; ?>)" onmouseenter="previewBigRating(<?php echo $i; ?>)"></i>
+                            <?php endfor; ?>
+                        </div>
+
+                        <div class="rating-word" id="bigRatingWord">
+                            <?php
+                            $ratingTexts = [1=>'Very Poor', 2=>'Poor', 3=>'Average', 4=>'Good', 5=>'Excellent!'];
+                            echo $ratingTexts[(int)($user_feedback['rating'] ?? 0)] ?? 'Average';
+                            ?>
+                        </div>
+
+                        <label class="review-section-label" for="overall_comment">Your Comment</label>
+                        <textarea name="comment" id="overall_comment" class="review-textarea" rows="3"><?php echo htmlspecialchars($user_feedback['comment'] ?? ''); ?></textarea>
+
+                        <label class="anon-row" for="overall_is_anonymous">
+                            <input type="checkbox" name="is_anonymous" id="overall_is_anonymous" value="1" <?php echo (!empty($user_feedback['is_anonymous'])) ? 'checked' : ''; ?>>
+                            <span class="anon-text"><i class="fas fa-user-secret"></i> Post as Anonymous</span>
+                            <span class="anon-note">Your name will not be shown publicly</span>
+                        </label>
+
+                        <div style="display:flex; gap:10px;">
+                            <button type="button" class="btn-cancel-review" onclick="closeOverallFeedbackModal()">
+                                <i class="fas fa-times"></i> Cancel
+                            </button>
+                            <button type="submit" class="update-review-btn" style="flex:2;">
+                                <i class="fas fa-paper-plane"></i> Update Review
+                            </button>
+                        </div>
+                    </form>
+
+                <?php else: ?>
+                    <label class="overall-rating-label">Your Overall Rating</label>
+
+                    <form method="POST" action="packages.php" id="overallFeedbackForm">
+                        <input type="hidden" name="submit_feedback" value="1">
+                        <input type="hidden" name="rating" id="overall_feedback_rating" value="0" required>
+
+                        <div class="big-rating-input" id="bigRatingInput">
+                            <?php for ($i = 1; $i <= 5; $i++): ?>
+                                <i class="fas fa-star" data-rating="<?php echo $i; ?>" onclick="setBigRating(<?php echo $i; ?>)" onmouseenter="previewBigRating(<?php echo $i; ?>)"></i>
+                            <?php endfor; ?>
+                        </div>
+
+                        <div class="rating-word" id="bigRatingWord">Select a rating</div>
+
+                        <label class="review-section-label" for="overall_comment">Your Comment</label>
+                        <textarea name="comment" id="overall_comment" class="review-textarea" rows="3"></textarea>
+
+                        <label class="anon-row" for="overall_is_anonymous">
+                            <input type="checkbox" name="is_anonymous" id="overall_is_anonymous" value="1">
+                            <span class="anon-text"><i class="fas fa-user-secret"></i> Post as Anonymous</span>
+                            <span class="anon-note">Your name will not be shown publicly</span>
+                        </label>
+
+                        <div style="display:flex; gap:10px;">
+                            <button type="button" class="btn-cancel-review" onclick="closeOverallFeedbackModal()">
+                                <i class="fas fa-times"></i> Cancel
+                            </button>
+                            <button type="submit" class="update-review-btn" style="flex:2;">
+                                <i class="fas fa-paper-plane"></i> Submit Review
+                            </button>
+                        </div>
+                    </form>
+                <?php endif; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<?php if ($booking_success): 
+    $gcash_name   = $booking_success['gcash_name']   ?? '';
+    $gcash_number = $booking_success['gcash_number'] ?? '';
+    $gcash_configured = PaymentService::gcashConfig($pdo)['configured'];
+    $qr_path      = $booking_success['qr_image']     ?? '';
+    $qr_exists    = !empty($booking_success['qr_exists']) 
+                  ? $booking_success['qr_exists'] 
+                  : (!empty($qr_path) && file_exists($qr_path) && !is_dir($qr_path));
+    $qr_version   = $qr_exists ? @filemtime($qr_path) : time();
+    $pkg_label    = $booking_success['package_name'] ?? 'Package Booking';
+    $guest_name   = $booking_success['guest_name']   ?? '';
+    $booking_ref  = $booking_success['reference']    ?? '';
+    $booking_total = $booking_success['total']       ?? 0;
+?>
+<div class="gcash-popup-overlay show" id="gcashSuccessPopup">
+    <div class="gcash-popup">
+        <div class="gcash-success-icon">
+            <i class="fas fa-check"></i>
+        </div>
+
+        <h3 class="gcash-title">Booking Submitted! 🎉</h3>
+        <p class="gcash-subtitle">Pay the reservation fee via GCash to secure your package</p>
+
+        <div class="gcash-divider"></div>
+
+        <div class="gcash-ref-badge">
+            <i class="fas fa-hashtag"></i> <?php echo htmlspecialchars($booking_ref); ?>
+        </div>
+
+        <div class="gcash-detail-box">
+            <div class="gcash-detail-row">
+                <span><?php echo htmlspecialchars($pkg_label); ?></span>
+                <strong><?php echo htmlspecialchars($guest_name); ?></strong>
+            </div>
+            <div class="gcash-detail-row">
+                <span>Total Price</span>
+                <strong>₱<?php echo number_format((float)$booking_total, 2); ?></strong>
+            </div>
+            <div class="gcash-detail-row">
+                <span>Reservation Fee (pay now)</span>
+                <strong class="gcash-amount">₱<?php echo number_format(PaymentService::feeFor($booking_total), 2); ?></strong>
+            </div>
+            <div class="gcash-detail-row">
+                <span>Balance on Arrival</span>
+                <strong>₱<?php echo number_format(max(0, (float)$booking_total - PaymentService::feeFor($booking_total)), 2); ?></strong>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-top:6px;line-height:1.5;">
+                One reservation fee covers the whole package. It is part of the total and non-refundable; paid reservations may be rebooked.
+            </div>
+        </div>
+
+        <div class="gcash-qr-box">
+            <?php if ($qr_exists): ?>
+                <img src="<?php echo htmlspecialchars($qr_path); ?>?v=<?php echo $qr_version; ?>" 
+                     alt="GCash QR Code"
+                     onerror="this.onerror=null; this.src='uploads/gcash/gcash_qr.png?v=<?php echo time(); ?>';">
+            <?php else: ?>
+                <div class="gcash-qr-placeholder">
+                    <i class="fas fa-qrcode"></i>
+                    <small>GCash QR Code not uploaded yet</small>
+                    <small style="font-size:10px; margin-top:4px; color:#94a3b8;">Please contact admin</small>
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <?php if ($gcash_configured): ?>
+        <div class="gcash-account-box">
+            <div class="gcash-account-row">
+                <span>Account Name:</span>
+                <strong><?php echo htmlspecialchars($gcash_name); ?></strong>
+            </div>
+            <div class="gcash-account-row">
+                <span>GCash Number:</span>
+                <strong><?php echo htmlspecialchars($gcash_number); ?></strong>
+            </div>
+        </div>
+        <?php else: ?>
+        <div style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;padding:12px;border-radius:12px;margin:10px 0;font-size:13px;">
+            <strong><i class="fas fa-exclamation-triangle"></i> Payment account configuration required.</strong>
+            The GCash payment details have not been set up yet. Please contact us before sending any payment.
+        </div>
+        <?php endif; ?>
+
+        <div class="gcash-howto-box">
+            <div class="gcash-howto-title">
+                <i class="fas fa-info-circle"></i> How to Pay:
+            </div>
+            <ol class="gcash-howto-list">
+                <li>Open GCash app</li>
+                <li>Click 'Pay QR' or 'Scan QR'</li>
+                <li>Scan the QR code above</li>
+                <li>Enter the reservation fee amount shown</li>
+                <li>Complete the payment</li>
+                <li>Take a screenshot of the transaction</li>
+                <li>Upload screenshot as proof of payment</li>
+            </ol>
+        </div>
+
+        <div class="gcash-status-banner">
+            <i class="fas fa-clock"></i> Status: Pending Admin Confirmation
+        </div>
+
+        <div class="gcash-actions">
+            <a href="profile.php?tab=packages&upload_proof=<?php echo urlencode($booking_ref); ?>" class="gcash-btn-upload">
+                <i class="fas fa-upload"></i> Upload Proof
+            </a>
+            <a href="profile.php?tab=packages" class="gcash-btn-close">
+                <i class="fas fa-times"></i> Close
+            </a>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- CONFIRMATION MODALS -->
+<div class="confirmation-modal-overlay" id="logoutModal">
+    <div class="confirmation-modal">
+        <div class="confirmation-modal-icon">
+            <i class="fas fa-sign-out-alt"></i>
+        </div>
+        <h3>Logout?</h3>
+        <p>Are you sure you want to sign out from your account?</p>
+        <div class="confirmation-modal-actions">
+            <button type="button" class="btn-confirm-no" onclick="closeLogoutModal()">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+            <a href="logout.php" class="btn-confirm-yes">
+                <i class="fas fa-sign-out-alt"></i> Yes, Logout
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="confirmation-modal-overlay" id="clearAllModal">
+    <div class="confirmation-modal">
+        <div class="confirmation-modal-icon">
+            <i class="fas fa-trash-alt"></i>
+        </div>
+        <h3>Clear All Items?</h3>
+        <p>This will remove <strong>all items</strong> from your package. This action cannot be undone.</p>
+        <div class="confirmation-modal-actions">
+            <button type="button" class="btn-confirm-no" onclick="closeClearAllModal()">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+            <a href="?clear=1" class="btn-confirm-yes">
+                <i class="fas fa-trash-alt"></i> Yes, Clear All
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="confirmation-modal-overlay" id="removeItemModal">
+    <div class="confirmation-modal">
+        <div class="confirmation-modal-icon">
+            <i class="fas fa-times-circle"></i>
+        </div>
+        <h3>Remove Item?</h3>
+        <p>Are you sure you want to remove <strong id="removeItemName">this item</strong> from your package?</p>
+        <div class="confirmation-modal-actions">
+            <button type="button" class="btn-confirm-no" onclick="closeRemoveModal()">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+            <a href="#" id="removeItemLink" class="btn-confirm-yes">
+                <i class="fas fa-trash-alt"></i> Yes, Remove
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="modal terms-modal" id="bookingTermsModal">
+    <div class="terms-modal-content">
+        <div class="terms-modal-header">
+            <div class="terms-modal-icon">
+                <i class="fas fa-file-contract"></i>
+            </div>
+            <h3>Booking Terms &amp; Conditions</h3>
+            <p>Please read carefully before confirming</p>
+            <button type="button" class="terms-modal-close" id="bookingTermsCloseBtn" onclick="closeBookingTermsModal()" aria-label="Close">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+
+        <div class="terms-scroll-container" id="bookingTermsScrollContainer">
+            <div class="terms-section">
+                <div class="terms-section-title">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>Important: Reservation Fee &amp; Rebooking</span>
+                </div>
+                <div class="terms-section-body">
+                    <h3>💳 Reservation Fee</h3>
+                    <ul>
+                        <li>A <strong>₱1,000 reservation fee</strong> secures the whole package (one fee per package).</li>
+                        <li>The reservation fee <strong>forms part of the total booking amount</strong>.</li>
+                        <li>The <strong>remaining balance is payable upon arrival</strong> or before the booked service begins.</li>
+                    </ul>
+
+                    <h3>❌ Cancellation</h3>
+                    <ul>
+                        <li><strong>Reservation fees are non-refundable.</strong></li>
+                        <li>Unpaid reservations may be cancelled at no charge.</li>
+                        <li>Paid reservations may be <strong>rebooked</strong> subject to availability and the rebooking rules; the amount already paid is carried forward.</li>
+                        <li>No-shows forfeit the reservation fee.</li>
+                    </ul>
+
+                    <h3>🔄 Rebooking Policy</h3>
+                    <ul>
+                        <li>Packages that are <strong>confirmed or cancelled with money received</strong> may be <strong>rebooked</strong> instead of cancelled. <strong>Completed packages cannot be rebooked.</strong></li>
+                        <li>Rebooking is allowed a maximum of <strong>2 times per booking</strong>, within <strong>7 days from booking date</strong>.</li>
+                        <li>The <strong>amount already paid is carried forward</strong> — no second ₱1,000 reservation fee and no refund.</li>
+                        <li>All items in the package move together by the same number of days; the <strong>number of nights stays the same</strong>.</li>
+                        <li>Rebooking is subject to availability, checked when you choose the new date.</li>
+                    </ul>
+
+                    <h3>📤 Payment Proof</h3>
+                    <ul>
+                        <li>Upload the GCash reference and screenshot of the reservation fee through your profile.</li>
+                        <li>Bookings without a confirmed reservation fee may be cancelled by the owner.</li>
+                    </ul>
+
+                    <h3>👥 Guest Policy</h3>
+                    <ul>
+                        <li>The number of guests must not exceed the <strong>declared pax count</strong>.</li>
+                        <li>All guest names must be <strong>accurate and complete</strong>.</li>
+                        <li>Additional guests beyond the declared pax will not be accommodated.</li>
+                    </ul>
+
+                    <h3>📋 Package Booking</h3>
+                    <ul>
+                        <li>All items in this package (House, Food) will be booked together.</li>
+                        <li>Partial cancellation of package items is <strong>not allowed</strong>.</li>
+                        <li>Changes to any item must be made before confirming.</li>
+                    </ul>
+
+                    <h3>✅ Acknowledgment</h3>
+                    <p>By checking the box below and clicking <strong>"I Understand &amp; Confirm Booking"</strong>, you acknowledge that you have read, understood, and agreed to these terms — including the <strong>non-refundable reservation fee</strong> and the <strong>rebooking policy</strong>.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="terms-scroll-hint" id="bookingTermsScrollHint">
+            <i class="fas fa-arrow-down"></i> Scroll to the bottom to enable the checkbox
+        </div>
+
+        <form method="POST" id="bookingTermsAcceptForm">
+            <label class="terms-checkbox-label" for="booking_terms_agree">
+                <input type="checkbox" id="booking_terms_agree" value="1" disabled>
+                <span class="terms-checkbox-text">
+                    <i class="fas fa-check-circle" style="color: #10b981;"></i>
+                    I understand the <strong>₱1,000 reservation fee is NON-REFUNDABLE</strong> and paid reservations can only be <strong>rebooked</strong>. I accept these terms.
+                </span>
+            </label>
+            <button type="submit" name="confirm_package_booking" class="terms-accept-btn" id="bookingTermsAcceptBtn" disabled>
+                <i class="fas fa-check-circle"></i> I Understand &amp; Confirm Booking
+            </button>
+        </form>
+
+        <p class="terms-modal-footer-note">
+            Your booking will be reviewed by admin after confirmation.
+        </p>
+    </div>
+</div>
+
+<!-- FOOTER -->
+<?php include 'components/footer.php'; ?>
+
+<script>
+const HOUSE_BOOKED_DATES = <?php echo json_encode($house_booked_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const HOUSE_HARD_DATES = <?php echo json_encode($house_hard_dates, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const FOOD_BOOKED_DATES  = <?php echo json_encode($food_booked_dates,  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+// House stay window (null when the package has no house). The server enforces it; this only guides the pickers.
+const PKG_WINDOW = <?php echo json_encode($pkg_window, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const PKG_HOUSE_NAME = <?php echo json_encode($pkg_house_name, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+function pkgDateInWindow(dateStr) {
+    return !PKG_WINDOW || (dateStr >= PKG_WINDOW.start.slice(0, 10) && dateStr <= PKG_WINDOW.end.slice(0, 10));
+}
+// Disable the time slots that fall outside the house stay on the chosen date
+function pkgApplyTimes(selectId, dateStr) {
+    var sel = document.getElementById(selectId);
+    if (!sel || !PKG_WINDOW) return;
+    Array.prototype.forEach.call(sel.options, function (o) {
+        if (!o.value) return;
+        var ok = !dateStr || ((dateStr + ' ' + o.value) >= PKG_WINDOW.start && (dateStr + ' ' + o.value) <= PKG_WINDOW.end);
+        o.disabled = !ok; o.hidden = !ok;
+    });
+    if (sel.value && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
+}
+// Banner + start month of the calendar for the food form
+function pkgShowWindowNote(noteId, label) {
+    var n = document.getElementById(noteId);
+    if (!n) return;
+    if (!PKG_WINDOW) { n.style.display = 'none'; return; }
+    n.innerHTML = '<i class="fas fa-calendar-check"></i> <strong>Stay window:</strong> ' + PKG_WINDOW.start_label + ' to ' + PKG_WINDOW.end_label + '.<br>Your food schedule must be within your house stay period.';
+    n.style.display = 'block';
+}
+const ITEMS_DETAIL = <?php echo json_encode($items_detail, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const CART_DATA = <?php echo json_encode($cart_data_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const hd = document.getElementById('houseDetailModal');
+        if (hd && hd.classList.contains('show')) { closeHouseDetail(); return; }
+        const fb = document.getElementById('overallFeedbackModal');
+        if (fb && fb.classList.contains('show')) closeOverallFeedbackModal();
+    }
+});
+
+function openModal(type, editId) {
+    if (type === 'house') {
+        document.getElementById('houseStep1').style.display = 'block';
+        document.getElementById('houseForm').style.display = 'none';
+    }
+    if (type === 'food') {
+        document.getElementById('foodStep1').style.display = 'block';
+        document.getElementById('foodForm').style.display = 'none';
+    }
+    document.getElementById(type + 'Modal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+
+    if (editId) {
+        setTimeout(function() {
+            const pick = document.querySelector('#' + type + 'Modal .item-pick[data-id="' + editId + '"]');
+            if (pick) pick.click();
+        }, 100);
+    }
+}
+
+function closeModal(type) {
+    document.getElementById(type + 'Modal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+window.addEventListener('click', function(e) {
+    if (e.target.classList.contains('modal')) {
+        if (e.target.id === 'bookingTermsModal') return;
+        e.target.classList.remove('show');
+        document.body.style.overflow = 'auto';
+    }
+});
+
+function openLogoutModal(event) {
+    if (event) event.preventDefault();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
+    document.getElementById('logoutModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeLogoutModal() {
+    document.getElementById('logoutModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const modal = document.getElementById('logoutModal');
+    if (modal) {
+        modal.addEventListener('click', function(e) {
+            if (e.target === this) closeLogoutModal();
+        });
+    }
+});
+
+function openClearAllModal() {
+    document.getElementById('clearAllModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeClearAllModal() {
+    document.getElementById('clearAllModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const modal = document.getElementById('clearAllModal');
+    if (modal) {
+        modal.addEventListener('click', function(e) {
+            if (e.target === this) closeClearAllModal();
+        });
+    }
+});
+
+function openRemoveModal(type, name) {
+    document.getElementById('removeItemName').textContent = name;
+    document.getElementById('removeItemLink').href = '?remove=' + type;
+    document.getElementById('removeItemModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeRemoveModal() {
+    document.getElementById('removeItemModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const modal = document.getElementById('removeItemModal');
+    if (modal) {
+        modal.addEventListener('click', function(e) {
+            if (e.target === this) closeRemoveModal();
+        });
+    }
+});
+
+var __bookingTermsState = { hasReachedBottom: false };
+
+function openBookingTermsModal() {
+    var modal = document.getElementById('bookingTermsModal');
+    if (!modal) return;
+
+    __bookingTermsState.hasReachedBottom = false;
+
+    var acceptForm = document.getElementById('bookingTermsAcceptForm');
+    var scrollHint = document.getElementById('bookingTermsScrollHint');
+    var scrollBox  = document.getElementById('bookingTermsScrollContainer');
+    var checkbox   = document.getElementById('booking_terms_agree');
+    var acceptBtn  = document.getElementById('bookingTermsAcceptBtn');
+
+    scrollHint.style.display = 'block';
+    scrollHint.classList.remove('done');
+    scrollHint.innerHTML = '<i class="fas fa-arrow-down"></i> Scroll to the bottom to enable the checkbox';
+    acceptForm.classList.remove('visible');
+    checkbox.disabled = true;
+    checkbox.checked = false;
+    acceptBtn.disabled = true;
+
+    scrollBox.scrollTop = 0;
+
+    if (scrollBox.dataset.scrollWired !== '1') {
+        scrollBox.dataset.scrollWired = '1';
+        scrollBox.addEventListener('scroll', function() {
+            var atBottom = (scrollBox.scrollTop + scrollBox.clientHeight) >= (scrollBox.scrollHeight - 15);
+            if (atBottom) unlockBookingTermsAcceptForm();
+        });
+    }
+
+    setTimeout(function() {
+        var needsScroll = scrollBox.scrollHeight > scrollBox.clientHeight + 5;
+        if (!needsScroll) unlockBookingTermsAcceptForm();
+    }, 100);
+
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function unlockBookingTermsAcceptForm() {
+    if (__bookingTermsState.hasReachedBottom) return;
+    __bookingTermsState.hasReachedBottom = true;
+
+    var acceptForm = document.getElementById('bookingTermsAcceptForm');
+    var scrollHint = document.getElementById('bookingTermsScrollHint');
+    var checkbox   = document.getElementById('booking_terms_agree');
+
+    acceptForm.classList.add('visible');
+    checkbox.disabled = false;
+
+    scrollHint.classList.add('done');
+    scrollHint.innerHTML = '<i class="fas fa-check-circle"></i> You\'ve read everything. Please check the box below.';
+}
+
+// Footer "Privacy Policy" / "Terms & Conditions" links call this on every page that renders the shared footer
+function reopenTermsModal(tabName) {
+    if (document.getElementById('bookingTermsModal')) {
+        openBookingTermsModal();
+    }
+    return false;
+}
+
+function closeBookingTermsModal() {
+    var modal = document.getElementById('bookingTermsModal');
+    if (modal) modal.classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var checkbox = document.getElementById('booking_terms_agree');
+    var acceptBtn = document.getElementById('bookingTermsAcceptBtn');
+    if (checkbox && acceptBtn) {
+        checkbox.addEventListener('change', function() {
+            acceptBtn.disabled = !checkbox.checked;
+        });
+    }
+});
+
+// ✅ UPDATED: editHouse restores check-in/check-out TIMES
+function editHouse() {
+    if (!CART_DATA || !CART_DATA.house) return;
+    var d = CART_DATA.house;
+
+    openModal('house');
+
+    var pick = document.querySelector('#houseModal .item-pick[data-id="' + d.id + '"]');
+    if (!pick) return;
+
+    setTimeout(function() {
+        pick.click();
+
+        setTimeout(function() {
+            var guestsInput = document.getElementById('h_guests');
+            guestsInput.value = d.guests;
+            document.getElementById('h_max_capacity').textContent = guestsInput.max;
+
+            rebuildGuestNameInputs();
+            if (d.senior_citizens !== null && d.senior_citizens !== undefined) document.getElementById('h_senior_citizens').value = d.senior_citizens;
+            if (d.has_health_condition !== null && d.has_health_condition !== undefined) {
+                var hv = (parseInt(d.has_health_condition, 10) === 1) ? 'yes' : 'no';
+                var hr = document.querySelector('#houseForm input[name="has_health_condition"][value="' + hv + '"]');
+                if (hr) hr.checked = true;
+            }
+            document.getElementById('h_health_details').value = d.health_condition_details || '';
+            toggleHealthDetails();
+            validateSeniorCount(document.getElementById('h_senior_citizens'));
+
+            houseSelectedStart = d.check_in;
+            houseSelectedEnd = d.check_out;
+            document.getElementById('h_check_in').value = d.check_in;
+            document.getElementById('h_check_in_display').value = d.check_in;
+            document.getElementById('h_check_out').value = d.check_out;
+
+            // ✅ Restore times
+            if (d.check_in_time)  document.getElementById('h_check_in_time').value  = d.check_in_time;
+            syncHouseCheckoutTime();   // check-out time follows check-in time
+
+            document.getElementById('houseCalendarInfo').innerHTML =
+                '✅ Stay: <strong>' + formatDateDisplay(d.check_in) + '</strong> → <strong>' + formatDateDisplay(d.check_out) + '</strong>';
+
+            renderHouseCalendar(houseCalMonth, houseCalYear);
+            calcHouseTotal();
+        }, 120);
+    }, 150);
+}
+
+function editFood() {
+    if (!CART_DATA || !CART_DATA.food) return;
+    var d = CART_DATA.food;
+
+    openModal('food');
+
+    var pick = document.querySelector('#foodModal .item-pick[data-id="' + d.id + '"]');
+    if (!pick) return;
+
+    setTimeout(function() {
+        pick.click();
+
+        setTimeout(function() {
+            if (d.size_variant_index !== null && d.size_variant_index !== undefined) {
+                var sizeSelect = document.getElementById('f_size_variant');
+                if (sizeSelect && sizeSelect.options.length > d.size_variant_index) {
+                    sizeSelect.selectedIndex = d.size_variant_index;
+                }
+            }
+            document.getElementById('f_quantity').value = String(d.quantity || 1);
+            calcFoodTotal();
+
+            foodSelectedDate = d.preferred_date;
+            document.getElementById('f_preferred_date').value = d.preferred_date;
+
+            renderFoodCalendar(foodCalMonth, foodCalYear);
+            var infoEl = document.getElementById('foodCalendarInfo');
+            if (infoEl) {
+                infoEl.innerHTML = '✅ Selected: <strong>' + formatDateDisplay(d.preferred_date) + '</strong>';
+                infoEl.classList.add('success');
+            }
+
+            pkgApplyTimes('f_preferred_time', d.preferred_date);
+            document.getElementById('f_preferred_time').value = d.preferred_time;
+
+            var phoneVal = (d.contact_number || '').replace(/^\+63/, '').replace(/^0/, '');
+            document.getElementById('f_contact').value = phoneVal;
+            validatePhone(document.getElementById('f_contact'), 'f_contact_count');
+
+            var radios = document.querySelectorAll('input[name="fulfillment_method"]');
+            radios.forEach(function(r) {
+                r.checked = (r.value === d.fulfillment_method) && !r.disabled;
+            });
+            if (!document.querySelector('input[name="fulfillment_method"]:checked')) {
+                document.querySelector('input[name="fulfillment_method"][value="pickup"]').checked = true;
+            }
+            toggleDelivery();
+
+            document.getElementById('f_special_requests').value = d.special_requests || '';
+        }, 120);
+    }, 150);
+}
+
+var hdImages = [];
+var hdIndex = 0;
+var hdCurrentItemId = 0;
+var hdCurrentItemType = '';
+
+function openItemDetail(detailKey) {
+    var item = ITEMS_DETAIL[detailKey];
+    if (!item) return;
+
+    var numericId = item.id;
+    var itemType = item.type || 'house';
+
+    hdCurrentItemId = numericId;
+    hdCurrentItemType = itemType;
+    hdImages = item.gallery || [];
+    hdIndex = 0;
+
+    document.getElementById('hdName').textContent = item.name;
+    document.getElementById('hdPrice').textContent = '₱' + Number(item.price).toLocaleString('en-US', {minimumFractionDigits: 2});
+    document.getElementById('hdPriceUnit').textContent = item.price_unit || '';
+
+    var tagsHtml = '';
+    if (itemType === 'house') {
+        if (item.capacity) tagsHtml += '<span class="hd-tag green"><i class="fas fa-users"></i> Up to ' + item.capacity + ' pax</span>';
+        if (item.bedrooms) tagsHtml += '<span class="hd-tag"><i class="fas fa-bed"></i> ' + item.bedrooms + ' bedroom' + (item.bedrooms > 1 ? 's' : '') + '</span>';
+        if (item.amenities && item.amenities.length) tagsHtml += '<span class="hd-tag gold"><i class="fas fa-check-circle"></i> ' + item.amenities.length + ' inclusions</span>';
+    } else if (itemType === 'food') {
+        if (item.category) tagsHtml += '<span class="hd-tag gold"><i class="fas fa-tag"></i> ' + escapeHtml(item.category.replace(/_/g, ' ')) + '</span>';
+        if (item.pax_range) tagsHtml += '<span class="hd-tag green"><i class="fas fa-users"></i> ' + escapeHtml(item.pax_range) + '</span>';
+        if (item.variations && item.variations.length) tagsHtml += '<span class="hd-tag"><i class="fas fa-box"></i> ' + item.variations.length + ' sizes available</span>';
+    }
+    document.getElementById('hdQuickTags').innerHTML = tagsHtml;
+
+    var desc = (item.description || '').trim();
+    if (desc) {
+        document.getElementById('hdDescSection').style.display = 'block';
+        document.getElementById('hdDescription').textContent = desc;
+    } else {
+        document.getElementById('hdDescSection').style.display = 'none';
+    }
+
+    var specsHtml = '';
+    if (itemType === 'house') {
+        specsHtml += '<div class="hd-spec-item"><i class="fas fa-users"></i><span class="hd-spec-value">' + (item.capacity || '—') + '</span><span class="hd-spec-label">Max Pax</span></div>';
+        specsHtml += '<div class="hd-spec-item"><i class="fas fa-bed"></i><span class="hd-spec-value">' + (item.bedrooms || '—') + '</span><span class="hd-spec-label">Bedrooms</span></div>';
+        specsHtml += '<div class="hd-spec-item"><i class="fas fa-tag"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Per Night</span></div>';
+    } else if (itemType === 'food') {
+        if (item.category) specsHtml += '<div class="hd-spec-item"><i class="fas fa-tag"></i><span class="hd-spec-value">' + escapeHtml(item.category.replace(/_/g, ' ')) + '</span><span class="hd-spec-label">Category</span></div>';
+        if (item.pax_range) specsHtml += '<div class="hd-spec-item"><i class="fas fa-users"></i><span class="hd-spec-value">' + escapeHtml(item.pax_range) + '</span><span class="hd-spec-label">Pax Range</span></div>';
+        if (item.variations && item.variations.length) specsHtml += '<div class="hd-spec-item"><i class="fas fa-box"></i><span class="hd-spec-value">' + item.variations.length + '</span><span class="hd-spec-label">Sizes</span></div>';
+        specsHtml += '<div class="hd-spec-item"><i class="fas fa-money-bill-wave"></i><span class="hd-spec-value">₱' + Number(item.price).toLocaleString() + '</span><span class="hd-spec-label">Base Price</span></div>';
+    }
+    document.getElementById('hdSpecs').innerHTML = specsHtml;
+    document.getElementById('hdSpecsSection').style.display = specsHtml ? 'block' : 'none';
+
+    if (itemType === 'food' && item.variations && item.variations.length > 0) {
+        var varHtml = '';
+        item.variations.forEach(function(v) {
+            varHtml += '<div class="hd-variation">';
+            varHtml += '<span class="hd-var-label">' + escapeHtml(v.size || 'Size') + (v.pax ? ' <small>(' + escapeHtml(v.pax) + ')</small>' : '') + '</span>';
+            varHtml += '<span class="hd-var-price">₱' + Number(v.price).toLocaleString('en-US', {minimumFractionDigits: 2}) + '</span>';
+            varHtml += '</div>';
+        });
+        document.getElementById('hdVariations').innerHTML = varHtml;
+        document.getElementById('hdVariationsSection').style.display = 'block';
+    } else {
+        document.getElementById('hdVariationsSection').style.display = 'none';
+    }
+
+    var amenHtml = '';
+    var amenTitle = 'Inclusions & Amenities';
+    if (itemType === 'food') amenTitle = 'What\'s Included';
+    document.getElementById('hdAmenitiesTitle').innerHTML = '<i class="fas fa-check-circle"></i> ' + amenTitle;
+
+    if (item.amenities && item.amenities.length > 0) {
+        item.amenities.forEach(function(a) {
+            if (!a) return;
+            var icon = getAmenityIcon(a);
+            amenHtml += '<div class="hd-amenity"><i class="fas ' + icon + '"></i><span>' + escapeHtml(a) + '</span></div>';
+        });
+        document.getElementById('hdAmenitiesSection').style.display = 'block';
+    } else {
+        document.getElementById('hdAmenitiesSection').style.display = 'none';
+    }
+    document.getElementById('hdAmenities').innerHTML = amenHtml;
+
+    renderHdGallery();
+
+    var selectBtn = document.getElementById('hdSelectBtn');
+    if (itemType === 'house') {
+        selectBtn.className = 'btn-hd-select';
+        selectBtn.innerHTML = '<i class="fas fa-plus-circle"></i> Select This House';
+    } else if (itemType === 'food') {
+        selectBtn.className = 'btn-hd-select food';
+        selectBtn.innerHTML = '<i class="fas fa-plus-circle"></i> Select This Food';
+    }
+
+    selectBtn.onclick = function() {
+        closeHouseDetail();
+        setTimeout(function() {
+            var modalId = itemType + 'Modal';
+            var pick = document.querySelector('#' + modalId + ' .item-pick[data-id="' + numericId + '"]');
+            if (pick) {
+                if (!document.getElementById(modalId).classList.contains('show')) {
+                    openModal(itemType);
+                }
+                setTimeout(function() { pick.click(); }, 80);
+            }
+        }, 200);
+    };
+
+    document.getElementById('houseDetailModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function renderHdGallery() {
+    var mainImg = document.getElementById('hdMainImage');
+    var counter = document.getElementById('hdCounter');
+    var thumbsBox = document.getElementById('hdThumbs');
+
+    if (!hdImages || hdImages.length === 0) {
+        mainImg.src = 'https://via.placeholder.com/900x500/0B2447/ffffff?text=No+Photos';
+        counter.textContent = '0 / 0';
+        thumbsBox.innerHTML = '';
+        return;
+    }
+
+    mainImg.src = hdImages[hdIndex];
+    counter.textContent = (hdIndex + 1) + ' / ' + hdImages.length;
+
+    thumbsBox.innerHTML = '';
+    hdImages.forEach(function(img, idx) {
+        var t = document.createElement('img');
+        t.src = img;
+        t.className = 'hd-thumb' + (idx === hdIndex ? ' active' : '');
+        t.onclick = function() { hdIndex = idx; renderHdGallery(); };
+        thumbsBox.appendChild(t);
+    });
+}
+
+function changeHdImage(dir) {
+    if (!hdImages || hdImages.length === 0) return;
+    hdIndex += dir;
+    if (hdIndex < 0) hdIndex = hdImages.length - 1;
+    if (hdIndex >= hdImages.length) hdIndex = 0;
+    renderHdGallery();
+}
+
+function closeHouseDetail() {
+    document.getElementById('houseDetailModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+}
+
+function getAmenityIcon(amenity) {
+    var a = amenity.toLowerCase();
+    if (a.indexOf('aircon') !== -1 || a.indexOf('air conditioning') !== -1) return 'fa-snowflake';
+    if (a.indexOf('bed') !== -1) return 'fa-bed';
+    if (a.indexOf('kitchen') !== -1) return 'fa-utensils';
+    if (a.indexOf('parking') !== -1) return 'fa-parking';
+    if (a.indexOf('wifi') !== -1 || a.indexOf('wi-fi') !== -1) return 'fa-wifi';
+    if (a.indexOf('tv') !== -1) return 'fa-tv';
+    if (a.indexOf('pool') !== -1) return 'fa-swimmer';
+    if (a.indexOf('boat') !== -1) return 'fa-ship';
+    if (a.indexOf('bathroom') !== -1) return 'fa-bath';
+    if (a.indexOf('shower') !== -1) return 'fa-shower';
+    if (a.indexOf('meal') !== -1 || a.indexOf('food') !== -1) return 'fa-utensils';
+    if (a.indexOf('guide') !== -1) return 'fa-user-tie';
+    if (a.indexOf('life') !== -1 || a.indexOf('vest') !== -1) return 'fa-life-ring';
+    if (a.indexOf('snorkel') !== -1) return 'fa-mask';
+    if (a.indexOf('island') !== -1) return 'fa-umbrella-beach';
+    return 'fa-check-circle';
+}
+
+function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+var houseCalMonth = new Date().getMonth();
+var houseCalYear = new Date().getFullYear();
+var houseSelectedStart = null;
+var houseSelectedEnd = null;
+var houseCurrentBooked = [];
+var houseCurrentHard = [];   // Phase 7.9.1: hard full-day blocks (also refused as a check-out day)
+var currentHousePrice = 0;
+var currentHouseCapacity = 20;
+
+function selectHouse(el) {
+    var price = parseFloat(el.dataset.price);
+    var id = el.dataset.id;
+    currentHousePrice = price;
+    currentHouseCapacity = parseInt(el.dataset.capacity) || 20;
+
+    document.getElementById('h_house_id').value = id;
+    document.getElementById('h_display_house').value = el.dataset.name;
+    document.getElementById('h_display_price').value = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2});
+
+    document.getElementById('houseStep1').style.display = 'none';
+    document.getElementById('houseForm').style.display = 'block';
+
+    houseCurrentBooked = HOUSE_BOOKED_DATES[id] || [];
+    houseCurrentHard = (typeof HOUSE_HARD_DATES !== 'undefined' && HOUSE_HARD_DATES[id]) || [];
+    houseSelectedStart = null;
+    houseSelectedEnd = null;
+    document.getElementById('h_check_in').value = '';
+    document.getElementById('h_check_in_display').value = '';
+    document.getElementById('h_check_out').value = '';
+    document.getElementById('h_guests').value = '';
+    document.getElementById('h_display_days').textContent = '0';
+    document.getElementById('h_display_nights').textContent = '0';
+    document.getElementById('h_display_total').textContent = '0.00';
+
+    // ✅ Reset times to defaults
+    document.getElementById('h_check_in_time').value = '14:00';
+    document.getElementById('h_check_out_time').value = '14:00';
+
+    document.getElementById('houseCalendarInfo').textContent = 'Click a date to pick your check-in. Then click your check-out.';
+
+    document.getElementById('h_guests').max = currentHouseCapacity;
+    document.getElementById('h_max_capacity').textContent = currentHouseCapacity;
+
+    resetGroupInfo();
+    rebuildGuestNameInputs();
+
+    var today = new Date();
+    houseCalMonth = today.getMonth();
+    houseCalYear = today.getFullYear();
+    renderHouseCalendar(houseCalMonth, houseCalYear);
+}
+
+function backToHouseList() {
+    document.getElementById('houseStep1').style.display = 'block';
+    document.getElementById('houseForm').style.display = 'none';
+}
+
+// ---- Green "available" dates for the package house calendar: asked from the server so they follow the real rules.
+// Nothing is green until the answer arrives; confirming the package re-validates everything on the server.
+var hGreenCache = {};
+function hGreenKey(year, month) {
+    var t = (document.getElementById('h_check_in_time') || {}).value || '14:00';
+    return (document.getElementById('h_house_id').value || '0') + '|' + year + '-' + String(month + 1).padStart(2, '0') + '|' + t;
+}
+function hGreenIsFree(dateStr) {
+    var m = hGreenCache[hGreenKey(parseInt(dateStr.slice(0, 4), 10), parseInt(dateStr.slice(5, 7), 10) - 1)];
+    return !!m && typeof m === 'object' && !m[dateStr];
+}
+function hLoadGreen(month, year) {
+    var id = document.getElementById('h_house_id').value, k = hGreenKey(year, month);
+    if (!id || Object.prototype.hasOwnProperty.call(hGreenCache, k)) return;
+    hGreenCache[k] = false;                      // in flight / failed => nothing is green
+    var t = (document.getElementById('h_check_in_time') || {}).value || '14:00';
+    fetch('packages.php?ajax=avail_month&type=house&id=' + encodeURIComponent(id) + '&ym=' + year + '-' + String(month + 1).padStart(2, '0') + '&time=' + encodeURIComponent(t), { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+            if (j && j.ok && j.days && typeof j.days === 'object') { hGreenCache[k] = j.days; if (k === hGreenKey(houseCalYear, houseCalMonth)) renderHouseCalendar(houseCalMonth, houseCalYear); }
+        })
+        .catch(function () { /* stays not-green */ });
+}
+document.addEventListener('DOMContentLoaded', function () {
+    var ti = document.getElementById('h_check_in_time');
+    if (ti) { var rg = function () { if (document.getElementById('h_house_id').value) renderHouseCalendar(houseCalMonth, houseCalYear); }; ti.addEventListener('change', rg); ti.addEventListener('input', rg); }
+});
+
+function renderHouseCalendar(month, year) {
+    var firstDay = new Date(year, month, 1).getDay();
+    var daysInMonth = new Date(year, month + 1, 0).getDate();
+    var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    document.getElementById('houseCalendarMonthYear').textContent = monthNames[month] + ' ' + year;
+
+    var grid = document.getElementById('houseCalendarGrid');
+    grid.innerHTML = '';
+
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(n) {
+        var d = document.createElement('div'); d.className = 'day-name'; d.textContent = n; grid.appendChild(d);
+    });
+
+    var today = new Date(); today.setHours(0,0,0,0);
+    for (var i = 0; i < firstDay; i++) {
+        var e = document.createElement('div'); e.className = 'day disabled'; grid.appendChild(e);
+    }
+
+    var startObj = houseSelectedStart ? new Date(houseSelectedStart + 'T00:00:00') : null;
+    var endObj = houseSelectedEnd ? new Date(houseSelectedEnd + 'T00:00:00') : null;
+
+    for (var day = 1; day <= daysInMonth; day++) {
+        var dateObj = new Date(year, month, day);
+        var dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+        var d = document.createElement('div');
+        d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
+
+        if (dateObj < today) d.classList.add('past');
+        if (houseCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        // green = the server (AvailabilityService, via ?ajax=avail_month) says a stay can START on this night at the chosen check-in time
+        if (!d.classList.contains('past') && !d.classList.contains('booked') && hGreenIsFree(dateStr)) d.classList.add('available');
+
+        if (houseSelectedStart === dateStr || houseSelectedEnd === dateStr) d.classList.add('selected');
+        else if (startObj && endObj && dateObj > startObj && dateObj < endObj) d.classList.add('in-range');
+
+        d.onclick = function() { selectHouseDate(this); };
+        grid.appendChild(d);
+    }
+    hLoadGreen(month, year);
+}
+
+function changeHouseMonth(delta) {
+    houseCalMonth += delta;
+    if (houseCalMonth < 0) { houseCalMonth = 11; houseCalYear--; }
+    else if (houseCalMonth > 11) { houseCalMonth = 0; houseCalYear++; }
+    renderHouseCalendar(houseCalMonth, houseCalYear);
+}
+
+function selectHouseDate(el) {
+    var date = el.dataset.date;
+    if (!date) return;
+    // A booked night can still be chosen as the CHECK-OUT day (12 NN check-out / 2 PM check-in);
+    // the nights in between are checked below.
+    var asCheckOut = !!(houseSelectedStart && !houseSelectedEnd && date > houseSelectedStart);
+    if (el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('booked') && !asCheckOut) return;
+    var pickedDate = new Date(date + 'T00:00:00');
+
+    if (houseSelectedStart === date && !houseSelectedEnd) {
+        houseSelectedStart = null;
+        document.getElementById('h_check_in').value = '';
+        document.getElementById('h_check_in_display').value = '';
+        document.getElementById('h_check_out').value = '';
+        document.getElementById('h_display_days').textContent = '0';
+        document.getElementById('h_display_nights').textContent = '0';
+        document.getElementById('h_display_total').textContent = '0.00';
+        document.getElementById('h_total_price').value = 0;
+        document.getElementById('houseCalendarInfo').innerHTML = 'Select check-in date';
+        renderHouseCalendar(houseCalMonth, houseCalYear);
+        return;
+    }
+
+    if (houseSelectedEnd === date && houseSelectedStart) {
+        houseSelectedEnd = null;
+        document.getElementById('h_check_out').value = '';
+        document.getElementById('h_display_days').textContent = '0';
+        document.getElementById('h_display_nights').textContent = '0';
+        document.getElementById('h_display_total').textContent = '0.00';
+        document.getElementById('h_total_price').value = 0;
+        document.getElementById('houseCalendarInfo').innerHTML = '✅ Check-in: <strong>' + formatDateDisplay(houseSelectedStart) + '</strong> — now click a later date for check-out';
+        renderHouseCalendar(houseCalMonth, houseCalYear);
+        return;
+    }
+
+    if (!houseSelectedStart || (houseSelectedStart && houseSelectedEnd)) {
+        houseSelectedStart = date;
+        houseSelectedEnd = null;
+        document.getElementById('h_check_in').value = date;
+        document.getElementById('h_check_in_display').value = date;
+        document.getElementById('h_check_out').value = '';
+        document.getElementById('h_display_days').textContent = '0';
+        document.getElementById('h_display_nights').textContent = '0';
+        document.getElementById('h_display_total').textContent = '0.00';
+        document.getElementById('h_total_price').value = 0;
+        document.getElementById('houseCalendarInfo').innerHTML = '✅ Check-in: <strong>' + formatDateDisplay(date) + '</strong> — now click a later date for check-out';
+        renderHouseCalendar(houseCalMonth, houseCalYear);
+        return;
+    }
+
+    var startObj = new Date(houseSelectedStart + 'T00:00:00');
+    if (pickedDate <= startObj) { alert('❌ Check-out must be after check-in. Please pick a later date.'); return; }
+
+    var conflictDate = '';
+    for (var d = new Date(startObj); d < pickedDate; d.setDate(d.getDate() + 1)) {
+        var dStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+        if (houseCurrentBooked.indexOf(dStr) !== -1) { conflictDate = dStr; break; }
+    }
+    if (conflictDate) { alert('❌ Your stay range includes a booked date (' + conflictDate + '). Please choose different dates.'); return; }
+    if (houseCurrentHard.indexOf(date) !== -1) { alert('❌ ' + formatDateDisplay(date) + ' is not available, so it cannot be your check-out day. Please choose different dates.'); return; }
+
+    houseSelectedEnd = date;
+    document.getElementById('h_check_out').value = date;
+    document.getElementById('houseCalendarInfo').innerHTML = '✅ Stay: <strong>' + formatDateDisplay(houseSelectedStart) + '</strong> → <strong>' + formatDateDisplay(date) + '</strong>';
+    renderHouseCalendar(houseCalMonth, houseCalYear);
+    calcHouseTotal();
+}
+
+function formatDateDisplay(dateStr) {
+    if (!dateStr) return '';
+    var p = dateStr.split('-');
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return monthNames[parseInt(p[1]) - 1] + ' ' + parseInt(p[2]) + ', ' + p[0];
+}
+
+function calcHouseTotal() {
+    var checkIn = document.getElementById('h_check_in').value;
+    var checkOut = document.getElementById('h_check_out').value;
+    if (!checkIn || !checkOut || !currentHousePrice) {
+        document.getElementById('h_display_days').textContent = '0';
+        document.getElementById('h_display_nights').textContent = '0';
+        document.getElementById('h_display_total').textContent = '0.00';
+        document.getElementById('h_total_price').value = 0;
+        return;
+    }
+
+    var startUTC = Date.UTC.apply(null, checkIn.split('-').map(Number).map((v,i)=>i===1?v-1:v));
+    var endUTC = Date.UTC.apply(null, checkOut.split('-').map(Number).map((v,i)=>i===1?v-1:v));
+    var nights = Math.round((endUTC - startUTC) / (1000*60*60*24));
+
+    if (nights <= 0) {
+        document.getElementById('h_display_days').textContent = '0';
+        document.getElementById('h_display_nights').textContent = '0';
+        document.getElementById('h_display_total').textContent = '0.00';
+        document.getElementById('h_total_price').value = 0;
+        return;
+    }
+    var days = nights + 1;
+    var total = currentHousePrice * nights;
+
+    document.getElementById('h_nights').value = nights;
+    document.getElementById('h_display_days').textContent = days;
+    document.getElementById('h_display_nights').textContent = nights;
+    document.getElementById('h_total_price').value = total;
+    document.getElementById('h_display_total').textContent = total.toLocaleString('en-US', {minimumFractionDigits: 2});
+}
+
+function validatePax(input) {
+    let raw = input.value.trim();
+    if (raw === '') { rebuildGuestNameInputs(); return; }
+    let val = parseInt(raw);
+    let maxCap = currentHouseCapacity || 20;
+    if (isNaN(val) || val < 1) input.value = 1;
+    else if (val > maxCap) { input.value = maxCap; alert('Maximum of ' + maxCap + ' guests allowed for this house.'); }
+    rebuildGuestNameInputs();
+    calcHouseTotal();
+}
+
+// Group details (replaces the individual guest-name inputs)
+function rebuildGuestNameInputs() {   // kept name: called whenever the pax changes
+    const pax = parseInt((document.getElementById('h_guests') || {}).value) || 0;
+    const senior = document.getElementById('h_senior_citizens');
+    if (!senior) return;
+    senior.max = pax > 0 ? pax : 20;
+    validateSeniorCount(senior);
+}
+function validateSeniorCount(input) {
+    const help = document.getElementById('seniorHelp');
+    const pax = parseInt((document.getElementById('h_guests') || {}).value) || 0;
+    const raw = String(input.value).trim();
+    let msg = '';
+    if (raw !== '' && !/^[0-9]{1,3}$/.test(raw)) msg = 'Enter a whole number (0 or more).';
+    else if (raw !== '' && pax > 0 && parseInt(raw, 10) > pax) msg = 'Senior citizens cannot exceed the number of guests (' + pax + ').';
+    input.classList.toggle('invalid', msg !== '');
+    if (help) {
+        help.classList.toggle('error', msg !== '');
+        help.innerHTML = msg ? '<i class="fas fa-exclamation-circle"></i> ' + msg
+            : '<i class="fas fa-info-circle"></i> Senior citizens (60 years old and above) included in your number of pax. Cannot exceed the number of guests.';
+    }
+    return msg === '';
+}
+function toggleHealthDetails() {
+    const yes = document.querySelector('#houseForm input[name="has_health_condition"][value="yes"]');
+    const wrap = document.getElementById('healthDetailsWrap');
+    if (wrap) wrap.style.display = (yes && yes.checked) ? 'block' : 'none';
+}
+function resetGroupInfo() {
+    const senior = document.getElementById('h_senior_citizens');
+    if (senior) { senior.value = ''; senior.classList.remove('invalid'); }
+    document.querySelectorAll('#houseForm input[name="has_health_condition"]').forEach(function(r) { r.checked = false; });
+    const d = document.getElementById('h_health_details');
+    if (d) d.value = '';
+    toggleHealthDetails();
+}
+
+var foodCalMonth = new Date().getMonth();
+var foodCalYear = new Date().getFullYear();
+var foodSelectedDate = null;
+var foodCurrentBooked = [];
+var selectedFood = null;
+var selectedFoodVariations = [];
+
+function selectFood(el) {
+    selectedFood = { id: el.dataset.id, name: el.dataset.name, price: parseFloat(el.dataset.price) };
+    try { selectedFoodVariations = JSON.parse(el.dataset.variations || '[]'); } catch (e) { selectedFoodVariations = []; }
+
+    document.getElementById('f_food_id').value = selectedFood.id;
+    document.getElementById('f_display_name').value = selectedFood.name;
+    document.getElementById('f_quantity').value = '1';
+
+    var sizeGroup = document.getElementById('f_size_group');
+    var sizeSelect = document.getElementById('f_size_variant');
+
+    if (selectedFoodVariations.length > 0) {
+        sizeGroup.style.display = 'block';
+        sizeSelect.innerHTML = '';
+        selectedFoodVariations.forEach(function(v, idx) {
+            var opt = document.createElement('option');
+            opt.value = idx;
+            opt.dataset.price = v.price;
+            opt.textContent = v.size + (v.pax ? ' (' + v.pax + ')' : '') + ' - ₱' + parseFloat(v.price).toLocaleString('en-US', {minimumFractionDigits: 2});
+            sizeSelect.appendChild(opt);
+        });
+        document.getElementById('f_display_price').value = '₱' + parseFloat(selectedFoodVariations[0].price).toLocaleString('en-US', {minimumFractionDigits: 2});
+    } else {
+        sizeGroup.style.display = 'none';
+        document.getElementById('f_display_price').value = '₱' + selectedFood.price.toLocaleString('en-US', {minimumFractionDigits: 2});
+    }
+
+    document.getElementById('foodStep1').style.display = 'none';
+    document.getElementById('foodForm').style.display = 'block';
+
+    foodCurrentBooked = FOOD_BOOKED_DATES[selectedFood.id] || [];
+    foodSelectedDate = null;
+    document.getElementById('f_preferred_date').value = '';
+    document.getElementById('f_preferred_time').value = '';
+    document.getElementById('f_contact').value = '';
+    document.getElementById('f_contact_count').textContent = '0/10';
+    document.getElementById('f_contact_count').classList.remove('complete');
+    document.getElementById('f_delivery_address').value = '';
+    document.querySelector('input[name="fulfillment_method"][value="pickup"]').checked = true;
+    toggleDelivery();
+
+    var today = new Date();
+    foodCalMonth = today.getMonth();
+    foodCalYear = today.getFullYear();
+    if (PKG_WINDOW) { var _w = PKG_WINDOW.start.split(/[- ]/); foodCalMonth = parseInt(_w[1], 10) - 1; foodCalYear = parseInt(_w[0], 10); }
+    pkgShowWindowNote('f_window_note', 'food');
+    pkgApplyTimes('f_preferred_time', '');
+    renderFoodCalendar(foodCalMonth, foodCalYear);
+    calcFoodTotal();
+}
+
+function backToFoodList() {
+    document.getElementById('foodStep1').style.display = 'block';
+    document.getElementById('foodForm').style.display = 'none';
+}
+
+function renderFoodCalendar(month, year) {
+    var firstDay = new Date(year, month, 1).getDay();
+    var daysInMonth = new Date(year, month + 1, 0).getDate();
+    var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    document.getElementById('foodCalendarMonthYear').textContent = monthNames[month] + ' ' + year;
+
+    var grid = document.getElementById('foodCalendarGrid');
+    grid.innerHTML = '';
+
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(n) {
+        var d = document.createElement('div'); d.className = 'day-name'; d.textContent = n; grid.appendChild(d);
+    });
+
+    var today = new Date(); today.setHours(0,0,0,0);
+    for (var i = 0; i < firstDay; i++) {
+        var e = document.createElement('div'); e.className = 'day disabled'; grid.appendChild(e);
+    }
+
+    for (var day = 1; day <= daysInMonth; day++) {
+        var dateObj = new Date(year, month, day);
+        var dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+        var d = document.createElement('div');
+        d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
+
+        if (dateObj < today) d.classList.add('past');
+        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
+        if (foodCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        if (!d.classList.contains('past') && !d.classList.contains('booked')) d.classList.add('available');   // green = bookable day (guest calendar)
+        if (foodSelectedDate === dateStr) d.classList.add('selected');
+
+        d.onclick = function() { selectFoodDate(this); };
+        grid.appendChild(d);
+    }
+}
+
+function changeFoodMonth(delta) {
+    foodCalMonth += delta;
+    if (foodCalMonth < 0) { foodCalMonth = 11; foodCalYear--; }
+    else if (foodCalMonth > 11) { foodCalMonth = 0; foodCalYear++; }
+    renderFoodCalendar(foodCalMonth, foodCalYear);
+}
+
+function selectFoodDate(el) {
+    if (el.classList.contains('booked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
+    var date = el.dataset.date;
+    if (!date) return;
+
+    if (foodSelectedDate === date) {
+        foodSelectedDate = null; el.classList.remove('selected');
+        document.getElementById('f_preferred_date').value = '';
+        document.getElementById('foodCalendarInfo').textContent = 'Select a date for your food order';
+        document.getElementById('foodCalendarInfo').classList.remove('success');
+        pkgApplyTimes('f_preferred_time', '');
+        return;
+    }
+
+    document.querySelectorAll('#foodCalendarGrid .day.selected').forEach(function(d) { d.classList.remove('selected'); });
+
+    foodSelectedDate = date; el.classList.add('selected');
+    document.getElementById('f_preferred_date').value = date;
+    document.getElementById('foodCalendarInfo').innerHTML = '✅ Selected: <strong>' + formatDateDisplay(date) + '</strong>';
+    document.getElementById('foodCalendarInfo').classList.add('success');
+    pkgApplyTimes('f_preferred_time', date);
+}
+
+function calcFoodTotal() {
+    var price = selectedFood ? selectedFood.price : 0;
+    if (selectedFoodVariations.length > 0) {
+        var sizeSelect = document.getElementById('f_size_variant');
+        var opt = sizeSelect.options[sizeSelect.selectedIndex];
+        if (opt && opt.dataset.price) price = parseFloat(opt.dataset.price);
+    }
+    document.getElementById('f_display_price').value = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2});
+    // Display only: the server recalculates size price x quantity from the database and ignores this value.
+    var q = foodQtyState();
+    var total = q.ok ? Math.round(price * q.n * 100) / 100 : 0;
+    document.getElementById('f_total_price').value = total;
+    document.getElementById('f_price_display').textContent = '₱' + total.toLocaleString('en-US', {minimumFractionDigits: 2});
+    var ql = document.getElementById('f_qtyline');
+    if (ql) ql.textContent = '₱' + price.toLocaleString('en-US', {minimumFractionDigits: 2}) + ' × ' + (q.ok ? q.n : '—');
+    var qe = document.getElementById('f_qty_error');
+    if (qe) { qe.textContent = q.ok ? '' : q.msg; qe.classList.toggle('show', !q.ok); }
+}
+
+// Quantity: whole numbers 1..FOOD_MAX_QTY only (the server re-validates).
+var FOOD_MAX_QTY = <?php echo (int)PaymentService::FOOD_MAX_QUANTITY; ?>;
+function foodQtyState() {
+    var v = (document.getElementById('f_quantity').value || '').trim();
+    if (!/^[1-9][0-9]*$/.test(v)) return {ok: false, msg: 'Quantity must be a whole number of at least 1.'};
+    var n = parseInt(v, 10);
+    if (n > FOOD_MAX_QTY) return {ok: false, msg: 'Quantity cannot be more than ' + FOOD_MAX_QTY + '.'};
+    return {ok: true, n: n};
+}
+function stepFoodQty(delta) {
+    var q = foodQtyState();
+    var n = Math.min(FOOD_MAX_QTY, Math.max(1, (q.ok ? q.n : 1) + delta));
+    document.getElementById('f_quantity').value = String(n);
+    calcFoodTotal();
+}
+(function setupFoodQuantityInput() {
+    var el = document.getElementById('f_quantity');
+    if (!el) return;
+    el.addEventListener('beforeinput', function (e) { if (e.data && !/^[0-9]+$/.test(e.data)) e.preventDefault(); });
+    el.addEventListener('paste', function (e) {
+        var txt = (e.clipboardData || window.clipboardData).getData('text').trim();
+        if (!/^[0-9]+$/.test(txt)) e.preventDefault();
+    });
+    el.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowUp') { e.preventDefault(); stepFoodQty(1); }
+        if (e.key === 'ArrowDown') { e.preventDefault(); stepFoodQty(-1); }
+    });
+    el.addEventListener('input', function () {
+        var v = el.value.replace(/[^0-9]/g, '');
+        if (v.length > 1) v = v.replace(/^0+/, '') || '0';
+        if (v !== el.value) el.value = v;
+        calcFoodTotal();
+    });
+    el.addEventListener('blur', function () {
+        if (!foodQtyState().ok) el.value = (parseInt(el.value, 10) > FOOD_MAX_QTY) ? String(FOOD_MAX_QTY) : '1';
+        calcFoodTotal();
+    });
+})();
+
+function toggleDelivery() {
+    var method = document.querySelector('input[name="fulfillment_method"]:checked');
+    if (!method) return;
+    var group = document.getElementById('f_delivery_group');
+    var addr = document.getElementById('f_delivery_address');
+    var auto = document.getElementById('f_delivery_auto');
+    if (method.value === 'delivery' && PKG_HOUSE_NAME) {
+        // house in the package: the booked house/unit is the delivery location, nothing to type
+        group.style.display = 'none'; addr.required = false; addr.value = '';
+        document.getElementById('f_delivery_auto_name').textContent = PKG_HOUSE_NAME;
+        if (auto) auto.style.display = 'block';
+        return;
+    }
+    if (auto) auto.style.display = 'none';
+    group.style.display = 'none'; addr.required = false; addr.value = '';
+}
+
+function validatePhone(input, counterId) {
+    let cleaned = input.value.replace(/[^0-9]/g, '');
+    if (cleaned.length > 10) cleaned = cleaned.slice(0, 10);
+    if (cleaned.startsWith('0')) cleaned = cleaned.substring(1);
+    if (input.value !== cleaned) input.value = cleaned;
+    const counter = document.getElementById(counterId);
+    if (counter) {
+        counter.textContent = cleaned.length + '/10';
+        counter.classList.toggle('complete', cleaned.length === 10);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+});
+
+document.getElementById('foodForm').addEventListener('submit', function(e) {
+    var date = document.getElementById('f_preferred_date').value;
+    if (!date) { e.preventDefault(); alert('Please select a preferred date from the calendar.'); return false; }
+    var time = document.getElementById('f_preferred_time').value;
+    if (!time) { e.preventDefault(); alert('Please select a preferred time slot.'); return false; }
+    var contact = document.getElementById('f_contact').value;
+    if (!/^[0-9]{10}$/.test(contact)) { e.preventDefault(); alert('PH mobile number must be exactly 10 digits (e.g., 9123456789).'); return false; }
+    var qty = foodQtyState();
+    if (!qty.ok) { e.preventDefault(); alert(qty.msg); document.getElementById('f_quantity').focus(); return false; }
+    var method = document.querySelector('input[name="fulfillment_method"]:checked').value;
+    if (method === 'delivery' && !PKG_HOUSE_NAME) { e.preventDefault(); alert('Delivery requires a selected house because the order will be delivered to your booked unit. Please choose Pickup.'); return false; }
+    return true;
+});
+
+// ✅ UPDATED: houseForm submit validates times too
+// Business rule: check-out TIME always follows check-in TIME (the date still follows the nights).
+function syncHouseCheckoutTime() {
+    var i = document.getElementById('h_check_in_time'), o = document.getElementById('h_check_out_time');
+    if (i && o) o.value = i.value;
+}
+
+document.getElementById('houseForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    var date = document.getElementById('h_check_in').value;
+    if (!date) { alert('Please select a check-in date from the calendar.'); return false; }
+    var checkOut = document.getElementById('h_check_out').value;
+    if (!checkOut) { alert('Please select a check-out date from the calendar.'); return false; }
+
+    syncHouseCheckoutTime();
+    var checkInTime = document.getElementById('h_check_in_time').value;
+    var checkOutTime = document.getElementById('h_check_out_time').value;
+    if (!checkInTime) { alert('Please select a check-in time.'); document.getElementById('h_check_in_time').focus(); return false; }
+    if (!checkOutTime) { alert('Please select a check-out time.'); document.getElementById('h_check_out_time').focus(); return false; }
+
+    var paxRaw = document.getElementById('h_guests').value.trim();
+    var pax = parseInt(paxRaw);
+    if (paxRaw === '' || isNaN(pax) || pax < 1) {
+        alert('Please enter a valid number of guests (minimum 1).');
+        document.getElementById('h_guests').focus();
+        return false;
+    }
+    if (pax > currentHouseCapacity) {
+        alert('Maximum of ' + currentHouseCapacity + ' guests allowed for this house.');
+        document.getElementById('h_guests').focus();
+        return false;
+    }
+
+    var seniorEl = document.getElementById('h_senior_citizens');
+    if (seniorEl.value.trim() === '') { alert('Please enter the number of senior citizens in your group (0 if none).'); seniorEl.focus(); return false; }
+    if (!validateSeniorCount(seniorEl)) { alert('Senior citizens must be a whole number from 0 to ' + pax + ' (cannot exceed the number of guests).'); seniorEl.focus(); return false; }
+    if (!document.querySelector('#houseForm input[name="has_health_condition"]:checked')) { alert('Please answer whether any guest has a health condition (Yes or No).'); return false; }
+
+    this.submit();
+    return true;
+});
+
+<?php if (isset($modal_error) && !empty($open_modal)): ?>
+document.addEventListener('DOMContentLoaded', function() {
+    openModal('<?php echo $open_modal; ?>');
+});
+<?php endif; ?>
+
+var overallSelectedRating = <?php echo $user_has_feedback ? (int)($user_feedback['rating'] ?? 0) : 0; ?>;
+var overallRatingTexts = { 1: 'Very Poor', 2: 'Poor', 3: 'Average', 4: 'Good', 5: 'Excellent!' };
+
+function openOverallFeedbackModal(event) {
+    if (event) event.preventDefault();
+    if (window.closeGuestNavDrawer) window.closeGuestNavDrawer();
+    syncBigRatingStars(overallSelectedRating);
+    var wordEl = document.getElementById('bigRatingWord');
+    if (wordEl) wordEl.textContent = overallSelectedRating > 0 ? overallRatingTexts[overallSelectedRating] : 'Select a rating';
+    document.getElementById('overallFeedbackModal').classList.add('show');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeOverallFeedbackModal() {
+    document.getElementById('overallFeedbackModal').classList.remove('show');
+    document.body.style.overflow = 'auto';
+    previewBigRating(0);
+    syncBigRatingStars(overallSelectedRating);
+}
+
+function setBigRating(rating) {
+    overallSelectedRating = rating;
+    var hidden = document.getElementById('overall_feedback_rating');
+    if (hidden) hidden.value = rating;
+    var wordEl = document.getElementById('bigRatingWord');
+    if (wordEl) wordEl.textContent = overallRatingTexts[rating] || 'Select a rating';
+    syncBigRatingStars(rating);
+}
+
+function previewBigRating(rating) {
+    var stars = document.querySelectorAll('#bigRatingInput i');
+    stars.forEach(function(star, index) {
+        star.classList.remove('preview');
+        if (rating > 0 && index < rating) star.classList.add('preview');
+    });
+    if (rating > 0) {
+        var wordEl = document.getElementById('bigRatingWord');
+        if (wordEl) wordEl.textContent = overallRatingTexts[rating] || 'Select a rating';
+    }
+}
+
+function syncBigRatingStars(rating) {
+    var stars = document.querySelectorAll('#bigRatingInput i');
+    stars.forEach(function(star, index) {
+        star.classList.remove('preview');
+        if (index < rating) star.classList.add('active');
+        else star.classList.remove('active');
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var container = document.getElementById('bigRatingInput');
+    if (container) {
+        container.addEventListener('mouseleave', function() {
+            previewBigRating(0);
+            syncBigRatingStars(overallSelectedRating);
+            var wordEl = document.getElementById('bigRatingWord');
+            if (wordEl) wordEl.textContent = overallSelectedRating > 0 ? overallRatingTexts[overallSelectedRating] : 'Select a rating';
+        });
+    }
+});
+
+function dismissAlert() {
+    document.querySelectorAll('.alert-overlay').forEach(function(alert) {
+        alert.style.display = 'none';
+        alert.classList.remove('show');
+    });
+    if (window.history.replaceState) {
+        var url = new URL(window.location.href);
+        url.searchParams.delete('feedback_success');
+        window.history.replaceState({}, '', url.pathname + (url.search ? url.search : ''));
+    }
+}
+</script>
+
+<script>
+(function () {
+    var KEY = 'pb_step', ADV = 'pb_adv';
+    var has = { house: <?php echo $has_house ? 'true' : 'false'; ?>, food: <?php echo $has_food ? 'true' : 'false'; ?> };
+    var hasAny = has.house || has.food;
+    var errType = <?php echo (isset($modal_error) && !empty($open_modal)) ? json_encode($open_modal) : 'null'; ?>;
+    var typeStep = { house: 1, food: 2 };
+    function ss(k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) {} }
+    function gs(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+    document.body.classList.add('pb-js');
+    var panels = document.querySelectorAll('.pb-panel'), steps = document.querySelectorAll('.pb-step');
+    function show(n, user) {
+        n = parseInt(n, 10) || 1;
+        if (n < 1) n = 1; if (n > 3) n = 3;
+        if (n === 3 && !hasAny) n = 2;
+        for (var i = 0; i < panels.length; i++) panels[i].classList.toggle('active', +panels[i].getAttribute('data-panel') === n);
+        for (var j = 0; j < steps.length; j++) {
+            var on = +steps[j].getAttribute('data-step') === n;
+            steps[j].classList.toggle('active', on);
+            if (on) steps[j].setAttribute('aria-current', 'step'); else steps[j].removeAttribute('aria-current');
+        }
+        ss(KEY, String(n));
+        pbToggleSummary(false);
+        if (user) { var st = document.getElementById('pbStepper'); if (st && st.scrollIntoView) st.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    }
+    window.pbGo = function (n) { show(n, true); };
+    window.pbOpen = function (type) { ss(ADV, type); openModal(type); };
+    window.pbToggleSummary = function (force) {
+        var el = document.getElementById('pbSummary'); if (!el) return;
+        var open = (typeof force === 'boolean') ? force : !el.classList.contains('open');
+        el.classList.toggle('open', open);
+    };
+    var start;
+    var adv = gs(ADV); ss(ADV, null);
+    if (errType) start = typeStep[errType] || 1;
+    else if (adv && has[adv]) start = typeStep[adv] + 1;
+    else start = parseInt(gs(KEY), 10) || 1;
+    if (!hasAny) start = Math.min(start, 2);
+    if (!hasAny && !errType && !adv) start = 1;
+    show(start, false);
+})();
+</script>
+</body>
+</html>

@@ -133,7 +133,7 @@ class TermsGate
 
         // Fallbacks if admin hasn't saved anything yet
         if (trim($out['terms_body']) === '') {
-            $out['terms_body'] = "Welcome to Transient House & Tours.\n\n"
+            $out['terms_body'] = "Welcome to Jerry Dino's Stay.\n\n"
                 . "By using our services, you agree to our booking terms, payment policies, "
                 . "cancellation rules, and house guidelines. Please contact us for the full "
                 . "Terms & Conditions document.";

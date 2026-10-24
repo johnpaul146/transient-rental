@@ -540,7 +540,6 @@ $package_count = 0;
 if (isset($_SESSION['package_cart'])) {
     if (!empty($_SESSION['package_cart']['house'])) $package_count++;
     if (!empty($_SESSION['package_cart']['food']))  $package_count++;
-    if (!empty($_SESSION['package_cart']['tour']))  $package_count++;
 }
 
 $is_logged_in = isset($_SESSION['user_id']);
@@ -994,7 +993,9 @@ $is_logged_in = isset($_SESSION['user_id']);
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
         .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px; text-transform: uppercase; }
         .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; }
-        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay):not(.available) { background: #eef2ff; transform: scale(1.05); }
+        .calendar-grid .day.available { background: #dcfce7; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
+        .calendar-grid .day.available:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay) { background: #bbf7d0; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; font-weight: 700; box-shadow: 0 4px 12px rgba(77, 166, 217, 0.4); }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
         .calendar-grid .day.outside-stay { color: #94a3b8 !important; background: #f1f5f9; text-decoration: line-through; cursor: not-allowed !important; opacity: .75; }
@@ -2899,6 +2900,8 @@ function renderFoodCalendar(month, year) {
             if (isBlocked) {
                 d.classList.add('blocked');
             } else {
+                // This branch is reached only for today/future dates inside the stay window.
+                d.classList.add('available');
                 d.onclick = function() { selectFoodDate(this); };
             }
         }
