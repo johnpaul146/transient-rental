@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/MailBranding.php';
 // includes/EmailHelper.php
 
 require_once __DIR__ . '/../config/mail_config.php';
@@ -9,7 +10,7 @@ class EmailHelper {
      * Send test email
      */
     public static function sendTestEmail($to, $name) {
-        $mail = MailConfig::getInstance()->getMailer();
+        $mail = MailBranding::mailer();
         
         try {
             $mail->clearAddresses();

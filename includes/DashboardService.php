@@ -10,7 +10,7 @@
  *    package counts once.
  *  - "Pending"  = payment still pending (house: or a rebook awaiting confirmation),
  *                 booking not cancelled/completed.
- *  - "Pending rebooks" = house rebooks awaiting confirmation + tour/food/package rebook requests
+ *  - "Pending rebooks" = house rebooks awaiting confirmation + food/package rebook requests
  *                 waiting in `rebook_requests` (Phase 7.6) — the Rebooks tab's number.
  *  - "Paid"     = Reservation Fee Paid or Fully Paid, not cancelled/completed.
  *
@@ -26,9 +26,9 @@ class DashboardService
     {
         $out = [
             'total' => 0, 'pending' => 0, 'paid' => 0, 'pending_rebooks' => 0,
-            'by_type' => ['house' => 0, 'tour' => 0, 'food' => 0, 'package' => 0],
+            'by_type' => ['house' => 0, 'food' => 0, 'package' => 0],
         ];
-        $tables = ['house' => 'house_bookings', 'tour' => 'tour_bookings', 'food' => 'food_bookings', 'package' => 'package_bookings'];
+        $tables = ['house' => 'house_bookings', 'food' => 'food_bookings', 'package' => 'package_bookings'];   // Tours/Boat retired: old tour rows are never counted
         foreach ($tables as $type => $table) {
             $own  = $type === 'package' ? '1=1' : self::OWN;
             $live = "booking_status NOT IN ('cancelled','completed')";
@@ -60,13 +60,13 @@ class DashboardService
             $out['paid']          += (int)$r[2];
             $out['pending_rebooks'] += (int)$r[3];
         }
-        // Phase 7.6: tour / food / package rebook requests waiting for Admin/Staff (same number as the Rebooks tab).
+        // Phase 7.6: food / package rebook requests waiting for Admin/Staff (same number as the Rebooks tab).
         try {
-            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending'")->fetchColumn();
+            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending' AND booking_type <> 'tour'")->fetchColumn();
         } catch (PDOException $e) { /* table not created yet: house requests only */ }
         // Phase 7.7: Emergency Rebook requests waiting (own section in the same Rebooks tab, same badge).
         try {
-            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM emergency_rebook_requests WHERE status = 'pending'")->fetchColumn();
+            $out['pending_rebooks'] += (int)$pdo->query("SELECT COUNT(*) FROM emergency_rebook_requests WHERE status = 'pending' AND booking_type <> 'tour'")->fetchColumn();
         } catch (PDOException $e) { /* migration not run yet */ }
         return $out;
     }
@@ -74,7 +74,7 @@ class DashboardService
     /**
      * Bookings whose first day falls in [$from, $to] (Y-m-d), soonest first.
      * Packages appear as ONE "Package" row on their first day; their component
-     * rows are only listed on a different day (e.g. the tour on day 2) so nothing
+     * rows are only listed on a different day (e.g. the food on day 2) so nothing
      * is shown twice. $paymentIn (optional) limits to payment statuses, e.g. ['pending'].
      * Rows: type, ref, d, item, guest, st, pay, pid. Returns at most 200 rows.
      */
@@ -93,11 +93,6 @@ class DashboardService
               FROM house_bookings b LEFT JOIN houses h ON h.id = b.house_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
              WHERE b.check_in_date BETWEEN ? AND ? AND b.booking_status $live" . $pay('b.payment_status') . "
             UNION ALL
-            SELECT 'Tour', b.reference_number, b.booking_date, t.tour_name, COALESCE(u.fullname, b.guest_name, ''),
-                   b.booking_status, b.payment_status, b.package_id
-              FROM tour_bookings b LEFT JOIN tours t ON t.id = b.tour_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
-             WHERE b.booking_date BETWEEN ? AND ? AND b.booking_status $live" . $pay('b.payment_status') . "
-            UNION ALL
             SELECT 'Food', b.reference_number, b.preferred_date, f.name, COALESCE(u.fullname, b.guest_name, ''),
                    b.booking_status, b.payment_status, b.package_id
               FROM food_bookings b LEFT JOIN food_items f ON f.id = b.food_id LEFT JOIN guests g ON g.id = b.guest_id LEFT JOIN users u ON u.id = g.user_id
@@ -105,12 +100,11 @@ class DashboardService
             UNION ALL
             SELECT 'Package', x.ref, x.d, x.item, x.guest, x.st, x.pay, x.pid FROM (
                 SELECT pk.reference_number AS ref, pk.id AS pid,
-                       DATE(LEAST(COALESCE(hb.check_in_date, DATE('9999-12-31')), COALESCE(tb.booking_date, DATE('9999-12-31')), COALESCE(fb.preferred_date, DATE('9999-12-31')))) AS d,
-                       CONCAT_WS(' + ', h.house_name, t.tour_name, f.name) AS item,
+                       DATE(LEAST(COALESCE(hb.check_in_date, DATE('9999-12-31')), COALESCE(fb.preferred_date, DATE('9999-12-31')))) AS d,
+                       CONCAT_WS(' + ', h.house_name, f.name) AS item,
                        COALESCE(u.fullname, '') AS guest, pk.booking_status AS st, pk.payment_status AS pay
                   FROM package_bookings pk
                   LEFT JOIN house_bookings hb ON hb.id = pk.house_booking_id LEFT JOIN houses h ON h.id = hb.house_id
-                  LEFT JOIN tour_bookings tb  ON tb.id = pk.tour_booking_id   LEFT JOIN tours t ON t.id = tb.tour_id
                   LEFT JOIN food_bookings fb  ON fb.id = pk.food_booking_id   LEFT JOIN food_items f ON f.id = fb.food_id
                   LEFT JOIN guests g ON g.id = pk.guest_id LEFT JOIN users u ON u.id = g.user_id
                  WHERE pk.booking_status $live" . $pay('pk.payment_status') . "
@@ -118,7 +112,7 @@ class DashboardService
             ORDER BY d ASC, ref ASC LIMIT 200";
         try {
             $st = $pdo->prepare($sql);
-            $st->execute([$from, $to, $from, $to, $from, $to, $from, $to]);
+            $st->execute([$from, $to, $from, $to, $from, $to]);
             $rows = $st->fetchAll(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
             error_log('[DashboardService] starts: ' . $e->getMessage());
@@ -146,13 +140,13 @@ class DashboardService
      */
     public static function recentRebooks(PDO $pdo, int $days = 14, int $limit = 6): array
     {
-        $map = ['house_booking' => ['House', 'house_bookings'], 'tour_booking' => ['Tour', 'tour_bookings'],
+        $map = ['house_booking' => ['House', 'house_bookings'],
                 'food_booking' => ['Food', 'food_bookings'], 'package_booking' => ['Package', 'package_bookings']];
         try {
             $st = $pdo->prepare("SELECT target_id, target_type, role, fullname, username, old_values, new_values, created_at
                                    FROM system_logs
                                   WHERE action = 'rebook' AND module = 'booking' AND status = 'success'
-                                    AND target_type IN ('house_booking','tour_booking','food_booking','package_booking')
+                                    AND target_type IN ('house_booking','food_booking','package_booking')
                                     AND created_at >= ?
                                   ORDER BY id DESC LIMIT " . (int)$limit);
             $st->execute([date('Y-m-d H:i:s', strtotime("-{$days} days"))]);
@@ -204,7 +198,6 @@ class DashboardService
         $since = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $arms = [
             ['House', 'house_bookings', "COALESCE(u.fullname, '')", self::OWN],
-            ['Tour', 'tour_bookings', "COALESCE(u.fullname, b.guest_name, '')", self::OWN],
             ['Food', 'food_bookings', "COALESCE(u.fullname, b.guest_name, '')", self::OWN],
             ['Package', 'package_bookings', "COALESCE(u.fullname, '')", '1=1'],
         ];

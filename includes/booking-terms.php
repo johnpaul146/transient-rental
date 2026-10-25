@@ -1,6 +1,6 @@
 <?php
 /**
- * BookingTerms — "read and accept the Terms before you book" for the TOUR and FOOD booking forms (Phase 7.7).
+ * BookingTerms — "read and accept the Terms before you book" for the FOOD booking form (the Tour form was retired) (Phase 7.7).
  *
  * Same experience as the House / Package booking terms: Book → Terms modal → scroll to the end → tick the box →
  * "Accept & Confirm Booking" → only then does the booking POST go out. Cancel / close = nothing is created.

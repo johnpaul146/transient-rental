@@ -2,7 +2,7 @@
 /**
  * House Rebook Dashboard (GUEST only — the guest who owns the booking).
  *
- * Same dashboard pattern as tour-rebook.php / food-rebook.php / package-rebook.php: current booking, rebooking rules
+ * Same dashboard pattern as food-rebook.php / package-rebook.php: current booking, rebooking rules
  * and allowance, deadline, a calendar and a live preview. House keeps its own rules (all in RebookService):
  *   - the guest picks the NEW CHECK-IN date; check-out = check-in + the original number of nights (never editable);
  *   - check-in / check-out TIMES stay exactly as saved on the booking;
@@ -284,7 +284,7 @@ if(isset($content['site_settings']['logo_path']) && !empty($content['site_settin
     $nav_logo = $content['site_settings']['logo_path'];
 }
 $nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 
 function pr_dt($d, $t = null) { return date('M j, Y', strtotime($d)) . ($t ? ' · ' . date('g:i A', strtotime($t)) : ''); }
 $startDate = substr((string)$booking['check_in_date'], 0, 10);
@@ -340,8 +340,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day{text-align:center;padding:10px 0;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid transparent;background:#ecfdf5;color:#065f46;font-weight:600;min-height:40px}
 .cal-grid .day:hover:not(.off):not(.sel){border-color:#10b981}
 .cal-grid .day.off{background:#f1f5f9;color:#94a3b8;text-decoration:line-through;cursor:not-allowed;font-weight:500}
-.cal-grid .day.available{background:#dcfce7;color:#166534;box-shadow:inset 0 0 0 1px #86efac}
-.cal-grid .day.available:hover{background:#bbf7d0}
 .cal-grid .day.nostart{background:#fff;color:#92400e;border:1px dashed #f59e0b;cursor:not-allowed;font-weight:600;text-decoration:none}
 .cal-grid .day.today{position:relative}
 .cal-grid .day.today::after{content:'';position:absolute;left:50%;bottom:4px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:#0B3D91}
@@ -353,7 +351,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day.sel{background:#4DA6D9;color:#fff;box-shadow:0 4px 12px rgba(77,166,217,.4);text-decoration:none}
 .cal-grid .day.rng.nostart,.cal-grid .day.outd.nostart,.cal-grid .day.sel.nostart{border-style:solid;border-color:transparent}
 .cal-grid .day.blank{background:transparent;cursor:default}
-.cal-grid .day.loading{opacity:.5}
+.cal-grid .day.loading{opacity:.5}.cal-grid .day.loading:not(.sel):not(.rng):not(.outd):not(.blank){background:#f1f5f9;color:#94a3b8}   /* not green until the server has confirmed the day */
 .cal-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:12px;color:#64748b}
 .cal-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
 .cal-note{margin-top:10px;font-size:13px;color:#475569;min-height:20px}
@@ -522,7 +520,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             if (!info) cls += ' loading';
             if (off) cls += ' off';
             else if (nostart) cls += ' nostart';
-            else if (info) cls += ' available';
             if (ds === TODAY) cls += ' today';
             if (ds === CURRENT) cls += ' cur';
             if (plan && selected) {

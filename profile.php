@@ -22,6 +22,7 @@ TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest 
 require_once 'config/mail_config.php';
 require_once 'includes/EmailNotifications.php';
 require_once 'includes/PaymentService.php';
+require_once 'includes/GroupHealth.php';   // senior-citizen / health-condition group info (replaces guest names)
 require_once 'includes/FeedbackService.php';   // Phase 7.9: one rating rule (UI + server)
 require_once 'includes/emergency-ui.php';   // Phase 7.9: EmergencyRebookUI::notify() (post-commit Emergency e-mails)
 require_once 'includes/RebookService.php';
@@ -174,7 +175,7 @@ function getIDPhoto($guest) {
     }
     return null;
 }
-// Phase 7.9: the Rate button follows FeedbackService (House: after check-out date+time, Tour: after the scheduled time,
+// Phase 7.9: the Rate button follows FeedbackService (House: after check-out date+time,
 // Food/Package: completed; never cancelled; hidden when the rating cannot be stored). The server applies the same rule.
 function canGiveFeedback($booking, $type = 'house') {
     global $pdo;
@@ -279,21 +280,21 @@ function completeBookingButton($type, $id) {
 }
 
 /**
- * Phase 7.6: the guest's own tour / food / package rebook requests that are waiting for Admin/Staff,
+ * Phase 7.6: the guest's own food / package rebook requests that are waiting for Admin/Staff,
  * [type][booking_id] => request (filled once after the booking lists are loaded; no per-row query).
  */
-$GLOBALS['profile_svc_pending'] = ['tour' => [], 'food' => [], 'package' => []];
+$GLOBALS['profile_svc_pending'] = ['food' => [], 'package' => []];
 function servicePendingRequest($type, array $row) {
     return $GLOBALS['profile_svc_pending'][$type][(int)($row['id'] ?? 0)] ?? null;
 }
 
 /**
  * Phase 7.7 — Emergency Rebook (guest side). The guest's waiting Emergency requests and recently rejected ones,
- * [type][booking_id] => row (house, tour, food, package). Filled once after the booking lists are loaded.
+ * [type][booking_id] => row (house, food, package). Filled once after the booking lists are loaded.
  */
 $GLOBALS['profile_em_ready'] = false;
-$GLOBALS['profile_em_pending'] = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
-$GLOBALS['profile_em_rejected'] = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+$GLOBALS['profile_em_pending'] = ['house' => [], 'food' => [], 'package' => []];
+$GLOBALS['profile_em_rejected'] = ['house' => [], 'food' => [], 'package' => []];
 function emergencyRequest($type, array $row) {
     return $GLOBALS['profile_em_pending'][$type][(int)($row['id'] ?? 0)] ?? null;
 }
@@ -305,7 +306,7 @@ function emergencyOffered($type, array $row) {
 }
 function emergencyPageUrl($type, array $row) {
     $id = (int)$row['id'];
-    return $type === 'house' ? 'rebook.php?booking_id=' . $id . '&emergency=1' : ['tour' => 'tour-rebook.php', 'food' => 'food-rebook.php', 'package' => 'package-rebook.php'][$type] . '?id=' . $id . '&emergency=1';
+    return $type === 'house' ? 'rebook.php?booking_id=' . $id . '&emergency=1' : ['food' => 'food-rebook.php', 'package' => 'package-rebook.php'][$type] . '?id=' . $id . '&emergency=1';
 }
 /** STATUS area for an Emergency request: waiting note, or the (safe) result of a recent rejection. '' otherwise. */
 function emergencyStatusBlock($type, array $row) {
@@ -333,7 +334,7 @@ function emergencyRebookButton($type, array $row, $mobile) {
     return '<a href="' . htmlspecialchars(emergencyPageUrl($type, $row)) . '" class="' . $cls . '"><i class="fas fa-exclamation-triangle"></i> Request Emergency Rebook</a>';
 }
 
-/** Status label for a tour / food / package row: "Pending Rebook" while a request waits, otherwise the usual label. */
+/** Status label for a food / package row: "Pending Rebook" while a request waits, otherwise the usual label. */
 function serviceStatusLabel($type, array $row) {
     if ($req = servicePendingRequest($type, $row)) return '<span class="badge badge-warning"><i class="fas fa-redo"></i> Pending Rebook</span>' . serviceWaitingNote($type, $req);
     if (emergencyRequest($type, $row)) return emergencyStatusBlock($type, $row);
@@ -361,22 +362,21 @@ function servicePendingActions($type, array $row, array $req, $mobile) {
     return '<button type="button" class="btn-cancel-rebook" onclick="' . $onclick . '"><i class="fas fa-undo"></i> Cancel Rebook</button>';
 }
 
-/** "Rebook" button for a paid tour / food / package booking (a request; payment carried forward). */
+/** "Rebook" button for a paid food / package booking (a request; payment carried forward). */
 function serviceRebookButton($type, array $row, $mobile) {
     if ($req = servicePendingRequest($type, $row)) return servicePendingActions($type, $row, $req, $mobile);
     if (emergencyRequest($type, $row)) return emergencyRebookButton($type, $row, $mobile);                // Cancel Emergency Request
     if (!RebookService::canRebookService($type, $row)) return emergencyRebookButton($type, $row, $mobile);   // normal closed: Emergency when it qualifies
-    if ($type === 'tour') $current = $row['booking_date'] ?? '';
-    elseif ($type === 'food') $current = $row['preferred_date'] ?? '';
+    if ($type === 'food') $current = $row['preferred_date'] ?? '';
     else {
-        $d = array_filter([$row['house_check_in'] ?? null, $row['tour_date'] ?? null, $row['food_date'] ?? null]);
+        $d = array_filter([$row['house_check_in'] ?? null, $row['food_date'] ?? null]);
         $current = $d ? min($d) : '';
     }
     $args = htmlspecialchars(json_encode([$type, (int)$row['id'], (string)$row['reference_number'], (string)$current,
         RebookService::remaining($row), RebookService::daysLeft($row), ($row['booking_status'] ?? '') === 'cancelled']), ENT_QUOTES, 'UTF-8');
     $cls = $mobile ? 'btn-card-action btn-rebook-svc-mobile' : 'btn-sm btn-rebook-svc';
-    if (in_array($type, ['package', 'tour', 'food'], true)) {
-        return '<a href="' . ['package' => 'package-rebook.php', 'tour' => 'tour-rebook.php', 'food' => 'food-rebook.php'][$type] . '?id=' . (int)$row['id'] . '" class="' . $cls . '"><i class="fas fa-redo"></i> Rebook</a>';
+    if (in_array($type, ['package', 'food'], true)) {
+        return '<a href="' . ['package' => 'package-rebook.php', 'food' => 'food-rebook.php'][$type] . '?id=' . (int)$row['id'] . '" class="' . $cls . '"><i class="fas fa-redo"></i> Rebook</a>';
     }
     return '<button type="button" class="' . $cls . '" onclick="openServiceRebookModal.apply(null, ' . $args . ')"><i class="fas fa-redo"></i> Rebook</button>';
 }
@@ -635,14 +635,15 @@ if(isset($_POST['rebook_booking'])) {
     }
 }
 
-// ---- REBOOK TOUR / FOOD (legacy date-only form). Phase 7.6: this is now a REQUEST like every rebook (the booking
+// ---- REBOOK FOOD (legacy date-only form; Tours/Boat can no longer be rebooked). Phase 7.6: this is now a REQUEST like every rebook (the booking
 // does not change until Admin/Staff confirm it); the current time is kept. Packages use package-rebook.php. ----
 if(isset($_POST['rebook_service'])) {
     try {
         if (!hash_equals($profile_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page and try again.");
         $svc_type = (string)($_POST['booking_type'] ?? '');
         $svc_id   = (int)($_POST['booking_id'] ?? 0);
-        if (!in_array($svc_type, ['tour', 'food'], true)) throw new Exception("Please use the rebook page for this booking.");
+        if ($svc_type === 'tour') throw new Exception(RebookService::TOUR_REMOVED_MESSAGE);   // Tours/Boat removed
+        if (!in_array($svc_type, ['food'], true)) throw new Exception("Please use the rebook page for this booking.");
         $g = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
         $g->execute([$_SESSION['user_id']]);
         $svc_guest = (int)$g->fetchColumn();
@@ -665,7 +666,7 @@ if(isset($_POST['rebook_service'])) {
     }
 }
 
-// ---- CANCEL a pending TOUR / FOOD / PACKAGE rebook request (Phase 7.6). The booking was never changed, so
+// ---- CANCEL a pending FOOD / PACKAGE rebook request (Phase 7.6). The booking was never changed, so
 // cancelling only closes the request; the guest keeps the current schedule and the payment. ----
 if(isset($_POST['cancel_service_rebook'])) {
     try {
@@ -745,7 +746,7 @@ if(isset($_POST['cancel_rebook'])) {
 }
 
 // ============================================================
-// ✅ FIXED: CANCEL UNPAID BOOKING (house / tour / food / package)
+// ✅ FIXED: CANCEL UNPAID BOOKING (house / food / package)
 // ✅ NOW SENDS CANCELLATION EMAIL
 // ============================================================
 if(isset($_POST['cancel_booking'])) {
@@ -753,7 +754,8 @@ if(isset($_POST['cancel_booking'])) {
         $booking_id   = (int)($_POST['booking_id'] ?? 0);
         $booking_type = $_POST['booking_type'] ?? '';
 
-        if (!in_array($booking_type, ['house', 'tour', 'food', 'package'])) {
+        if ($booking_type === 'tour') throw new Exception(RebookService::TOUR_REMOVED_MESSAGE);   // Tours/Boat retired: refused server-side
+        if (!in_array($booking_type, ['house', 'food', 'package'])) {
             throw new Exception("Invalid booking type.");
         }
 
@@ -845,7 +847,7 @@ if(isset($_POST['confirm_payment']) && isset($_SESSION['user_id'])) {
 }
 
 // ============================================================
-// ✅ FIXED: COMPLETE BOOKING (house / tour / food / package)
+// ✅ FIXED: COMPLETE BOOKING (house / food / package)
 // ============================================================
 if($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['complete_booking'])) {
     try {
@@ -859,10 +861,10 @@ if($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['complete_booking'])) {
 
         $allowed_tables = [
             'house'   => 'house_bookings',
-            'tour'    => 'tour_bookings',
             'food'    => 'food_bookings',
             'package' => 'package_bookings'
         ];
+        if ($booking_type === 'tour') throw new Exception(RebookService::TOUR_REMOVED_MESSAGE);   // Tours/Boat retired: refused server-side
         if (!isset($allowed_tables[$booking_type])) throw new Exception("Invalid booking type.");
 
         $table = $allowed_tables[$booking_type];
@@ -911,7 +913,8 @@ if(isset($_POST['upload_proof'])) {
         $reference    = $_POST['reference'] ?? '';
         $gcash_reference = trim($_POST['gcash_reference'] ?? '');
 
-        if (!in_array($booking_type, ['house', 'tour', 'food', 'package'])) throw new Exception("Invalid booking type.");
+        if ($booking_type === 'tour') throw new Exception(RebookService::TOUR_REMOVED_MESSAGE);   // Tours/Boat retired: no payments for it from the guest side
+        if (!in_array($booking_type, ['house', 'food', 'package'])) throw new Exception("Invalid booking type.");
         if (empty($gcash_reference)) throw new Exception("GCash reference number is required.");
         // Only the booking owner can upload proof, and only for a payable (unpaid, non-component) booking
         $own = $pdo->prepare("SELECT id FROM guests WHERE user_id = ?");
@@ -1022,10 +1025,9 @@ if(isset($_POST['submit_feedback']) && isset($_POST['booking_id']) && isset($_SE
 }
 
 // ---- EDIT PER-BOOKING FEEDBACK ----
-if(isset($_POST['edit_house_feedback']) || isset($_POST['edit_tour_feedback']) || isset($_POST['edit_food_feedback'])) {
+if(isset($_POST['edit_house_feedback']) || isset($_POST['edit_food_feedback'])) {
     try {
         if(isset($_POST['edit_house_feedback'])) $booking_type = 'house';
-        elseif(isset($_POST['edit_tour_feedback'])) $booking_type = 'tour';
         else $booking_type = 'food';
 
         // Phase 7.9: owner only, existing feedback only (FeedbackService)
@@ -1081,17 +1083,7 @@ if($guest) {
     $stmt->execute([$guest['id']]);
     $house_bookings = $stmt->fetchAll();
 }
-$tour_bookings = [];
-if($guest) {
-    $stmt = $pdo->prepare("SELECT b.*, t.tour_name, t.image 
-                           FROM tour_bookings b 
-                           JOIN tours t ON b.tour_id = t.id 
-                           WHERE b.guest_id = ? 
-                             AND (b.package_id IS NULL OR b.package_id = 0)
-                           ORDER BY b.created_at DESC");
-    $stmt->execute([$guest['id']]);
-    $tour_bookings = $stmt->fetchAll();
-}
+// Tours/Boat was retired: standalone tour bookings are never listed for guests (the records stay in the database).
 $food_bookings = [];
 if($guest) {
     try {
@@ -1106,8 +1098,8 @@ if($guest) {
     } catch(PDOException $e) { $food_bookings = []; }
 }
 
-// Phase 7.6: this guest's waiting tour / food / package rebook requests (one query)
-if ($guest) $GLOBALS['profile_svc_pending'] = RebookService::pendingMap($pdo, (int)$guest['id']);
+// Phase 7.6: this guest's waiting food / package rebook requests (one query). A legacy tour request is never shown.
+if ($guest) { $GLOBALS['profile_svc_pending'] = RebookService::pendingMap($pdo, (int)$guest['id']); }   // pendingMap/pendingRequests never return a retired tour request
 // Phase 7.7: this guest's waiting Emergency Rebook requests + recently rejected ones (two small queries)
 if ($guest && EmergencyRebookService::tableReady($pdo)) {
     $GLOBALS['profile_em_ready'] = true;
@@ -1131,16 +1123,7 @@ if($guest) {
                 hb.number_of_guests AS house_guests,
                 hb.total_amount AS house_amount,
                 hb.guest_names AS house_guest_names,
-                hb.senior_citizens AS house_senior_citizens,
-                hb.has_health_condition AS house_has_health_condition,
-                hb.health_condition_details AS house_health_condition_details,
-                tb.tour_id, t.tour_name,
-                tb.booking_date AS tour_date,
-                tb.preferred_time AS tour_time,
-                tb.number_of_guests AS tour_guests,
-                tb.guest_name AS tour_guest_name,
-                tb.contact_number AS tour_contact,
-                tb.total_amount AS tour_amount,
+                " . GroupHealth::selectSql($pdo, 'hb', 'house_') . ",
                 fb.food_id, f.name as food_name,
                 fb.size_variant AS food_size,
                 fb.preferred_date AS food_date,
@@ -1152,8 +1135,6 @@ if($guest) {
                 FROM package_bookings pb
                 LEFT JOIN house_bookings hb ON pb.house_booking_id = hb.id
                 LEFT JOIN houses h ON hb.house_id = h.id
-                LEFT JOIN tour_bookings tb ON pb.tour_booking_id = tb.id
-                LEFT JOIN tours t ON tb.tour_id = t.id
                 LEFT JOIN food_bookings fb ON pb.food_booking_id = fb.id
                 LEFT JOIN food_items f ON fb.food_id = f.id
                 WHERE pb.guest_id = ? 
@@ -1165,13 +1146,12 @@ if($guest) {
 }
 
 $is_admin = in_array($user['role'] ?? '', ['admin', 'staff']);
-$total_bookings = count($house_bookings) + count($tour_bookings) + count($food_bookings) + count($package_bookings);
+$total_bookings = count($house_bookings) + count($food_bookings) + count($package_bookings);
 $id_photo = getIDPhoto($guest);
 $profile_photo = getProfilePhoto($guest);
 
 $pending_count = 0;
 foreach($house_bookings as $b) if($b['booking_status'] == 'pending') $pending_count++;
-foreach($tour_bookings as $b) if($b['booking_status'] == 'pending') $pending_count++;
 foreach($food_bookings as $b) if($b['booking_status'] == 'pending') $pending_count++;
 foreach($package_bookings as $b) if($b['booking_status'] == 'pending') $pending_count++;
 
@@ -1214,7 +1194,7 @@ $termsVersion = $termsGate->getCurrentVersion();
 $default_tab = 'houses';
 if (isset($_GET['tab'])) {
     $requested_tab = $_GET['tab'];
-    if (in_array($requested_tab, ['houses', 'tours', 'food', 'packages', 'rebooks', 'history'])) {
+    if (in_array($requested_tab, ['houses', 'food', 'packages', 'rebooks', 'history'])) {
         $default_tab = $requested_tab;
     }
 } elseif (isset($_GET['upload_proof'])) {
@@ -1234,7 +1214,7 @@ $sidebar_logo_exists = !empty($sidebar_logo) && file_exists($sidebar_logo) && !i
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
     <meta name="theme-color" content="#0B2447">
-    <title>My Dashboard - Transient House & Tours</title>
+    <title>My Dashboard - Jerry Dino's Stay</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1989,7 +1969,6 @@ tbody tr:hover td { background: #f1f8fd; }
 #packages-tab .desktop-table :is(th,td):nth-child(3),
 #rebooks-tab .desktop-table :is(th,td):nth-child(3),
 #history-tab .desktop-table :is(th,td):nth-child(4) { display: none; }
-#tours-tab .desktop-table :is(th,td):is(:nth-child(3),:nth-child(4),:nth-child(7)),
 #food-tab .desktop-table :is(th,td):is(:nth-child(3),:nth-child(5),:nth-child(6)) { display: none; }
 .action-cell { min-width: 0; }
 .desktop-table tbody td div, .desktop-table tbody td small { white-space: normal !important; }
@@ -2234,7 +2213,7 @@ Manage your reservations, payments, and vacation plans in one place.
             </h3>
 
             <p>
-            Your accommodation, tours, and food reservations are combined into one convenient travel package.
+            Your accommodation and food reservations are combined into one convenient package.
             </p>
         </div>
 
@@ -2265,17 +2244,13 @@ foreach ($house_bookings as $b) {
     $w = formatDateDisplay($b['check_in_date']) . ' → ' . formatDateDisplay($b['check_out_date']);
     $dash_push('house', 'houses', 'fa-home', $b, $b['house_name'] ?? 'House stay', $w, $b['check_in_date']);
 }
-foreach ($tour_bookings as $b) {
-    $w = formatDateDisplay($b['booking_date']) . (!empty($b['preferred_time']) ? ' · ' . formatTimeDisplay($b['preferred_time']) : '');
-    $dash_push('tour', 'tours', 'fa-compass', $b, $b['tour_name'] ?? 'Tour', $w, $b['booking_date']);
-}
 foreach ($food_bookings as $b) {
     $fd = !empty($b['preferred_date']) ? $b['preferred_date'] : ($b['booking_date'] ?? null);
     $w = formatDateDisplay($fd) . (!empty($b['preferred_time']) ? ' · ' . formatTimeDisplay($b['preferred_time']) : '');
     $dash_push('food', 'food', 'fa-utensils', $b, $b['food_name'] ?? 'Food order', $w, $fd);
 }
 foreach ($package_bookings as $b) {
-    $cands = array_filter([$b['house_check_in'] ?? null, $b['tour_date'] ?? null, $b['food_date'] ?? null], function($d) use ($dash_today) { return $d && $d >= $dash_today; });
+    $cands = array_filter([$b['house_check_in'] ?? null, $b['food_date'] ?? null], function($d) use ($dash_today) { return $d && $d >= $dash_today; });
     $first = $cands ? min($cands) : null;
     $dash_push('package', 'packages', 'fa-box-open', $b, $b['package_name'] ?? 'Vacation package', $first ? 'Starts ' . formatDateDisplay($first) : '', $first);
 }
@@ -2353,10 +2328,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
             <div class="section-tabs">
                <div class="tab <?php echo $default_tab === 'houses' ? 'active' : ''; ?>" onclick="showTab('houses')">
     <i class="fas fa-house"></i> My Stays
-</div>
-
-<div class="tab <?php echo $default_tab === 'tours' ? 'active' : ''; ?>" onclick="showTab('tours')">
-    <i class="fas fa-compass"></i> My Tours
 </div>
 
 <div class="tab <?php echo $default_tab === 'food' ? 'active' : ''; ?>" onclick="showTab('food')">
@@ -2639,177 +2610,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                 <?php endif; ?>
             </div>
             
-            <!-- TOUR BOOKINGS TAB -->
-            <div id="tours-tab" class="tab-content <?php echo $default_tab === 'tours' ? 'active' : ''; ?>" style="display:<?php echo $default_tab === 'tours' ? 'block' : 'none'; ?>;">
-                <?php 
-                $active_tour = array_filter($tour_bookings, function($b) {
-                    return $b['booking_status'] != 'cancelled' && $b['booking_status'] != 'completed';
-                });
-                ?>
-                <?php if(empty($active_tour)): ?>
-                    <p style="text-align:center;padding:40px 15px;color:#94a3b8;">No active tour bookings. Tours/Boat booking is no longer available online.</p>
-                <?php else: ?>
-                    <div class="table-responsive desktop-table">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Reference</th><th>Tour</th><th>Guest Name</th><th>Contact #</th>
-                                    <th>Date</th><th>Time</th><th>Pax</th><th>Total Amount</th>
-                                    <th>Payment</th><th>Status</th><th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach($active_tour as $booking): ?>
-                                <tr>
-                                    <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong></td>
-                                    <td><?php echo htmlspecialchars($booking['tour_name']); ?></td>
-                                    <td>
-                                        <?php if(!empty($booking['guest_name'])): ?>
-                                            <span class="badge badge-info" style="background:#e0f2fe; color:#0369a1;">
-                                                <i class="fas fa-user"></i> <?php echo htmlspecialchars($booking['guest_name']); ?>
-                                            </span>
-                                        <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
-                                    </td>
-                                    <td>
-                                        <?php if(!empty($booking['contact_number'])): ?>
-                                            <a href="tel:<?php echo htmlspecialchars($booking['contact_number']); ?>" style="color:#0B2447; font-weight:600; text-decoration:none; font-size:12px;">
-                                                <i class="fas fa-phone" style="font-size:10px;"></i> <?php echo htmlspecialchars($booking['contact_number']); ?>
-                                            </a>
-                                        <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
-                                    </td>
-                                    <td><?php echo formatDateDisplay($booking['booking_date']); ?></td>
-                                    <td>
-                                        <?php if(!empty($booking['preferred_time'])): ?>
-                                            <span class="badge badge-info"><i class="fas fa-clock"></i> <?php echo date('h:i A', strtotime($booking['preferred_time'])); ?></span>
-                                        <?php else: ?><span style="color:#cbd5e1;">—</span><?php endif; ?>
-                                    </td>
-                                    <td><?php echo $booking['number_of_guests']; ?></td>
-                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
-                                    <td>
-                                        <?php echo PaymentService::guestBadge($booking); ?>
-                                    </td>
-                                    <td><?php echo serviceStatusLabel('tour', $booking); ?></td>
-                                    <td>
-                                        <div class="action-cell">
-                                            <div class="action-row">
-                                                <button class="btn-view-booking" onclick='viewBooking("tour", <?php echo json_encode($booking); ?>)'>
-                                                    <i class="fas fa-eye"></i> View
-                                                </button>
-<?php echo serviceRebookButton('tour', $booking, false); ?>
-                                            </div>
-                                            <div class="action-row">
-                                                <?php if(PaymentService::canPayReservation($booking)): ?>
-                                                    <?php if(!$booking['payment_proof']): ?>
-                                                        <button class="btn-sm btn-pay" onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
-                                                            <i class="fas fa-credit-card"></i> Pay
-                                                        </button>
-                                                    <?php else: ?>
-                                                        <span class="badge badge-info">Proof Submitted</span>
-                                                    <?php endif; ?>
-                                                    <?php if(empty($booking['payment_proof'])): ?>
-                                                    <button class="btn-sm btn-cancel-booking" onclick="openCancelBookingModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
-                                                        <i class="fas fa-times-circle"></i> Cancel
-                                                    </button>
-                                                    <?php else: ?>
-                                                    <span class="proof-lock-note"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
-                                                    <?php endif; ?>
-                                                <?php endif; ?>
-                                            </div>
-                                            <?php if($is_admin && $booking['booking_status'] == 'confirmed' && PaymentService::isSecured($booking)): ?>
-                                                <div class="action-row" style="margin-top:4px;">
-                                                    <?php echo completeBookingButton('tour', (int)$booking['id']); ?>
-                                                </div>
-                                            <?php endif; ?>
-                                        </div>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div class="booking-cards-mobile">
-                        <?php foreach($active_tour as $booking): ?>
-                        <div class="booking-card-mobile">
-                            <div class="card-top-row">
-                                <div class="card-ref">
-                                    <i class="fas fa-hashtag" style="color:#4DA6D9; font-size:11px;"></i>
-                                    <?php echo htmlspecialchars($booking['reference_number']); ?>
-                                </div>
-                                <div class="card-badges">
-                                    <?php echo PaymentService::guestBadge($booking); ?>
-                                </div>
-                            </div>
-                            <?php echo serviceStatusRow('tour', $booking); ?>
-
-                            <div class="card-row">
-                                <i class="fas fa-umbrella-beach"></i>
-                                <span class="card-label">Tour</span>
-                                <span class="card-value"><?php echo htmlspecialchars($booking['tour_name']); ?></span>
-                            </div>
-
-                            <div class="card-row">
-                                <i class="fas fa-calendar-alt"></i>
-                                <span class="card-label">Date</span>
-                                <span class="card-value"><?php echo formatDateDisplay($booking['booking_date']); ?></span>
-                            </div>
-
-                            <div class="card-row">
-                                <i class="fas fa-peso-sign"></i>
-                                <span class="card-label">Total</span>
-                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
-                            </div>
-
-                            <div class="card-proof">
-                                <?php if(!empty($booking['payment_proof'])): ?>
-                                    <img class="card-proof-thumb"
-                                         src="uploads/payments/<?php echo htmlspecialchars($booking['payment_proof']); ?>?t=<?php echo time(); ?>"
-                                         alt="Proof"
-                                         onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                                    <div class="card-proof-thumb no-proof" style="display:none;"><i class="fas fa-image"></i></div>
-                                <?php else: ?>
-                                    <div class="card-proof-thumb no-proof"><i class="fas fa-image"></i></div>
-                                <?php endif; ?>
-                                <div class="card-proof-info">
-                                    <div class="card-label">GCash Reference</div>
-                                    <?php if(!empty($booking['gcash_reference'])): ?>
-                                        <div class="card-gcash"><i class="fas fa-hashtag"></i> <?php echo htmlspecialchars($booking['gcash_reference']); ?></div>
-                                    <?php else: ?>
-                                        <div style="color:#94a3b8; font-size:12px; font-style:italic;">Not provided</div>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-
-                            <div class="card-actions">
-                                <button type="button" class="btn-card-action btn-more"
-                                        onclick='viewBooking("tour", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
-                                    <i class="fas fa-eye"></i> More / View
-                                </button>
-<?php echo serviceRebookButton('tour', $booking, true); ?>
-
-                                <?php if(PaymentService::canPayReservation($booking)): ?>
-                                    <?php if(!$booking['payment_proof']): ?>
-                                        <button type="button" class="btn-card-action btn-pay-mobile"
-                                                onclick="openPaymentModal('tour', <?php echo $booking['id']; ?>, <?php echo PaymentService::feeFor($booking['total_amount']); ?>, '<?php echo $booking['reference_number']; ?>')">
-                                            <i class="fas fa-credit-card"></i> Pay
-                                        </button>
-                                    <?php endif; ?>
-                                    <?php if(empty($booking['payment_proof'])): ?>
-                                    <button type="button" class="btn-card-action btn-cancel-booking-mobile"
-                                            onclick="openCancelBookingModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
-                                        <i class="fas fa-times-circle"></i> Cancel
-                                    </button>
-                                    <?php else: ?>
-                                    <span class="proof-lock-note proof-lock-note-mobile"><i class="fas fa-hourglass-half"></i> Payment proof submitted. Please wait for verification.</span>
-                                    <?php endif; ?>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-            
             <!-- FOOD BOOKINGS TAB -->
             <div id="food-tab" class="tab-content <?php echo $default_tab === 'food' ? 'active' : ''; ?>" style="display:<?php echo $default_tab === 'food' ? 'block' : 'none'; ?>;">
                 <?php 
@@ -3010,7 +2810,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                 <?php foreach($active_packages as $pkg): 
                                     $items = [];
                                     if (!empty($pkg['house_name'])) $items[] = '<i class="fas fa-home"></i> ' . htmlspecialchars($pkg['house_name']);
-                                    if (!empty($pkg['tour_name'])) $items[] = '<i class="fas fa-umbrella-beach"></i> ' . htmlspecialchars($pkg['tour_name']);
                                     if (!empty($pkg['food_name'])) $items[] = '<i class="fas fa-utensils"></i> ' . htmlspecialchars($pkg['food_name']);
                                 ?>
                                 <tr>
@@ -3079,13 +2878,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                           . ' → ' . date('M d, Y', strtotime($pkg['house_check_out']))
                                           . (!empty($pkg['house_check_out_time']) ? ' (' . formatTimeDisplay($pkg['house_check_out_time']) . ')' : '')
                                           . '</small>';
-                                }
-                                $itemsMobile[] = $line;
-                            }
-                            if (!empty($pkg['tour_name'])) {
-                                $line = '🏖️ ' . htmlspecialchars($pkg['tour_name']);
-                                if (!empty($pkg['tour_date'])) {
-                                    $line .= '<br><small style="color:#94a3b8;font-weight:400;font-size:11px;">📅 ' . date('M d, Y', strtotime($pkg['tour_date'])) . '</small>';
                                 }
                                 $itemsMobile[] = $line;
                             }
@@ -3174,12 +2966,12 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
             <!-- REBOOKS TAB -->
             <div id="rebooks-tab" class="tab-content <?php echo $default_tab === 'rebooks' ? 'active' : ''; ?>" style="display:<?php echo $default_tab === 'rebooks' ? 'block' : 'none'; ?>;">
                 <?php
-                // Phase 7.6: tour / food / package rebook requests waiting for Admin/Staff (current vs requested, Cancel Rebook)
+                // Phase 7.6: food / package rebook requests waiting for Admin/Staff (current vs requested, Cancel Rebook)
                 $svc_waiting = [];
                 foreach ($GLOBALS['profile_svc_pending'] as $svcT => $svcList) foreach ($svcList as $svcReq) $svc_waiting[] = $svcReq;
                 ?>
                 <?php if ($svc_waiting): ?>
-                <h4 style="margin-bottom:12px;font-size:16px;"><i class="fas fa-hourglass-half"></i> Pending Tour / Food / Package Rebooks</h4>
+                <h4 style="margin-bottom:12px;font-size:16px;"><i class="fas fa-hourglass-half"></i> Pending Food / Package Rebooks</h4>
                 <div class="svc-wait-list">
                     <?php foreach ($svc_waiting as $svcReq): ?>
                     <div class="svc-wait">
@@ -3392,9 +3184,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                 $completed_house = array_filter($house_bookings, function($b) {
                     return $b['booking_status'] == 'cancelled' || $b['booking_status'] == 'completed';
                 });
-                $completed_tour = array_filter($tour_bookings, function($b) {
-                    return $b['booking_status'] == 'cancelled' || $b['booking_status'] == 'completed';
-                });
                 $completed_food = array_filter($food_bookings, function($b) {
                     return $b['booking_status'] == 'cancelled' || $b['booking_status'] == 'completed';
                 });
@@ -3402,7 +3191,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                     return $b['booking_status'] == 'cancelled' || $b['booking_status'] == 'completed';
                 });
                 ?>
-                <?php if(empty($completed_house) && empty($completed_tour) && empty($completed_food) && empty($completed_package)): ?>
+                <?php if(empty($completed_house) && empty($completed_food) && empty($completed_package)): ?>
                     <p style="text-align:center;padding:40px 15px;color:#94a3b8;">No booking history yet.</p>
                 <?php else: ?>
                     <div class="table-responsive desktop-table">
@@ -3474,52 +3263,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                 </tr>
                                 <?php endforeach; ?>
                                 
-                                <?php foreach($completed_tour as $booking): ?>
-                                <tr>
-                                    <td><span class="badge badge-info"><i class="fas fa-umbrella-beach"></i> Tour</span></td>
-                                    <td><strong><?php echo htmlspecialchars($booking['reference_number']); ?></strong></td>
-                                    <td><?php echo htmlspecialchars($booking['tour_name']); ?></td>
-                                    <td><?php echo formatDateTimeDisplay($booking['created_at']); ?></td>
-                                    <td><?php echo formatDateDisplay($booking['booking_date']); ?></td>
-                                    <td><?php echo PaymentService::guestAmountCell($booking); ?></td>
-                                    <td>
-                                        <?php echo PaymentService::guestBadge($booking); ?>
-                                    </td>
-                                    <td><?php echo serviceStatusLabel('tour', $booking); ?></td>
-                                    <td>
-                                        <?php if(hasFeedback($booking)): ?>
-                                            <span class="feedback-badge"><i class="fas fa-star" style="color:#f59e0b;"></i> <?php echo $booking['feedback_rating']; ?>/5</span>
-                                        <?php else: ?>
-                                            <span class="badge badge-warning">No feedback</span>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td>
-                                        <div class="action-cell">
-                                            <div class="action-row">
-                                                <button class="btn-view-booking" onclick='viewBooking("tour", <?php echo json_encode($booking); ?>)'>
-                                                    <i class="fas fa-eye"></i> View
-                                                </button>
-<?php echo serviceRebookButton('tour', $booking, false); ?>
-                                            </div>
-                                            <div class="action-row">
-                                                <?php if(canGiveFeedback($booking, 'tour')): ?>
-                                                    <button class="btn-sm btn-feedback" onclick="openFeedbackModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>')">
-                                                        <i class="fas fa-star"></i> Rate
-                                                    </button>
-                                                <?php elseif(hasFeedback($booking)): ?>
-                                                    <button class="btn-sm btn-view-feedback" onclick="viewFeedback('<?php echo htmlspecialchars($booking['feedback_text']); ?>', <?php echo $booking['feedback_rating']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>')">
-                                                        <i class="fas fa-eye"></i> View
-                                                    </button>
-                                                    <button class="btn-sm btn-edit-feedback" onclick="editFeedback('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>', <?php echo $booking['feedback_rating']; ?>, '<?php echo addslashes($booking['feedback_text']); ?>', <?php echo !empty($booking['feedback_is_anonymous']) ? 'true' : 'false'; ?>)">
-                                                        <i class="fas fa-edit"></i> Edit
-                                                    </button>
-                                                <?php endif; ?>
-                                            </div>
-                                        </div>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                                
                                 <?php foreach($completed_food as $booking): ?>
                                 <tr>
                                     <td><span class="badge badge-info"><i class="fas fa-utensils"></i> Food</span></td>
@@ -3569,7 +3312,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                 <?php foreach($completed_package as $pkg): 
                                     $items = [];
                                     if (!empty($pkg['house_name'])) $items[] = '🏠 ' . htmlspecialchars($pkg['house_name']);
-                                    if (!empty($pkg['tour_name'])) $items[] = '🏖️ ' . htmlspecialchars($pkg['tour_name']);
                                     if (!empty($pkg['food_name'])) $items[] = '🍽️ ' . htmlspecialchars($pkg['food_name']);
                                     $itemsStr = !empty($items) ? implode(', ', $items) : '—';
                                 ?>
@@ -3664,49 +3406,6 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
                                     <?php if(canGiveFeedback($booking, 'house')): ?>
                                         <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
                                                 onclick="openFeedbackModal('house', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['house_name']); ?>')">
-                                            <i class="fas fa-star"></i> Rate
-                                        </button>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                        <?php endforeach; ?>
-                        <?php foreach($completed_tour as $booking): ?>
-                            <div class="booking-card-mobile">
-                                <div class="card-top-row">
-                                    <div class="card-ref">
-                                        <i class="fas fa-umbrella-beach" style="color:#4DA6D9; font-size:11px;"></i>
-                                        <?php echo htmlspecialchars($booking['reference_number']); ?>
-                                    </div>
-                                    <div class="card-badges">
-                                        <?php echo PaymentService::guestBadge($booking); ?>
-                                    </div>
-                                </div>
-                            <?php echo serviceStatusRow('tour', $booking); ?>
-                                <div class="card-row">
-                                    <i class="fas fa-umbrella-beach"></i>
-                                    <span class="card-label">Tour</span>
-                                    <span class="card-value"><?php echo htmlspecialchars($booking['tour_name']); ?></span>
-                                </div>
-                                <div class="card-row">
-                                    <i class="fas fa-calendar-alt"></i>
-                                    <span class="card-label">Date</span>
-                                    <span class="card-value"><?php echo formatDateDisplay($booking['booking_date']); ?></span>
-                                </div>
-                                <div class="card-row">
-                                <i class="fas fa-peso-sign"></i>
-                                <span class="card-label">Total</span>
-                                <span class="card-value"><?php echo PaymentService::guestAmountCell($booking); ?></span>
-                            </div>
-
-                            <div class="card-actions">
-                                    <button type="button" class="btn-card-action btn-more"
-                                            onclick='viewBooking("tour", <?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, "UTF-8"); ?>)'>
-                                        <i class="fas fa-eye"></i> More / View
-                                    </button>
-<?php echo serviceRebookButton('tour', $booking, true); ?>
-                                    <?php if(canGiveFeedback($booking, 'tour')): ?>
-                                        <button type="button" class="btn-card-action" style="background:#8b5cf6;color:white;"
-                                                onclick="openFeedbackModal('tour', <?php echo $booking['id']; ?>, '<?php echo htmlspecialchars($booking['reference_number']); ?>', '<?php echo htmlspecialchars($booking['tour_name']); ?>')">
                                             <i class="fas fa-star"></i> Rate
                                         </button>
                                     <?php endif; ?>
@@ -4102,7 +3801,7 @@ $dash_reminders = array_slice($dash_reminders, 0, 4);
     </div>
 </div>
 
-<!-- ✅ REBOOK TOUR / FOOD / PACKAGE MODAL (payment carried forward, no new fee) -->
+<!-- ✅ REBOOK FOOD / PACKAGE MODAL (payment carried forward, no new fee) -->
 <div class="modal" id="serviceRebookModal">
     <div class="modal-content">
         <div class="modal-header">
@@ -4617,7 +4316,6 @@ function viewBooking(type, booking) {
     
     let typeLabel = '';
     if (type === 'house') typeLabel = 'House Booking';
-    else if (type === 'tour') typeLabel = 'Tour Booking';
     else if (type === 'food') typeLabel = 'Food Reservation';
     else if (type === 'package') typeLabel = 'Package Booking';
     document.getElementById('viewBookingTitle').textContent = typeLabel;
@@ -4702,7 +4400,10 @@ function viewBooking(type, booking) {
         proofBlockHtml += `</div>`;
     }
 
-    let guestNamesDisplay = 'No guest names recorded';
+    // Senior-citizen / health-condition group info. null / '' = booking pre-dates the fields => "Not recorded" (never 0 / No).
+    function groupSeniorText(v) { if (v === null || v === undefined || v === '') return 'Not recorded'; var n = parseInt(v, 10); return isNaN(n) ? 'Not recorded' : String(n); }
+    function groupHealthText(flag, d) { if (flag === null || flag === undefined || flag === '') return 'Not recorded'; if (String(flag) === '1' || flag === true) return d ? 'Yes — ' + d : 'Yes'; return 'No'; }
+    let guestNamesDisplay = '';
     if (bookingData.guest_names) {
         let names = bookingData.guest_names;
         let nameArray = [];
@@ -4740,20 +4441,9 @@ function viewBooking(type, booking) {
         details.push({ label: 'Check Out', value: escapeHtml(checkOutDisplay) });
 
         details.push({ label: 'Number of Pax', value: escapeHtml(bookingData.number_of_guests || '1') });
-        details.push({ label: 'Senior Citizens', value: bookingData.senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.senior_citizens) });
-        var healthValue = bookingData.has_health_condition;
-        var hasHealthCondition = String(healthValue) === '1';
-        details.push({ label: 'Health Condition', value: healthValue == null || healthValue === '' ? 'Not recorded' : (hasHealthCondition ? 'Yes' : 'No') });
-        if (hasHealthCondition && bookingData.health_condition_details) details.push({ label: 'Health Condition Details', value: '<span style="white-space:pre-wrap;">' + escapeHtml(bookingData.health_condition_details) + '</span>' });
-        if (bookingData.guest_names) details.push({ label: 'Historical Guest Names', value: escapeHtml(guestNamesDisplay) });
-    } else if (type === 'tour') {
-        details.push({ label: 'Tour', value: escapeHtml(bookingData.tour_name || 'N/A') });
-        if (bookingData.guest_name) details.push({ label: 'Guest Name', value: '<span style="color:#0369a1; font-weight:600;"><i class="fas fa-user"></i> ' + escapeHtml(bookingData.guest_name) + '</span>' });
-        if (bookingData.contact_number) details.push({ label: 'Contact Number', value: '<a href="tel:' + escapeHtml(bookingData.contact_number) + '" style="color:#0B2447; font-weight:600; text-decoration:none;"><i class="fas fa-phone"></i> ' + escapeHtml(bookingData.contact_number) + '</a>' });
-        details.push({ label: 'Booking Date', value: escapeHtml(parseDateForDisplay(bookingData.booking_date)) });
-        if (bookingData.preferred_time) details.push({ label: 'Preferred Time', value: '<span class="badge badge-info"><i class="fas fa-clock"></i> ' + escapeHtml(formatTimeDisplay(bookingData.preferred_time)) + '</span>' });
-        details.push({ label: 'Number of Pax', value: escapeHtml(bookingData.number_of_guests || '1') });
-        if (bookingData.special_requests) details.push({ label: 'Special Requests', value: '<em style="color:#475569;">' + escapeHtml(bookingData.special_requests) + '</em>' });
+        details.push({ label: 'Senior Citizens', value: escapeHtml(groupSeniorText(bookingData.senior_citizens)) });
+        details.push({ label: 'Health Condition', value: escapeHtml(groupHealthText(bookingData.has_health_condition, bookingData.health_condition_details)) });
+        if (guestNamesDisplay) details.push({ label: 'Guest Names', value: escapeHtml(guestNamesDisplay) });   // historical bookings only
     } else if (type === 'food') {
         details.push({ label: 'Food Package', value: escapeHtml(bookingData.food_name || 'N/A') });
         if (bookingData.guest_name) details.push({ label: 'Guest Name', value: '<span style="color:#0369a1; font-weight:600;"><i class="fas fa-user"></i> ' + escapeHtml(bookingData.guest_name) + '</span>' });
@@ -4783,13 +4473,11 @@ function viewBooking(type, booking) {
             if (bookingData.house_guests) {
                 houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-users" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_guests) + ' guest(s)</div>';
             }
-            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-check" style="color:#4DA6D9; width:14px;"></i> Senior citizens: ' + (bookingData.house_senior_citizens == null ? 'Not recorded' : escapeHtml(bookingData.house_senior_citizens)) + '</div>';
-            var houseHealthValue = bookingData.house_has_health_condition;
-            var houseHasHealthCondition = String(houseHealthValue) === '1';
-            var houseHealthLabel = houseHealthValue == null || houseHealthValue === '' ? 'Not recorded' : (houseHasHealthCondition ? 'Yes' : 'No');
-            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-heartbeat" style="color:#4DA6D9; width:14px;"></i> Health condition: ' + houseHealthLabel + '</div>'; 
-            if (houseHasHealthCondition && bookingData.house_health_condition_details) houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px; white-space:pre-wrap;"><i class="fas fa-notes-medical" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_health_condition_details) + '</div>';
-            if (bookingData.house_guest_names) houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-friends" style="color:#4DA6D9; width:14px;"></i> Historical guest names: ' + escapeHtml(bookingData.house_guest_names) + '</div>';
+            if (bookingData.house_guest_names) {
+                houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-friends" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.house_guest_names) + '</div>';
+            }
+            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user-clock" style="color:#4DA6D9; width:14px;"></i> Senior citizens: ' + escapeHtml(groupSeniorText(bookingData.house_senior_citizens)) + '</div>';
+            houseInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-notes-medical" style="color:#4DA6D9; width:14px;"></i> Health condition: ' + escapeHtml(groupHealthText(bookingData.house_has_health_condition, bookingData.house_health_condition_details)) + '</div>';
             if (bookingData.house_amount) {
                 houseInfo += '<div style="font-size:12px; color:#10b981; font-weight:700; margin-top:4px;">₱' + parseFloat(bookingData.house_amount).toLocaleString('en-US', {minimumFractionDigits:2}) + '</div>';
             }
@@ -4797,26 +4485,9 @@ function viewBooking(type, booking) {
             details.push({ label: '🏠 House', value: houseInfo });
         }
 
-        if (bookingData.tour_name) {
-            let tourInfo = '<div style="background:#f0f7fb; border-left:3px solid #4DA6D9; border-radius:8px; padding:10px 12px; margin-bottom:8px; text-align:left;">';
-            tourInfo += '<div style="font-weight:700; color:#0B2447; font-size:13px; margin-bottom:6px;"><i class="fas fa-umbrella-beach" style="color:#4DA6D9;"></i> ' + escapeHtml(bookingData.tour_name) + '</div>';
-            if (bookingData.tour_date) {
-                tourInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-calendar-alt" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(parseDateForDisplay(bookingData.tour_date)) + (bookingData.tour_time ? ' at ' + escapeHtml(formatTimeDisplay(bookingData.tour_time)) : '') + '</div>';
-            }
-            if (bookingData.tour_guests) {
-                tourInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-users" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.tour_guests) + ' guest(s)</div>';
-            }
-            if (bookingData.tour_guest_name) {
-                tourInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-user" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.tour_guest_name) + '</div>';
-            }
-            if (bookingData.tour_contact) {
-                tourInfo += '<div style="font-size:12px; color:#475569; margin-bottom:3px;"><i class="fas fa-phone" style="color:#4DA6D9; width:14px;"></i> ' + escapeHtml(bookingData.tour_contact) + '</div>';
-            }
-            if (bookingData.tour_amount) {
-                tourInfo += '<div style="font-size:12px; color:#10b981; font-weight:700; margin-top:4px;">₱' + parseFloat(bookingData.tour_amount).toLocaleString('en-US', {minimumFractionDigits:2}) + '</div>';
-            }
-            tourInfo += '</div>';
-            details.push({ label: '🏖️ Tour', value: tourInfo });
+        // An old package may still carry the amount of a retired add-on in its total: show the amount only, so the total reconciles.
+        if (parseFloat(bookingData.tour_amount) > 0) {
+            details.push({ label: 'Other charges', value: '<div style="font-size:12px; color:#475569;">Included in the package total (discontinued add-on): <strong style="color:#10b981;">₱' + parseFloat(bookingData.tour_amount).toLocaleString('en-US', {minimumFractionDigits:2}) + '</strong></div>' });
         }
 
         if (bookingData.food_name) {
@@ -4957,13 +4628,13 @@ function closeViewBookingModal() {
 // TAB SWITCHING
 // ============================================================
 function showTab(tab) {
-    ['houses', 'tours', 'food', 'packages', 'rebooks', 'history'].forEach(t => {
+    ['houses', 'food', 'packages', 'rebooks', 'history'].forEach(t => {
         const el = document.getElementById(t + '-tab');
         if (el) el.style.display = 'none';
     });
     document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
     
-    const tabMap = {'houses':0, 'tours':1, 'food':2, 'packages':3, 'rebooks':4, 'history':5};
+    const tabMap = {'houses':0, 'food':1, 'packages':2, 'rebooks':3, 'history':4};
     const target = document.getElementById(tab + '-tab');
     const buttons = document.querySelectorAll('.tab');
     
@@ -5155,7 +4826,7 @@ function cancelRebook(bookingId, reference) {
     document.getElementById('cancelRebookModal').classList.add('show');
     document.body.style.overflow = 'hidden';
 }
-// Phase 7.6: cancel a waiting tour / food / package rebook request (the booking itself never changed)
+// Phase 7.6: cancel a waiting food / package rebook request (the booking itself never changed)
 function cancelEmergencyRebook(requestId, reference) {
     document.getElementById('cancel_rebook_booking_id').value = '';
     document.getElementById('cancel_rebook_request_id').value = requestId;
@@ -5183,7 +4854,7 @@ function closeCancelRebookModal() {
 // CANCEL UNPAID BOOKING MODAL
 // ============================================================
 function openServiceRebookModal(type, bookingId, reference, currentDate, remaining, daysLeft, isCredit) {
-    var kinds = { tour: 'Tour', food: 'Food Order', package: 'Package' };
+    var kinds = { food: 'Food Order', package: 'Package' };
     document.getElementById('svc_rebook_kind').textContent = kinds[type] || '';
     document.getElementById('svc_rebook_type').value = type;
     document.getElementById('svc_rebook_id').value = bookingId;
@@ -5254,7 +4925,7 @@ function editFeedback(type, id, reference, itemName, existingRating, existingTex
     document.getElementById('edit_feedback_is_anonymous').checked = isAnonymous === true || isAnonymous === 'true';
     editSelectedRating = existingRating;
     document.getElementById('editRatingText').textContent = ratingTexts[existingRating] || 'Select a rating';
-    document.getElementById('editFeedbackSubmitBtn').name = type == 'house' ? 'edit_house_feedback' : (type == 'tour' ? 'edit_tour_feedback' : 'edit_food_feedback');
+    document.getElementById('editFeedbackSubmitBtn').name = type == 'house' ? 'edit_house_feedback' : 'edit_food_feedback';
     document.querySelectorAll('#editRatingStars i').forEach(function(star, index) {
         if (index < existingRating) star.classList.add('active');
         else star.classList.remove('active');
@@ -5445,7 +5116,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var urlParams = new URLSearchParams(window.location.search);
     var requestedTab = urlParams.get('tab') || DEFAULT_TAB;
-    var validTabs = ['houses', 'tours', 'food', 'packages', 'rebooks', 'history'];
+    var validTabs = ['houses', 'food', 'packages', 'rebooks', 'history'];
 
     if (requestedTab && validTabs.indexOf(requestedTab) !== -1) {
         showTab(requestedTab);

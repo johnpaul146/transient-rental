@@ -82,7 +82,6 @@ $upload_dirs = [
     'uploads/logos/',
     'uploads/hero/',
     'uploads/hero/houses/',
-    'uploads/hero/tours/',
     'uploads/hero/activities/',
     'uploads/hero/food/',
 ];
@@ -233,23 +232,6 @@ if (isset($_POST['upload_houses_hero']) && $is_admin) {
         exit();
     } else { $error = $result['message']; }
 }
-if (isset($_POST['upload_tours_hero']) && $is_admin) {
-    $result = handleImageUpload('tours_hero_image', 'uploads/hero/tours/', 'tours-hero');
-    if ($result['success']) {
-        saveSiteContent($pdo, 'site_settings', 'tours_hero_image', $result['filename']);
-
-        if (class_exists('SystemLogger')) {
-            SystemLogger::log($pdo, 'upload', 'content',
-                logActor($user_info) . " uploaded a new Tours page hero image",
-                null, 'site_content', null,
-                ['file' => $result['filename']]);
-        }
-
-        $_SESSION['flash_success'] = "Tours page hero image uploaded successfully!";
-        header("Location: edit-content.php?fresh=" . time());
-        exit();
-    } else { $error = $result['message']; }
-}
 if (isset($_POST['upload_activities_hero']) && $is_admin) {
     $result = handleImageUpload('activities_hero_image', 'uploads/hero/activities/', 'activities-hero');
     if ($result['success']) {
@@ -346,19 +328,6 @@ if (isset($_GET['remove_houses_hero']) && $is_admin) {
     $_SESSION['flash_success'] = "Houses page hero image removed successfully.";
     header("Location: edit-content.php"); exit();
 }
-if (isset($_GET['remove_tours_hero']) && $is_admin) {
-    foreach (glob('uploads/hero/tours/tours-hero.*') as $f) @unlink($f);
-    $pdo->prepare("DELETE FROM site_content WHERE section_name='site_settings' AND content_key='tours_hero_image'")->execute();
-
-    if (class_exists('SystemLogger')) {
-        SystemLogger::log($pdo, 'delete', 'content',
-            logActor($user_info) . " removed the Tours page hero image",
-            null, 'site_content', null, null, 'warning');
-    }
-
-    $_SESSION['flash_success'] = "Tours page hero image removed successfully.";
-    header("Location: edit-content.php"); exit();
-}
 if (isset($_GET['remove_activities_hero']) && $is_admin) {
     foreach (glob('uploads/hero/activities/activities-hero.*') as $f) @unlink($f);
     $pdo->prepare("DELETE FROM site_content WHERE section_name='site_settings' AND content_key='activities_hero_image'")->execute();
@@ -414,7 +383,7 @@ try {
     }
 } catch (Exception $e) { $error = "Failed to load content: " . $e->getMessage(); }
 
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 
 // RESOLVE IMAGE PATHS WITH GLOB FALLBACK
 $logo_path = $content['site_settings']['logo_path'] ?? '';
@@ -446,16 +415,6 @@ if (!$houses_hero_exists) {
     foreach (glob('uploads/hero/houses/houses-hero.*') as $f) {
         $houses_hero_path = $f; $houses_hero_exists = true;
         saveSiteContent($pdo, 'site_settings', 'houses_hero_image', basename($f)); break;
-    }
-}
-
-$tours_hero_filename = $content['site_settings']['tours_hero_image'] ?? '';
-$tours_hero_path = 'uploads/hero/tours/' . $tours_hero_filename;
-$tours_hero_exists = !empty($tours_hero_filename) && file_exists($tours_hero_path);
-if (!$tours_hero_exists) {
-    foreach (glob('uploads/hero/tours/tours-hero.*') as $f) {
-        $tours_hero_path = $f; $tours_hero_exists = true;
-        saveSiteContent($pdo, 'site_settings', 'tours_hero_image', basename($f)); break;
     }
 }
 
@@ -1978,19 +1937,6 @@ $current_terms_version = substr(md5(
                             'prefix' => 'housesHero',
                         ],
                         [
-                            'label' => 'Tours',
-                            'description' => 'Boat and island tour page',
-                            'exists' => $tours_hero_exists,
-                            'path' => $tours_hero_path,
-                            'fallback_exists' => $home_hero_exists,
-                            'fallback_path' => $home_hero_path,
-                            'input' => 'tours_hero_image',
-                            'btn' => 'upload_tours_hero',
-                            'remove' => 'remove_tours_hero',
-                            'icon' => 'fa-umbrella-beach',
-                            'prefix' => 'toursHero',
-                        ],
-                        [
                             'label' => 'Activities',
                             'description' => 'Guest activities page',
                             'exists' => $activities_hero_exists,
@@ -2188,7 +2134,7 @@ $current_terms_version = substr(md5(
                 <div class="form-group">
                     <label><i class="fas fa-heading"></i> Main Heading</label>
                     <input type="text" name="content[hero][title]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                           value="<?php echo htmlspecialchars($content['hero']['title'] ?? 'Welcome to Transient House & Tours'); ?>"
+                           value="<?php echo htmlspecialchars($content['hero']['title'] ?? 'Welcome to Jerry Dino\'s Stay'); ?>"
                            <?php echo $is_staff ? 'disabled' : ''; ?>>
                 </div>
                 <div class="form-group">
@@ -2212,7 +2158,7 @@ $current_terms_version = substr(md5(
                 <div class="form-group">
                     <label><i class="fas fa-align-left"></i> Supporting Text</label>
                     <textarea name="content[cta][subtitle]" class="form-control <?php echo $is_staff ? 'form-control-readonly' : ''; ?>"
-                              rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses or exciting tour packages for your next adventure.'); ?></textarea>
+                              rows="3" <?php echo $is_staff ? 'disabled' : ''; ?>><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses or exciting island activities for your next adventure.'); ?></textarea>
                 </div>
 
                 <div class="system-actions-preview" aria-label="System-managed homepage actions">
@@ -2327,7 +2273,7 @@ $current_terms_version = substr(md5(
                     <textarea name="content[terms][body]"
                               class="form-control form-control-readonly"
                               rows="14"
-                              disabled aria-readonly="true"><?php echo htmlspecialchars($content['terms']['body'] ?? 'Welcome to Transient House & Tours. By booking with us, you agree to the following terms:
+                              disabled aria-readonly="true"><?php echo htmlspecialchars($content['terms']['body'] ?? 'Welcome to Jerry Dino\'s Stay. By booking with us, you agree to the following terms:
 
 1. BOOKING & RESERVATIONS
 • All bookings are subject to availability and confirmation.
@@ -2378,7 +2324,7 @@ $current_terms_version = substr(md5(
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> Transient House &amp; Tours. All rights reserved.
+                &copy; <?php echo date('Y'); ?> Jerry Dino's Stay. All rights reserved.
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i>
@@ -2440,7 +2386,7 @@ handleFileInput('gcashQrInput', 'gcashQrFileLabel', 'gcashQrFileLabelText', 'gca
 
 // PAGE BANNER UPLOADERS
 (function initPageBannerUploaders() {
-    const prefixes = ['homeHero', 'housesHero', 'toursHero', 'activitiesHero', 'foodHero'];
+    const prefixes = ['homeHero', 'housesHero', 'activitiesHero', 'foodHero'];
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
     function formatBytes(bytes) {

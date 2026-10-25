@@ -7,28 +7,28 @@
  * the database and never touches payment, cancellation, rebooking or permission logic.
  *
  * Arrival date per service (approved rule):
- *   house   = check_in_date          tour = booking_date          food = preferred_date
- *   package = earliest of its house check-in / tour date / food date
+ *   house   = check_in_date          food = preferred_date
+ *   package = earliest of its house check-in / food date   (Tours/Boat was retired in Pass 4; a historical tour component is ignored)
  *
  * Every value that reaches SQL is whitelisted or validated here and bound as a parameter;
  * only fixed strings built in this class are concatenated.
  */
 class BookingFilters
 {
-    public const SERVICES   = ['all', 'house', 'tour', 'food', 'package'];
+    public const SERVICES   = ['all', 'house', 'food', 'package'];   // an old ?service=tour link falls back to 'all'
     public const DATES      = ['', 'today', 'next7', 'custom'];
     public const QUICK      = ['', 'soon', 'verify', 'rebooked'];
     public const SOON_DAYS  = 3;      // "Starting soon" window
     public const MAX_SPAN   = 366;    // longest custom range, in days
     public const SEARCH_MAX = 100;
 
-    public const SERVICE_LABELS = ['all' => 'All services', 'house' => 'House', 'tour' => 'Tour (past bookings)', 'food' => 'Food', 'package' => 'Package'];
+    public const SERVICE_LABELS = ['all' => 'All services', 'house' => 'House', 'food' => 'Food', 'package' => 'Package'];
     public const DATE_LABELS    = ['' => 'Any date', 'today' => 'Today', 'next7' => 'Next 7 days', 'custom' => 'Custom range'];
     public const QUICK_LABELS   = ['soon' => 'Starting soon (3 days)', 'verify' => 'Payment verification needed', 'rebooked' => 'Rebooked'];
 
-    /** Calendar RESOURCE filter (read-only, calendar view only): a house unit (houses.id) or a tour boat (tours.id). */
-    public const RESOURCE_SERVICES = ['house', 'tour'];
-    public const RESOURCE_LABELS   = ['house' => ['field' => 'Unit', 'all' => 'All units'], 'tour' => ['field' => 'Boat', 'all' => 'All boats']];
+    /** Calendar RESOURCE filter (read-only, calendar view only): a house unit (houses.id). */
+    public const RESOURCE_SERVICES = ['house'];
+    public const RESOURCE_LABELS   = ['house' => ['field' => 'Unit', 'all' => 'All units']];
 
     private const NONE = '9999-12-31';
 
@@ -90,9 +90,8 @@ class BookingFilters
     }
 
     /**
-     * Validate the calendar RESOURCE filter against the real records. The value is typed ("house-5" / "tour-3") so a
-     * unit id can never be mistaken for a boat id. $available = ['house' => [id => name], 'tour' => [id => name]]
-     * (loaded by the page). Anything that is not a known resource of the CURRENT service falls back to "all" and the
+     * Validate the calendar RESOURCE filter against the real records. The value is typed ("house-5").
+     * $available = ['house' => [id => name]] (loaded by the page). Anything that is not a known resource of the CURRENT service falls back to "all" and the
      * page keeps working: malformed / unknown / deleted ids add a short notice; a resource of another service (normal
      * when the Service dropdown is switched without JavaScript) is dropped silently. The resource only narrows the
      * calendar; list queries never use it. Counts as an active filter only in the calendar view.
@@ -102,14 +101,14 @@ class BookingFilters
         $raw = (string)($f['resource_raw'] ?? '');
         $f['resource'] = ''; $f['resource_type'] = ''; $f['resource_id'] = 0; $f['resource_name'] = '';
         if ($raw === '' || !in_array($f['service'], self::RESOURCE_SERVICES, true)) return $f;
-        if (!preg_match('/^(house|tour)-([1-9][0-9]{0,8})$/', $raw, $m)) {
-            $f['notice'] = $f['notice'] ?: 'The selected unit / boat was not understood, so all are shown.';
+        if (!preg_match('/^(house)-([1-9][0-9]{0,8})$/', $raw, $m)) {
+            $f['notice'] = $f['notice'] ?: 'The selected unit was not understood, so all are shown.';
             return $f;
         }
         if ($m[1] !== $f['service']) return $f;                      // other service's resource: ignore
         $id = (int)$m[2];
         if (!isset($available[$m[1]][$id])) {
-            $f['notice'] = $f['notice'] ?: 'The selected unit / boat was not found, so all are shown.';
+            $f['notice'] = $f['notice'] ?: 'The selected unit was not found, so all are shown.';
             return $f;
         }
         $f['resource'] = $m[1] . '-' . $id; $f['resource_type'] = $m[1]; $f['resource_id'] = $id;
@@ -121,8 +120,8 @@ class BookingFilters
     /**
      * SQL to append to a list query's WHERE (starts with " AND ..." or is empty), its bound
      * parameters, and an ORDER BY override (or null to keep the page's existing order).
-     * $service is house|tour|food|package. Table aliases: b (house/tour/food) and p (package),
-     * with the package query's existing hb / tb / fb joins.
+     * $service is house|food|package. Table aliases: b (house/food) and p (package),
+     * with the package query's existing hb / fb joins.
      */
     public static function fragment(string $service, array $f): array
     {
@@ -159,11 +158,10 @@ class BookingFilters
     {
         switch ($service) {
             case 'house': return 'DATE(b.check_in_date)';
-            case 'tour':  return 'DATE(b.booking_date)';
             case 'food':  return 'DATE(b.preferred_date)';
             default:
                 $n = "DATE('" . self::NONE . "')";
-                return "DATE(LEAST(COALESCE(hb.check_in_date, $n), COALESCE(tb.booking_date, $n), COALESCE(fb.preferred_date, $n)))";
+                return "DATE(LEAST(COALESCE(hb.check_in_date, $n), COALESCE(fb.preferred_date, $n)))";
         }
     }
 
@@ -184,7 +182,7 @@ class BookingFilters
             if (($k === 'from' || $k === 'to') && ($s['date'] ?? '') !== 'custom') continue;
             $q[$k] = $v;
         }
-        // calendar resource: only meaningful together with its own service (house-N with service=house, tour-N with service=tour)
+        // calendar resource: only meaningful together with its own service (house-N with service=house)
         $svc = (string)($s['service'] ?? 'all'); $res = (string)($s['resource'] ?? '');
         if ($res !== '' && in_array($svc, self::RESOURCE_SERVICES, true) && preg_match('/^' . $svc . '-[1-9][0-9]{0,8}$/', $res)) $q['resource'] = $res;
         return '?' . http_build_query($q, '', '&', PHP_QUERY_RFC3986);

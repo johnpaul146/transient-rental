@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/includes/MailBranding.php';
 session_start();
 require_once 'database.php';
 require_once 'includes/sidebar-counts.php';
@@ -416,13 +417,10 @@ foreach($users as $u) {
         $stmt = $pdo->prepare("SELECT COUNT(*) FROM house_bookings WHERE guest_id = ?");
         $stmt->execute([$guest['id']]);
         $house_count = $stmt->fetchColumn();
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM tour_bookings WHERE guest_id = ?");
-        $stmt->execute([$guest['id']]);
-        $tour_count = $stmt->fetchColumn();
         $stmt = $pdo->prepare("SELECT COUNT(*) FROM food_bookings WHERE guest_id = ?");
         $stmt->execute([$guest['id']]);
         $food_count = $stmt->fetchColumn();
-        $user_bookings_count[$u['id']] = $house_count + $tour_count + $food_count;
+        $user_bookings_count[$u['id']] = $house_count + $food_count;
     } else {
         $user_bookings_count[$u['id']] = 0;
     }
@@ -456,10 +454,10 @@ if(isset($_POST['delete_user']) && $is_admin) {
         try {
             if (file_exists('config/mail_config.php') && !preg_match('/@walkin\.invalid$/i', (string)$user['email'])) { // walk-in placeholder addresses are never emailed
                 require_once 'config/mail_config.php';
-                $mail = MailConfig::getInstance()->getMailer();
+                $mail = MailBranding::mailer();
                 $mail->clearAddresses();
                 $mail->addAddress($user['email'], $user['fullname'] ?: $user['username']);
-                $mail->Subject = 'Account Deleted — ' . ($site_name ?? 'Transient House & Tours');
+                $mail->Subject = 'Account Deleted — ' . ($site_name ?? 'Jerry Dino\'s Stay');
                 $mail->Body = '<html><body style="font-family: Arial, sans-serif; padding: 20px; background: #f5f7fa;"><div style="max-width: 600px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 40px;"><h2 style="color: #0B2447;">Account Deleted</h2><p>Dear <strong>' . htmlspecialchars($user['fullname'] ?: $user['username']) . '</strong>,</p><p>Your account (<strong>' . htmlspecialchars($user['username']) . '</strong>) has been permanently deleted.</p><div style="background: #fef3c7; padding: 15px; border-radius: 8px; color: #92400e;"><strong>Reason:</strong><br>' . htmlspecialchars($final_reason) . '</div></div></body></html>';
                 $mail->AltBody = "Your account ({$user['username']}) has been permanently deleted.\n\nReason: {$final_reason}";
                 $mail->send();
@@ -509,7 +507,7 @@ try {
     while($row = $stmt->fetch()) $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 } catch(PDOException $e) { $content = []; }
 
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1964,7 +1962,7 @@ title="Delete user">
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Huddled Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Jerry Dino\'s Stay. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i> <?php echo $is_admin ? 'Administrator' : 'Staff'; ?> Access

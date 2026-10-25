@@ -28,10 +28,10 @@
         return [$bookings, $reviews, $failed, $food, $blocked];
     }
 
-    // Pending bookings (house + tour + food + package) — same definition as the "Pending" list in
-    // booking-management.php: a package counts once (its house/tour/food component rows are skipped),
+    // Pending bookings (house + food + package) — same definition as the "Pending" list in
+    // booking-management.php: a package counts once (its house/food component rows are skipped),
     // and a house rebook still waiting for confirmation counts as pending.
-    foreach (['house_bookings', 'tour_bookings', 'food_bookings', 'package_bookings'] as $table) {
+    foreach (['house_bookings', 'food_bookings', 'package_bookings'] as $table) {
         $own  = $table === 'package_bookings' ? '' : ' AND (package_id IS NULL OR package_id = 0)';
         $pend = $table === 'house_bookings'
             ? "(payment_status='pending' OR (booking_status='pending' AND (rebooked_at IS NOT NULL OR rebook_count > 0)))"
@@ -70,7 +70,7 @@
 
     // Food items + upcoming blocked dates (Booking Management sidebar badges)
     try { $food = (int)$pdo->query("SELECT COUNT(*) FROM food_items")->fetchColumn(); } catch (Throwable $e) {}
-    try { $blocked = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= CURDATE()")->fetchColumn(); } catch (Throwable $e) {}
+    try { $blocked = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour' AND block_date >= CURDATE()")->fetchColumn(); } catch (Throwable $e) {}
 
     return [$bookings, $reviews, $failed, $food, $blocked];
 })();

@@ -66,7 +66,7 @@ try {
 // ============================================================
 // BLOCKING RULES / RESOURCE REGISTRY
 // Resource *types* map 1:1 to the blocked_dates.item_type ENUM.
-// The actual resources (houses, tours, food items) are always
+// The actual resources (houses, food items) are always
 // loaded from the database — nothing is hardcoded.
 // ============================================================
 const BD_AUTO_PREFIX = 'Auto-blocked from booking #'; // written by booking-management.php
@@ -80,12 +80,6 @@ function bd_resources(): array {
             'b_table' => 'house_bookings', 'b_fk' => 'house_id',
             'b_start' => 'check_in_date', 'b_end' => 'check_out_date',
         ],
-        'tour' => [
-            'label' => 'Tour', 'plural' => 'Tours', 'icon' => 'umbrella-beach',
-            'table' => 'tours', 'name_col' => 'tour_name',
-            'b_table' => 'tour_bookings', 'b_fk' => 'tour_id',
-            'b_start' => 'booking_date', 'b_end' => null,
-        ],
         'food' => [
             'label' => 'Food', 'plural' => 'Food Items', 'icon' => 'utensils',
             'table' => 'food_items', 'name_col' => 'name',
@@ -93,6 +87,14 @@ function bd_resources(): array {
             'b_start' => 'preferred_date', 'b_end' => null,
         ],
     ];
+}
+
+/**
+ * Resource types a NEW block / block request may target. Tours/Boat was retired (Pass 4): 'tour' is not a resource any more,
+ * so it is neither offered nor accepted, and old tour blocks (still in the database) are neither listed nor counted.
+ */
+function bd_creatable_resources(): array {
+    return bd_resources();
 }
 
 // DB enum value => label shown in the UI
@@ -230,7 +232,7 @@ function bd_analyze(PDO $pdo, string $type, int $id, array $dates, string $today
 
 // Shared validation for preview + save
 function bd_validate_request(PDO $pdo, array $post, string $today): array {
-    $resources = bd_resources();
+    $resources = bd_creatable_resources();
     $type = (string)($post['item_type'] ?? '');
     $id   = (int)($post['item_id'] ?? 0);
     if (!isset($resources[$type])) throw new Exception("Please choose a valid resource type.");
@@ -299,7 +301,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
         header('Content-Type: application/json; charset=utf-8');
         try {
             if (!hash_equals($bd_csrf, (string)($_POST['csrf'] ?? ''))) throw new Exception("Your session expired. Please refresh the page.");
-            $resources = bd_resources();
+            $resources = bd_creatable_resources();
             $type = (string)($_POST['item_type'] ?? '');
             $id   = (int)($_POST['item_id'] ?? 0);
             if (!isset($resources[$type]) || $id <= 0) throw new Exception("Please choose a valid resource.");
@@ -541,6 +543,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bd_action'])) {
             $stmt->execute([$id]);
             $block = $stmt->fetch();
             if (!$block) throw new Exception("That blocked date no longer exists (it may already have been unblocked).");
+            if ($block['item_type'] === 'tour') throw new Exception("That blocked date belongs to a discontinued service and is not managed here.");
 
             if (!bd_can_unblock($block, $is_admin)) {
                 if (class_exists('SystemLogger')) {
@@ -609,9 +612,9 @@ if(isset($_GET['logout'])) {
 $block_requests = [];
 try {
     if ($is_admin) {
-        $rq = $pdo->query("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.status = 'pending' ORDER BY r.requested_at ASC LIMIT 50");
+        $rq = $pdo->query("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.status = 'pending' AND r.item_type <> 'tour' ORDER BY r.requested_at ASC LIMIT 50");
     } else {
-        $rq = $pdo->prepare("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.requested_by = ? ORDER BY r.requested_at DESC LIMIT 10");
+        $rq = $pdo->prepare("SELECT r.*, u.fullname AS requester_name, u.username AS requester_username FROM blocked_date_requests r LEFT JOIN users u ON u.id = r.requested_by WHERE r.requested_by = ? AND r.item_type <> 'tour' ORDER BY r.requested_at DESC LIMIT 10");
         $rq->execute([$_SESSION['user_id']]);
     }
     $block_requests = $rq->fetchAll();
@@ -633,6 +636,7 @@ try {
 $type_keys     = array_keys(bd_resources());
 $current_tab = 'list';
 $filter_type   = in_array($_GET['filter_type'] ?? 'all', array_merge(['all'], $type_keys), true) ? ($_GET['filter_type'] ?? 'all') : 'all';
+if (($_GET['filter_type'] ?? 'all') !== $filter_type) $_GET['filter_type'] = $filter_type;   // an unknown / retired resource (e.g. 'tour') is never echoed back into links
 $filter_status = in_array($_GET['filter_status'] ?? 'current', ['current', 'past', 'all'], true) ? ($_GET['filter_status'] ?? 'current') : 'current';
 $filter_month  = preg_match('/^\d{4}-\d{2}$/', (string)($_GET['filter_month'] ?? '')) ? $_GET['filter_month'] : '';
 $search        = trim((string)($_GET['search'] ?? ''));
@@ -663,7 +667,7 @@ $bd_name_expr = 'COALESCE(' . implode(', ', $bd_name_parts) . ')';
 // ============================================================
 // BLOCKED DATES LIST (filtered + paginated)
 // ============================================================
-$where = []; $params = [];
+$where = ["bd.item_type <> 'tour'"]; $params = [];   // old blocks of the retired Tours/Boat service are never listed
 if ($filter_type !== 'all')      { $where[] = "bd.item_type = ?"; $params[] = $filter_type; }
 if ($filter_status === 'current'){ $where[] = "bd.block_date >= ?"; $params[] = $today; }
 if ($filter_status === 'past')   { $where[] = "bd.block_date < ?";  $params[] = $today; }
@@ -693,20 +697,20 @@ $blocked_dates = $stmt->fetchAll();
 // ============================================================
 // OVERVIEW
 // ============================================================
-$total_blocks    = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates")->fetchColumn();
+$total_blocks    = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour'")->fetchColumn();
 $upcoming_blocks = 0; $next7_blocks = 0; $resources_affected = 0;
-$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= ?");
+$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour' AND block_date >= ?");
 $st->execute([$today]);
 $upcoming_blocks = (int)$st->fetchColumn();
-$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE block_date BETWEEN ? AND ?");
+$st = $pdo->prepare("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour' AND block_date BETWEEN ? AND ?");
 $st->execute([$today, date('Y-m-d', strtotime('+6 days'))]);
 $next7_blocks = (int)$st->fetchColumn();
-$st = $pdo->prepare("SELECT COUNT(DISTINCT item_type, item_id) FROM blocked_dates WHERE block_date >= ?");
+$st = $pdo->prepare("SELECT COUNT(DISTINCT item_type, item_id) FROM blocked_dates WHERE item_type <> 'tour' AND block_date >= ?");
 $st->execute([$today]);
 $resources_affected = (int)$st->fetchColumn();
 
 $by_type = [];
-foreach ($pdo->query("SELECT item_type, COUNT(*) c FROM blocked_dates GROUP BY item_type")->fetchAll() as $r) {
+foreach ($pdo->query("SELECT item_type, COUNT(*) c FROM blocked_dates WHERE item_type <> 'tour' GROUP BY item_type")->fetchAll() as $r) {
     $by_type[$r['item_type']] = (int)$r['c'];
 }
 
@@ -718,6 +722,7 @@ try {
             MAX(bd.reason) AS reason, MAX(bd.created_at) AS created_at,
             MAX({$bd_name_expr}) AS item_name, MAX(COALESCE(bu.fullname, bu.username)) AS blocked_by_name
         FROM blocked_dates bd {$bd_joins}
+        WHERE bd.item_type <> 'tour'
         GROUP BY bd.item_type, bd.item_id, bd.block_type, bd.blocked_by, DATE_FORMAT(bd.created_at, '%Y-%m-%d %H:%i')
         ORDER BY MAX(bd.created_at) DESC, MAX(bd.id) DESC
         LIMIT 5")->fetchAll();
@@ -855,7 +860,7 @@ try {
     color: #0284c7;
 }
 
-.blocked-stats .stat-tour .stat-icon {
+.blocked-stats .stat-resources .stat-icon {
     background: rgba(16,185,129,0.15);
     color: #10b981;
 }
@@ -936,7 +941,6 @@ try {
         .badge-owner_use { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
         .badge-other { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
         .badge-house { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; }
-        .badge-tour { background: #e6f7e6; color: #10b981; border: 1px solid #a7f3d0; }
         .badge-food { background: #fef3c7; color: #92400e; border: 1px solid #fbbf24; }
 
         /* EMPTY STATE */
@@ -1227,7 +1231,7 @@ try {
         <div class="top-bar">
             <div class="page-title">
                 <h1><i class="fas fa-ban"></i> Blocked Dates Management</h1>
-                <p>Restrict availability for houses, tours, and food items</p>
+                <p>Restrict availability for houses and food items</p>
             </div>
             <div class="user-profile">
                 <div style="text-align: right;">
@@ -1335,7 +1339,7 @@ try {
                 <div class="stat-label">Next 7 Days</div>
                 <div class="stat-description">Restrictions starting soon</div>
             </div>
-            <div class="stat-card stat-tour">
+            <div class="stat-card stat-resources">
                 <div class="stat-icon"><i class="fas fa-layer-group"></i></div>
                 <div class="stat-number"><?php echo $resources_affected; ?></div>
                 <div class="stat-label">Resources Restricted</div>
@@ -1376,7 +1380,7 @@ try {
             <div class="empty-state" style="padding: 30px 20px;">
                 <i class="fas fa-calendar-check" style="font-size: 40px; margin-bottom: 12px;"></i>
                 <h3>No restrictions yet</h3>
-                <p>Use “Block Availability” to restrict a house, tour, or food item.</p>
+                <p>Use “Block Availability” to restrict a house or food item.</p>
             </div>
             <?php endif; ?>
         </div>
@@ -1593,7 +1597,7 @@ var BD = <?php
         'returnQs'  => $_SERVER['QUERY_STRING'] ?? '',
         'isStaff'   => !$is_admin,
     ];
-    foreach (bd_resources() as $t => $cfg) {
+    foreach (bd_creatable_resources() as $t => $cfg) {
         $bd_js['resources'][$t] = [
             'label'  => $cfg['label'],
             'plural' => $cfg['plural'],

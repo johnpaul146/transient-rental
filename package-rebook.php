@@ -9,8 +9,8 @@
  *  - every part of the package gets its OWN new schedule (no common day offset any more):
  *      HOUSE  same unit, same number of nights: new check-in date + check-in time + guests (1..capacity);
  *             check-out date = check-in + nights, check-out time follows the check-in time (current rule);
- *      TOUR   same boat: new date + time;      FOOD   same order: new date + time (delivery stays at the package unit);
- *  - with a house in the package, the tour and food must be inside the NEW house stay;
+ *      FOOD   same order: new date + time (delivery stays at the package unit);
+ *  - with a house in the package, the food must be inside the NEW house stay;
  *  - the guest submits ONE request for the whole package; nothing changes until Admin/Staff confirm it
  *    (all parts together in one transaction) in Booking Management. Reject / Cancel leave it untouched.
  * All rules live in RebookService (plan / dayCheck / requestServiceRebook). The paid amount, the single ₱1,000
@@ -100,7 +100,6 @@ if ($emergency) {
 }
 $cur = RebookService::currentSchedule('package', $pkg, $parts);
 $capacity = $parts['house'] ? (int)RebookService::houseView($pdo, $parts['house'])['capacity'] : 0;
-$tourTimes = $cur['tour'] ? RebookService::timeChoices('tour', $cur['tour']['time']) : [];
 $foodTimes = $cur['food'] ? RebookService::timeChoices('food', $cur['food']['time']) : [];
 $gs = function ($k) { return isset($_GET[$k]) && is_string($_GET[$k]) ? $_GET[$k] : ''; };
 
@@ -111,7 +110,7 @@ if ($isAjax) {
     $mode = $gs('ajax');
     if ($mode === 'month') {
         $part = $gs('part');
-        if (!in_array($part, ['house', 'tour', 'food'], true) || empty($cur[$part])) jsonOut(['error' => 'Unknown item.'], 400);
+        if (!in_array($part, ['house', 'food'], true) || empty($cur[$part])) jsonOut(['error' => 'Unknown item.'], 400);
         $ym = $gs('ym');
         if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $ym)) jsonOut(['error' => 'Invalid month.'], 400);
         $ctx = ['h_date' => $gs('h_date'), 'h_time' => $gs('h_time')];
@@ -174,12 +173,12 @@ try {
     $q = $pdo->query("SELECT section_name, content_key, content_value FROM site_content");
     while ($row = $q->fetch()) $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 } catch (PDOException $e) {}
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 $nav_logo = $content['site_settings']['logo_path'] ?? 'uploads/logos/logo.png';
 $nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
 
 function pr_dt($d, $t = null) { return date('M j, Y', strtotime($d)) . ($t ? ' · ' . date('g:i A', strtotime($t)) : ''); }
-$h = $parts['house']; $t = $parts['tour']; $f = $parts['food'];
+$h = $parts['house']; $f = $parts['food'];
 $hm = function ($time) { return substr((string)$time, 0, 5); };
 ?>
 <!DOCTYPE html>
@@ -239,8 +238,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day{text-align:center;padding:9px 0;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid transparent;background:#ecfdf5;color:#065f46;font-weight:600;min-height:38px}
 .cal-grid .day:hover:not(.off):not(.sel){border-color:#10b981}
 .cal-grid .day.off{background:#f1f5f9;color:#94a3b8;text-decoration:line-through;cursor:not-allowed;font-weight:500}
-.cal-grid .day.available{background:#dcfce7;color:#166534;box-shadow:inset 0 0 0 1px #86efac}
-.cal-grid .day.available:hover{background:#bbf7d0}
 .cal-grid .day.nostart{background:#fff;color:#92400e;border:1px dashed #f59e0b;cursor:not-allowed;font-weight:600;text-decoration:none}
 .cal-grid .day.today{position:relative}
 .cal-grid .day.today::after{content:'';position:absolute;left:50%;bottom:3px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:#0B3D91}
@@ -250,7 +247,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day.rng{background:#dbeafe;color:#1e3a8a;text-decoration:none}
 .cal-grid .day.outd{background:#bfdbfe;color:#1e3a8a;text-decoration:none}
 .cal-grid .day.blank{background:transparent;cursor:default}
-.cal-grid .day.loading{opacity:.5}
+.cal-grid .day.loading{opacity:.5}.cal-grid .day.loading:not(.sel):not(.rng):not(.outd):not(.blank){background:#f1f5f9;color:#94a3b8}   /* not green until the server has confirmed the day */
 .cal-legend{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:10px;font-size:12px;color:#64748b}
 .cal-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
 .pk-msg{margin-top:8px;font-size:12.5px;color:#b45309;min-height:0}
@@ -301,10 +298,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                 <div class="pr-item"><i class="fas fa-home"></i><div><b><?php echo htmlspecialchars($h['item_name'] ?: 'House'); ?></b>
                     <span><?php echo htmlspecialchars(pr_dt($h['check_in_date'], $cur['house']['in_time'])); ?><br>to <?php echo htmlspecialchars(pr_dt($h['check_out_date'], $cur['house']['out_time'])); ?> · <?php echo (int)$h['number_of_guests']; ?> guest<?php echo (int)$h['number_of_guests'] === 1 ? '' : 's'; ?></span></div></div>
                 <?php endif; ?>
-                <?php if ($t): ?>
-                <div class="pr-item"><i class="fas fa-ship"></i><div><b><?php echo htmlspecialchars($t['item_name'] ?: 'Tour'); ?></b>
-                    <span><?php echo htmlspecialchars(pr_dt($t['booking_date'], $t['preferred_time'] ?: null)); ?></span></div></div>
-                <?php endif; ?>
                 <?php if ($f): ?>
                 <div class="pr-item"><i class="fas fa-utensils"></i><div><b><?php echo htmlspecialchars($f['item_name'] ?: 'Food'); ?><?php if ((int)($f['quantity'] ?? 1) > 1): ?> × <?php echo (int)$f['quantity']; ?><?php endif; ?></b>
                     <span><?php echo $f['preferred_date'] ? htmlspecialchars(pr_dt($f['preferred_date'], $f['preferred_time'] ?: null)) : 'No date'; ?> · <?php echo htmlspecialchars(ucfirst((string)$f['fulfillment_method'])); ?></span></div></div>
@@ -328,7 +321,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                 <ul class="pr-rules">
                     <li><i class="fas fa-exclamation-triangle" style="color:#ea580c"></i><span><strong>Emergency Rebook</strong> is only for packages whose normal rebook is closed (limit reached or 7-day window passed).</span></li>
                     <li><i class="fas fa-check-circle"></i><span>Each part gets <strong>its own new schedule</strong>, and it is <strong>one request for the whole package</strong>: all parts are approved together or none.</span></li>
-                    <?php if ($h && ($t || $f)): ?><li><i class="fas fa-check-circle"></i><span>The <?php echo $t && $f ? 'tour and food' : ($t ? 'tour' : 'food'); ?> must still be <strong>during the new house stay</strong>.</span></li><?php endif; ?>
+                    <?php if ($h && $f): ?><li><i class="fas fa-check-circle"></i><span>The food must still be <strong>during the new house stay</strong>.</span></li><?php endif; ?>
                     <li><i class="fas fa-check-circle"></i><span>Your payment is <strong>carried forward</strong>: one payment, no new reservation fee, price unchanged.</span></li>
                     <li><i class="fas fa-hourglass-half" style="color:#ea580c"></i><span><strong>This is a request.</strong> It still requires Admin/Staff approval and availability; it does not guarantee rescheduling. Until then you keep your current schedule, and you can cancel it from the dashboard.</span></li>
                 </ul>
@@ -336,7 +329,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                 <ul class="pr-rules">
                     <li><i class="fas fa-check-circle"></i><span>Each part gets <strong>its own new schedule</strong>. You can change one part and keep the others.</span></li>
                     <?php if ($h): ?><li><i class="fas fa-check-circle"></i><span><strong>House:</strong> same unit and the same <?php echo (int)$cur['house']['nights']; ?> night<?php echo (int)$cur['house']['nights'] === 1 ? '' : 's'; ?>. Check-out is automatic and its time follows the check-in time. Up to <?php echo (int)$capacity; ?> guests.</span></li><?php endif; ?>
-                    <?php if ($h && ($t || $f)): ?><li><i class="fas fa-check-circle"></i><span>The <?php echo $t && $f ? 'tour and food' : ($t ? 'tour' : 'food'); ?> must be <strong>during the new house stay</strong>.</span></li><?php endif; ?>
+                    <?php if ($h && $f): ?><li><i class="fas fa-check-circle"></i><span>The food must be <strong>during the new house stay</strong>.</span></li><?php endif; ?>
                     <li><i class="fas fa-check-circle"></i><span><?php echo $isAssist ? 'The guest\'s' : 'Your'; ?> payment is <strong>carried forward</strong>: no new reservation fee, no refund, price unchanged.</span></li>
                     <li><i class="fas fa-check-circle"></i><span>Up to <?php echo $maxRebooks; ?> rebooks per booking, within <?php echo RebookService::WINDOW_DAYS; ?> days from the booking date.</span></li>
                     <li><i class="fas fa-hourglass-half" style="color:#f59e0b"></i><span><strong>This is a request.</strong> Admin/Staff confirm the whole package at once; if any part was taken meanwhile, nothing changes.</span></li>
@@ -360,11 +353,11 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                 <input type="hidden" name="<?php echo $emergency ? 'emergency_rebook' : 'rebook_package'; ?>" value="1">
                 <input type="hidden" name="id" value="<?php echo (int)$pkg_id; ?>">
                 <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($csrf); ?>">
-                <?php foreach (['house' => ['fa-home', 'House', 'Pick the new check-in date'], 'tour' => ['fa-ship', 'Tour / Boat', 'Pick the new tour date'], 'food' => ['fa-utensils', 'Food', 'Pick the new food date']] as $pk => $pm): if (!$cur[$pk]) continue;
-                    $nm = $pk === 'house' ? $h['item_name'] : ($pk === 'tour' ? $t['item_name'] : $f['item_name']); ?>
+                <?php foreach (['house' => ['fa-home', 'House', 'Pick the new check-in date'], 'food' => ['fa-utensils', 'Food', 'Pick the new food date']] as $pk => $pm): if (!$cur[$pk]) continue;
+                    $nm = $pk === 'house' ? $h['item_name'] : $f['item_name']; ?>
                 <section class="pk-sec" data-part="<?php echo $pk; ?>">
                     <h3><i class="fas <?php echo $pm[0]; ?>"></i> <?php echo $pm[1]; ?> <small><?php echo htmlspecialchars((string)$nm); ?></small></h3>
-                    <div class="pk-cur">Current: <?php echo htmlspecialchars(RebookService::scheduleLines('package', [$pk => $cur[$pk]] + ['house' => null, 'tour' => null, 'food' => null])[0]['text'] ?? ''); ?></div>
+                    <div class="pk-cur">Current: <?php echo htmlspecialchars(RebookService::scheduleLines('package', [$pk => $cur[$pk]] + ['house' => null, 'food' => null])[0]['text'] ?? ''); ?></div>
                     <div class="cal-head"><span class="cal-title"></span>
                         <div class="cal-nav"><button type="button" class="cal-prev" aria-label="Previous month">&lsaquo;</button><button type="button" class="cal-next" aria-label="Next month">&rsaquo;</button></div></div>
                     <div class="cal-grid" role="grid" aria-label="<?php echo $pm[2]; ?>"></div>
@@ -382,9 +375,9 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                             </select></div>
                     </div>
                     <div class="pk-auto" id="h_auto"></div>
-                    <?php else: $ch = $pk === 'tour' ? $tourTimes : $foodTimes; $pre = $pk[0]; ?>
+                    <?php else: $ch = $foodTimes; $pre = $pk[0]; ?>
                     <input type="hidden" name="<?php echo $pre; ?>_date" id="<?php echo $pre; ?>_date" value="<?php echo htmlspecialchars($cur[$pk]['date']); ?>">
-                    <div class="pr-field"><label for="<?php echo $pre; ?>_time"><i class="fas fa-clock"></i> <?php echo $pk === 'tour' ? 'Tour' : 'Food'; ?> time</label>
+                    <div class="pr-field"><label for="<?php echo $pre; ?>_time"><i class="fas fa-clock"></i> Food time</label>
                         <select name="<?php echo $pre; ?>_time" id="<?php echo $pre; ?>_time">
                             <?php foreach ($ch as $tc): ?>
                             <option value="<?php echo $hm($tc); ?>" <?php echo $tc === $cur[$pk]['time'] ? 'selected' : ''; ?>><?php echo date('g:i A', strtotime($tc)); ?><?php echo $tc === $cur[$pk]['time'] ? ' (current)' : ''; ?></option>
@@ -417,10 +410,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     var TODAY = <?php echo json_encode(date('Y-m-d')); ?>;
     var MAXD = <?php echo json_encode(date('Y-m-d', strtotime('+365 days'))); ?>;
     var NIGHTS = <?php echo $cur['house'] ? (int)$cur['house']['nights'] : 0; ?>;
-    var CUR = <?php echo json_encode(['house' => $cur['house'] ? $cur['house']['in'] : null, 'tour' => $cur['tour'] ? $cur['tour']['date'] : null, 'food' => $cur['food'] ? $cur['food']['date'] : null]); ?>;
+    var CUR = <?php echo json_encode(['house' => $cur['house'] ? $cur['house']['in'] : null, 'food' => $cur['food'] ? $cur['food']['date'] : null]); ?>;
     var MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     var $ = function (id) { return document.getElementById(id); };
-    var hDate = $('h_date'), hTime = $('h_time'), hGuests = $('h_guests'), tDate = $('t_date'), tTime = $('t_time'), fDate = $('f_date'), fTime = $('f_time');
+    var hDate = $('h_date'), hTime = $('h_time'), hGuests = $('h_guests'), fDate = $('f_date'), fTime = $('f_time');
     var note = $('calNote'), prev = $('preview'), btn = $('submitBtn'), last = null, ptoken = 0;
     function pad(n) { return String(n).padStart(2, '0'); }
     function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
@@ -428,8 +421,8 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     function ft(t) { if (!t) return ''; var p = t.split(':'), h = +p[0], ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return h + ':' + p[1] + ' ' + ap; }
     function addDays(ds, n) { var p = ds.split('-'), d = new Date(+p[0], +p[1] - 1, +p[2] + n); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
 
-    // One small calendar per package part (house / tour / food). Availability comes from the server (dayCheck);
-    // tour and food days outside the NEW house stay are unavailable, so they reload when the house changes.
+    // One small calendar per package part (house / food). Availability comes from the server (dayCheck);
+    // food days outside the NEW house stay are unavailable, so they reload when the house changes.
     function makeCal(part, input) {
         var root = document.querySelector('.pk-sec[data-part="' + part + '"]'); if (!root || !input) return null;
         var grid = root.querySelector('.cal-grid'), title = root.querySelector('.cal-title'), msg = root.querySelector('.pk-msg');
@@ -453,7 +446,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                 else if (part === 'house' && ds === out) cls += ' outd';
                 else if (nostart) cls += ' nostart';
                 else if (off) cls += ' off';
-                else if (info) cls += ' available';
                 if (ds === CUR[part]) cls += ' cur';
                 if (ds === TODAY) cls += ' today';
                 h += '<div class="' + cls + '" data-d="' + ds + '" role="button" aria-disabled="' + (off ? 'true' : 'false') + '">' + d + '</div>';
@@ -482,19 +474,19 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         root.querySelector('.cal-next').addEventListener('click', function () { m++; if (m > 11) { m = 0; y++; } load(); });
         return { load: load, draw: draw };
     }
-    var cals = { house: makeCal('house', hDate), tour: makeCal('tour', tDate), food: makeCal('food', fDate) };
+    var cals = { house: makeCal('house', hDate), food: makeCal('food', fDate) };
     function houseAuto() {
         if (!hDate || !$('h_auto')) return;
         var out = addDays(hDate.value, NIGHTS);
         $('h_auto').innerHTML = '<i class="fas fa-sign-out-alt"></i> Check-out (automatic): <strong>' + esc(fd(out) + ' · ' + ft(hTime.value)) + '</strong> — ' + NIGHTS + ' night' + (NIGHTS === 1 ? '' : 's') + ', same time as check-in.';
     }
     function changed(part) {
-        if (part === 'house') { houseAuto(); if (cals.tour) cals.tour.load(); if (cals.food) cals.food.load(); }
+        if (part === 'house') { houseAuto(); if (cals.food) cals.food.load(); }
         check();
     }
     function params() {
         var p = [];
-        [['h_date', hDate], ['h_time', hTime], ['h_guests', hGuests], ['t_date', tDate], ['t_time', tTime], ['f_date', fDate], ['f_time', fTime]].forEach(function (x) {
+        [['h_date', hDate], ['h_time', hTime], ['h_guests', hGuests], ['f_date', fDate], ['f_time', fTime]].forEach(function (x) {
             if (x[1]) p.push(x[0] + '=' + encodeURIComponent(x[1].value));
         });
         return p.join('&');
@@ -521,7 +513,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     }
     if (hTime) { hTime.addEventListener('change', function () { if (cals.house) cals.house.load(); changed('house'); }); }
     if (hGuests) hGuests.addEventListener('change', check);
-    if (tTime) tTime.addEventListener('change', check);
     if (fTime) fTime.addEventListener('change', check);
     $('rebookForm').addEventListener('submit', function (e) {
         if (!last || btn.disabled) { e.preventDefault(); return; }
@@ -533,7 +524,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending request…';
     });
     houseAuto();
-    ['house', 'tour', 'food'].forEach(function (k) { if (cals[k]) cals[k].load(); });
+    ['house', 'food'].forEach(function (k) { if (cals[k]) cals[k].load(); });
     check();
 })();
 </script>

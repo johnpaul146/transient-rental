@@ -2,7 +2,7 @@
 /**
  * includes/rebook-confirm.php
  *
- * Confirmation step shown before a rebook REQUEST is sent (house / tour / food / package). Every rebook is a request
+ * Confirmation step shown before a rebook REQUEST is sent (house / food / package). Every rebook is a request
  * that Admin/Staff confirm later (Phase 7.6), so the final button reads "Submit Rebook Request".
  * UX ONLY: it never validates, prices or changes anything. The form's own POST (same URL, same fields, same CSRF
  * token) is submitted unchanged once the guest presses "Submit Rebook Request"; all rules stay in RebookService and

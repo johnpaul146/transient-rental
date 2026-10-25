@@ -5,7 +5,7 @@
  *
  * Expects:
  *   $bookings   (array) — rows to render
- *   $table_type ('house' | 'tour' | 'food' | 'package')
+ *   $table_type ('house' | 'food' | 'package')
  *
  * Optional:
  *   $table_empty_message (string)
@@ -30,16 +30,6 @@ $columns = match ($tableType) {
         ['key' => 'total_amount',     'label' => 'Total',     'format' => 'money'],
         ['key' => 'payment_status',   'label' => 'Payment',   'format' => 'payment'],
         ['key' => 'booking_status',   'label' => 'Status',    'format' => 'status'],
-    ],
-    'tour' => [
-        ['key' => 'reference_number', 'label' => 'Ref #',    'format' => 'ref'],
-        ['key' => 'guest_name',       'label' => 'Guest',    'format' => 'text'],
-        ['key' => 'tour_name',        'label' => 'Tour',     'format' => 'text'],
-        ['key' => 'booking_date',     'label' => 'Date',     'format' => 'date'],
-        ['key' => 'number_of_guests', 'label' => 'Pax',      'format' => 'text'],
-        ['key' => 'total_amount',     'label' => 'Total',    'format' => 'money'],
-        ['key' => 'payment_status',   'label' => 'Payment',  'format' => 'payment'],
-        ['key' => 'booking_status',   'label' => 'Status',   'format' => 'status'],
     ],
     'food' => [
         ['key' => 'reference_number', 'label' => 'Ref #',    'format' => 'ref'],

@@ -31,7 +31,7 @@ require_once __DIR__ . '/RebookService.php';
 
 class EmergencyRebookService {
 
-    const TYPES = ['house', 'tour', 'food', 'package'];
+    const TYPES = ['house', 'food', 'package'];   // Tours/Boat was retired: no tour Emergency Rebook can be requested, loaded or approved
     const REASON_MIN = 10;
     const REASON_MAX = 500;
     const NOTE_MAX = 500;
@@ -60,6 +60,7 @@ class EmergencyRebookService {
      * $b = the booking row as stored (house/tour/food/package).
      */
     public static function eligibility($type, array $b) {
+        if ($type === 'tour') return ['eligible' => false, 'reason' => null, 'message' => RebookService::TOUR_REMOVED_MESSAGE];
         if (!in_array($type, self::TYPES, true)) return ['eligible' => false, 'reason' => null, 'message' => 'Unknown booking type.'];
         $why = $type === 'house' ? RebookService::houseBlockReason($b, true) : RebookService::serviceBlockReason($type, $b, true);
         if ($why !== null) return ['eligible' => false, 'reason' => null, 'message' => $why];
@@ -191,16 +192,16 @@ class EmergencyRebookService {
 
     public static function pendingCount(PDO $pdo) {
         if (!self::tableReady($pdo)) return 0;
-        try { return (int)$pdo->query("SELECT COUNT(*) FROM emergency_rebook_requests WHERE status = 'pending'")->fetchColumn(); }
+        try { return (int)$pdo->query("SELECT COUNT(*) FROM emergency_rebook_requests WHERE status = 'pending' AND booking_type <> 'tour'")->fetchColumn(); }
         catch (PDOException $e) { return 0; }
     }
 
     /** [type][booking_id] => pending request (one guest's, or all), for marking rows in lists. */
     public static function pendingMap(PDO $pdo, $guestId = null) {
-        $map = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+        $map = ['house' => [], 'food' => [], 'package' => []];
         if (!self::tableReady($pdo)) return $map;
         try {
-            $st = $pdo->prepare("SELECT * FROM emergency_rebook_requests WHERE status = 'pending'" . ($guestId !== null ? ' AND guest_id = ?' : '') . ' ORDER BY id');
+            $st = $pdo->prepare("SELECT * FROM emergency_rebook_requests WHERE status = 'pending' AND booking_type <> 'tour'" . ($guestId !== null ? ' AND guest_id = ?' : '') . ' ORDER BY id');
             $st->execute($guestId !== null ? [(int)$guestId] : []);
             foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $map[$r['booking_type']][(int)$r['booking_id']] = self::decode($r);
         } catch (PDOException $e) { error_log('[EmergencyRebook] pendingMap: ' . $e->getMessage()); }
@@ -212,11 +213,11 @@ class EmergencyRebookService {
      * [type][booking_id] => ['id','reviewed_at','review_note','reference_number']. Reviewer identity is never exposed.
      */
     public static function recentRejections(PDO $pdo, $guestId, $days = 14) {
-        $out = ['house' => [], 'tour' => [], 'food' => [], 'package' => []];
+        $out = ['house' => [], 'food' => [], 'package' => []];
         if (!self::tableReady($pdo)) return $out;
         try {
             $st = $pdo->prepare("SELECT id, booking_type, booking_id, reference_number, reviewed_at, review_note FROM emergency_rebook_requests
-                                  WHERE guest_id = ? AND status = 'rejected' AND reviewed_at >= DATE_SUB(NOW(), INTERVAL " . (int)$days . " DAY) ORDER BY id");
+                                  WHERE guest_id = ? AND status = 'rejected' AND booking_type <> 'tour' AND reviewed_at >= DATE_SUB(NOW(), INTERVAL " . (int)$days . " DAY) ORDER BY id");
             $st->execute([(int)$guestId]);
             foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $out[$r['booking_type']][(int)$r['booking_id']] = $r;   // later rows (newer) win
         } catch (PDOException $e) {}
@@ -233,7 +234,7 @@ class EmergencyRebookService {
         try {
             $st = $pdo->prepare("SELECT r.*, COALESCE(NULLIF(g.full_name, ''), NULLIF(u.fullname, ''), u.username, 'Guest') AS guest_name
                                    FROM emergency_rebook_requests r LEFT JOIN guests g ON g.id = r.guest_id LEFT JOIN users u ON u.id = g.user_id
-                                  WHERE r.status = 'pending'" . ($guestId !== null ? ' AND r.guest_id = ?' : '') . ' ORDER BY r.requested_at DESC, r.id DESC');
+                                  WHERE r.status = 'pending' AND r.booking_type <> 'tour'" . ($guestId !== null ? ' AND r.guest_id = ?' : '') . ' ORDER BY r.requested_at DESC, r.id DESC');
             $st->execute($guestId !== null ? [(int)$guestId] : []);
             $rows = array_map([self::class, 'decode'], $st->fetchAll(PDO::FETCH_ASSOC));
         } catch (PDOException $e) {

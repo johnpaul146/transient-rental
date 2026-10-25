@@ -1,25 +1,24 @@
 <?php
 /**
- * FeedbackService (Phase 7.9) — ONE rule for per-booking ratings (House / Tour / Food / Package), used by the Rate buttons
- * (profile.php, houses.php, tours.php) AND by every server-side feedback handler, so a forged POST gets the same answer as the UI.
+ * FeedbackService (Phase 7.9) — ONE rule for per-booking ratings (House / Food / Package), used by the Rate buttons
+ * (profile.php, houses.php) AND by every server-side feedback handler, so a forged POST gets the same answer as the UI.
  *
  * A NEW rating is allowed only when ALL of these hold:
  *   - the booking belongs to the signed-in guest (guests.user_id = session user);
  *   - it is not cancelled and has no feedback yet (an existing rating is changed through Edit);
  *   - the service has really finished, in the application timezone (Asia/Manila, set in database.php):
  *       House: NOW >= check_out_date + check_out_time   (stay over — not before, not during)
- *       Tour : NOW >= booking_date + preferred_time     (scheduled time passed; no tour duration is stored, so none is invented;
- *                                                         a missing time counts as the end of that day)
  *     and the booking was secured: status 'completed', or 'confirmed' with money received (housekeeping may lag);
  *       Food / Package: status 'completed' (unchanged rule; completion already means the date has passed).
  * EDIT is allowed for the owner when feedback already exists (historical feedback is kept as it is).
  * Storage: the rating is written only when the table has the feedback columns (feedback_rating, feedback_text, feedback_date).
- * If they are missing (production house_bookings / tour_bookings / package_bookings as of the Phase 7.8 dump) the Rate button
+ * If they are missing (production house_bookings / package_bookings as of the Phase 7.8 dump) the Rate button
  * stays hidden and a submit is refused with a friendly message — never an SQL error.
  */
 class FeedbackService {
 
-    const TABLES = ['house' => 'house_bookings', 'tour' => 'tour_bookings', 'food' => 'food_bookings', 'package' => 'package_bookings'];
+    // Tours/Boat was retired: a rating can no longer be created or edited for a tour booking (old feedback stays in the database).
+    const TABLES = ['house' => 'house_bookings', 'food' => 'food_bookings', 'package' => 'package_bookings'];
     const TEXT_MAX = 2000;
     const NOT_AVAILABLE = 'Ratings for this service are not available yet. Thank you for your interest — please leave an overall review instead.';
 
@@ -38,16 +37,12 @@ class FeedbackService {
         return self::$ready[$type];
     }
 
-    /** End of the service as 'Y-m-d H:i:s' (House / Tour), or null when it cannot be determined. */
+    /** End of the service as 'Y-m-d H:i:s' (House), or null when it cannot be determined. */
     public static function endsAt($type, array $b) {
         if ($type === 'house') {
             $d = substr((string)($b['check_out_date'] ?? ''), 0, 10);
             $t = substr((string)($b['check_out_time'] ?? ''), 0, 8);
             if ($t === '') $t = '12:00:00';
-        } elseif ($type === 'tour') {
-            $d = substr((string)($b['booking_date'] ?? ''), 0, 10);
-            $t = substr((string)($b['preferred_time'] ?? ''), 0, 8);
-            if ($t === '') $t = '23:59:59';
         } else {
             return null;
         }
@@ -67,16 +62,14 @@ class FeedbackService {
         $status = (string)($b['booking_status'] ?? '');
         if ($status === 'cancelled') return 'Cancelled bookings cannot be rated.';
         if (self::hasFeedback($b)) return 'You already rated this booking. Use Edit to change it.';
-        if ($type === 'house' || $type === 'tour') {
+        if ($type === 'house') {
             $secured = $status === 'completed' || ($status === 'confirmed' && (float)($b['amount_paid'] ?? 0) > 0);
             if (!$secured) return 'Only confirmed bookings can be rated.';
             $end = self::endsAt($type, $b);
             if ($end === null) return 'This booking cannot be rated.';
             $now = $now ?: date('Y-m-d H:i:s');
             if ($now < $end) {
-                return $type === 'house'
-                    ? 'You can rate your stay after check-out (' . date('M j, Y g:i A', strtotime($end)) . ').'
-                    : 'You can rate this tour after its scheduled time (' . date('M j, Y g:i A', strtotime($end)) . ').';
+                return 'You can rate your stay after check-out (' . date('M j, Y g:i A', strtotime($end)) . ').';
             }
             return null;
         }

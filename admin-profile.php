@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/includes/MailBranding.php';
 session_start();
 date_default_timezone_set('Asia/Manila');
 require_once 'database.php';
@@ -289,10 +290,10 @@ if (isset($_POST['send_otp']) && isset($_POST['new_password'])) {
         $_SESSION['pending_password_expires'] = time() + (15 * 60);
 
         require_once 'config/mail_config.php';
-        $mail = MailConfig::getInstance()->getMailer();
+        $mail = MailBranding::mailer();
         $mail->clearAddresses();
         $mail->addAddress($user['email'], $user['fullname'] ?: $user['username']);
-        $mail->Subject = '🔐 Password Change OTP — Transient House & Tours';
+        $mail->Subject = '🔐 Password Change OTP — Jerry Dino\'s Stay';
         $mail->Body = '
         <html><head><style>
         body { font-family: Arial, sans-serif; background: #f5f7fa; padding: 20px; }
@@ -311,7 +312,7 @@ if (isset($_POST['send_otp']) && isset($_POST['new_password'])) {
         <div class="otp-box">' . $otp_code . '</div>
         <div class="warning"><strong>⏰ This code expires in 15 minutes.</strong></div>
         <p class="info">If you didn\'t request this, ignore this email.</p>
-        <div class="footer">&copy; ' . date('Y') . ' Transient House & Tours</div>
+        <div class="footer">&copy; ' . date('Y') . ' Jerry Dino\'s Stay</div>
         </div></body></html>';
         $mail->AltBody = "Password Change OTP: $otp_code\nExpires in 15 minutes.";
         $mail->send();
@@ -1016,7 +1017,7 @@ body.sidebar-open-mobile .menu-toggle {
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Hundred Islands Reservation System. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Jerry Dino\'s Stay. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i> <?php echo $is_admin ? 'Administrator' : 'Staff'; ?> Access

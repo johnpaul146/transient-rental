@@ -1,14 +1,14 @@
 <?php
 /**
  * EmergencyRebookUI — the shared pieces of the guest Emergency Rebook screens (Phase 7.7): rebook.php (House),
- * tour-rebook.php, food-rebook.php and package-rebook.php in `?emergency=1` mode.
+ * food-rebook.php and package-rebook.php in `?emergency=1` mode.
  * Display + the POST glue only; every rule lives in EmergencyRebookService / RebookService.
  */
 require_once __DIR__ . '/EmergencyRebookService.php';
 
 class EmergencyRebookUI {
 
-    const LABELS = ['house' => 'House', 'tour' => 'Tour', 'food' => 'Food', 'package' => 'Package'];
+    const LABELS = ['house' => 'House', 'food' => 'Food', 'package' => 'Package'];
 
     /** ?emergency=1 (or an emergency POST) on a guest page. Admin/Staff never use the guest Emergency form. */
     public static function wanted($isAssist) {

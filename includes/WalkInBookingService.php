@@ -45,7 +45,7 @@ class WalkInBookingService {
     const PLACEHOLDER_DOMAIN = 'walkin.invalid';
     const SOURCE = 'walk_in';
     const TYPES = ['house', 'food', 'package'];   // 'tour' was removed with the Tours/Boat service (history stays in the database)
-    const TOUR_REMOVED_MESSAGE = 'Tour/boat bookings are no longer offered.';
+    const TOUR_REMOVED_MESSAGE = 'The Tour/Boat service has been discontinued and can no longer be booked or rebooked.';
     const PAYMENT_OPTIONS = ['pay_later', 'cash', 'gcash'];
 
     private static $schemaChecked = false;

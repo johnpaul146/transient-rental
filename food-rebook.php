@@ -164,7 +164,7 @@ try {
     $q = $pdo->query("SELECT section_name, content_key, content_value FROM site_content");
     while ($row = $q->fetch()) $content[$row['section_name']][$row['content_key']] = $row['content_value'];
 } catch (PDOException $e) {}
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 $nav_logo = $content['site_settings']['logo_path'] ?? 'uploads/logos/logo.png';
 $nav_logo_exists = !empty($nav_logo) && file_exists($nav_logo) && !is_dir($nav_logo);
 
@@ -221,12 +221,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cal-grid .day{text-align:center;padding:10px 0;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid transparent;background:#ecfdf5;color:#065f46;font-weight:600;min-height:40px}
 .cal-grid .day:hover:not(.off):not(.sel){border-color:#10b981}
 .cal-grid .day.off{background:#f1f5f9;color:#94a3b8;text-decoration:line-through;cursor:not-allowed;font-weight:500}
-.cal-grid .day.available{background:#dcfce7;color:#166534;box-shadow:inset 0 0 0 1px #86efac}
-.cal-grid .day.available:hover{background:#bbf7d0}
 .cal-grid .day.cur{box-shadow:inset 0 0 0 2px #F4B400}
 .cal-grid .day.sel{background:#4DA6D9;color:#fff;box-shadow:0 4px 12px rgba(77,166,217,.4)}
 .cal-grid .day.blank{background:transparent;cursor:default}
-.cal-grid .day.loading{opacity:.5}
+.cal-grid .day.loading{opacity:.5}.cal-grid .day.loading:not(.sel):not(.rng):not(.outd):not(.blank){background:#f1f5f9;color:#94a3b8}   /* not green until the server has confirmed the day */
 .cal-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:12px;color:#64748b}
 .cal-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
 .cal-note{margin-top:10px;font-size:13px;color:#475569;min-height:20px}
@@ -381,7 +379,6 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
             var off = ds < TODAY || ds > MAXD || (r && !r.ok);
             if (!info) cls += ' loading';
             if (off) cls += ' off';
-            else if (info) cls += ' available';
             if (ds === CURRENT) cls += ' cur';
             if (ds === selected) cls += ' sel';
             h += '<div class="' + cls + '" data-d="' + ds + '" role="button" aria-disabled="' + (off ? 'true' : 'false') + '">' + d + '</div>';

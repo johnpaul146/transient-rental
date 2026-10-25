@@ -40,6 +40,7 @@ $admin_display_name = $user_info['fullname'] ?? $user_info['username'] ?? 'User'
 // Filters
 $search    = trim($_GET['search'] ?? '');
 $module    = $_GET['module'] ?? 'all';
+if ($module === 'tour') { $module = 'all'; $_GET['module'] = 'all'; }   // retired module: never a filter
 $action    = $_GET['action'] ?? 'all';
 $status    = $_GET['status'] ?? 'all';
 $date_from = $_GET['date_from'] ?? date('Y-m-d', strtotime('-30 days'));
@@ -48,7 +49,9 @@ $page      = max(1, (int)($_GET['page'] ?? 1));
 $per_page  = 25;
 $offset    = ($page - 1) * $per_page;
 
-$where  = "WHERE DATE(created_at) BETWEEN ? AND ?";
+// Tours/Boat was retired: audit rows written for it (module 'tour', target 'tour_booking') stay in the database but are not listed here.
+$tourLogHide = "module <> 'tour' AND COALESCE(target_type, '') NOT IN ('tour_booking','tour') AND description NOT LIKE '%tour booking%' AND description NOT LIKE '%tour reservation%' AND description NOT LIKE '%Tour service%' AND description NOT LIKE 'Updated boat:%'";   // (also covers old booking-module lines such as "Confirmed tour reservation fee ...")
+$where  = "WHERE $tourLogHide AND DATE(created_at) BETWEEN ? AND ?";
 $params = [$date_from, $date_to];
 if ($module !== 'all') { $where .= " AND module = ?"; $params[] = $module; }
 if ($action !== 'all') { $where .= " AND action = ?"; $params[] = $action; }
@@ -93,10 +96,10 @@ $stmt->execute($params);
 $logs = $stmt->fetchAll();
 
 $stats = [
-    'total'  => (int)$pdo->query("SELECT COUNT(*) FROM system_logs")->fetchColumn(),
-    'today'  => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE DATE(created_at) = CURDATE()")->fetchColumn(),
-    'failed' => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE status = 'failed'")->fetchColumn(),
-    'week'   => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)")->fetchColumn(),
+    'total'  => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE $tourLogHide")->fetchColumn(),
+    'today'  => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE $tourLogHide AND DATE(created_at) = CURDATE()")->fetchColumn(),
+    'failed' => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE $tourLogHide AND status = 'failed'")->fetchColumn(),
+    'week'   => (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE $tourLogHide AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)")->fetchColumn(),
 ];
 
 $active_users_today = (int)$pdo->query("SELECT COUNT(DISTINCT user_id) FROM system_logs WHERE DATE(created_at) = CURDATE() AND user_id IS NOT NULL")->fetchColumn();
@@ -104,7 +107,7 @@ $active_users_today = (int)$pdo->query("SELECT COUNT(DISTINCT user_id) FROM syst
 $top_modules = $pdo->query("
     SELECT module, COUNT(*) as cnt
     FROM system_logs
-    WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+    WHERE $tourLogHide AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
     GROUP BY module
     ORDER BY cnt DESC
     LIMIT 6
@@ -112,7 +115,7 @@ $top_modules = $pdo->query("
 
 $failed_logins_24h = (int)$pdo->query("SELECT COUNT(*) FROM system_logs WHERE action = 'login_failed' AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)")->fetchColumn();
 
-$modules = $pdo->query("SELECT DISTINCT module FROM system_logs ORDER BY module")->fetchAll(PDO::FETCH_COLUMN);
+$modules = $pdo->query("SELECT DISTINCT module FROM system_logs WHERE module <> 'tour' ORDER BY module")->fetchAll(PDO::FETCH_COLUMN);
 $actions = $pdo->query("SELECT DISTINCT action FROM system_logs ORDER BY action")->fetchAll(PDO::FETCH_COLUMN);
 
 $content = [];
@@ -163,7 +166,7 @@ function roleBadge($role) {
 }
 function moduleColor($m) {
     $map = [
-        'auth' => '#8b5cf6', 'house' => '#10b981', 'tour' => '#f59e0b',
+        'auth' => '#8b5cf6', 'house' => '#10b981',
         'activity' => '#06b6d4', 'food' => '#ef4444', 'booking' => '#4DA6D9',
         'review' => '#fbbf24', 'user' => '#ec4899', 'content' => '#64748b',
         'system' => '#0B2447',
@@ -190,7 +193,7 @@ function friendlyAction($a) {
 }
 function friendlyArea($m) {
     $map = [
-        'auth' => 'Login & Security', 'booking' => 'Bookings', 'house' => 'Houses', 'tour' => 'Tours',
+        'auth' => 'Login & Security', 'booking' => 'Bookings', 'house' => 'Houses',
         'activity' => 'Activities', 'food' => 'Food', 'review' => 'Reviews', 'user' => 'Accounts',
         'content' => 'Website Content', 'profile' => 'Profiles', 'system' => 'System',
         'blocked_dates' => 'Availability', 'package' => 'Packages',
@@ -220,9 +223,9 @@ function friendlyDescription($d, $action, $username) {
 }
 function friendlyTarget($type, $id, $desc, $action) {
     $desc = (string)$desc;
-    if (preg_match('/\b((?:HS|TOUR|FOOD|PKG|RE)-[A-Z0-9-]+)\b/', $desc, $m)) {
+    if (preg_match('/\b((?:HS|FOOD|PKG|RE)-[A-Z0-9-]+)\b/', $desc, $m)) {
         $ref = $m[1];
-        $label = ['HS' => 'House Booking', 'TOUR' => 'Tour Booking', 'FOOD' => 'Food Order', 'PKG' => 'Package Booking'][explode('-', $ref)[0]] ?? 'Booking';
+        $label = ['HS' => 'House Booking', 'FOOD' => 'Food Order', 'PKG' => 'Package Booking'][explode('-', $ref)[0]] ?? 'Booking';
         return "$label $ref";
     }
     switch ($type) {
@@ -236,7 +239,6 @@ function friendlyTarget($type, $id, $desc, $action) {
             return 'Blocked dates';
         case 'booking': return 'Booking';
         case 'house_booking': return 'House Booking';
-        case 'tour_booking': return 'Tour Booking';
         case 'food_booking': return 'Food Order';
         case 'package_booking': return 'Package Booking';
         case 'package': return 'Package cart';
@@ -732,7 +734,7 @@ unset($base_qs['page'], $base_qs['export']);
                 <?php
                 $recent_alerts = $pdo->query("
                     SELECT * FROM system_logs
-                    WHERE status IN ('failed','warning') OR action IN ('login_failed','reject_payment','delete')
+                    WHERE $tourLogHide AND (status IN ('failed','warning') OR action IN ('login_failed','reject_payment','delete'))
                     ORDER BY created_at DESC
                     LIMIT 5
                 ")->fetchAll();
@@ -1041,7 +1043,7 @@ unset($base_qs['page'], $base_qs['export']);
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Hundred Islands Reservation System. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Jerry Dino\'s Stay. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i> Administrator Access

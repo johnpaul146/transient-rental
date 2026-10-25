@@ -1,5 +1,5 @@
 /* ============================================================
-   TRANSIENT HOUSE & TOURS — DESIGN SYSTEM
+   JERRY DINO'S STAY — DESIGN SYSTEM
    Hundred Islands • Alaminos, Pangasinan
    ============================================================
    Single source of truth for:
@@ -885,7 +885,7 @@ ul, ol { list-style: none; }
   gap: var(--space-5);
 }
 
-/* 3-card variant (Tours/Boat removed from the homepage) — declared before the breakpoints so they still win */
+/* 3-card variant (homepage experience cards) — declared before the breakpoints so they still win */
 .experience-grid--3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 992px) { .experience-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .experience-grid { grid-template-columns: 1fr; } }
@@ -2262,7 +2262,6 @@ h1, h2, h3, h4, h5, h6,
 .card-title,
 .listing-card__title,
 .house-title,
-.tour-title,
 .activity-title,
 .food-title {
   color: var(--theme-heading) !important;
@@ -2285,7 +2284,6 @@ button {
 
 .card,
 .house-card,
-.tour-card,
 .activity-card,
 .food-card,
 .package-card,
@@ -2341,7 +2339,6 @@ h1,h2,h3,h4,h5,h6,
 .card-title,
 .listing-card__title,
 .house-title,
-.tour-title,
 .activity-title,
 .food-title{
  color:var(--final-heading)!important;
@@ -2396,7 +2393,7 @@ p,.description,.card-text,.listing-card__desc{
 }
 
 /* Unified cards */
-.card,.listing-card,.house-card,.tour-card,.activity-card,.food-card,.package-card,.review-card{
+.card,.listing-card,.house-card,.activity-card,.food-card,.package-card,.review-card{
  background:#fff!important;
  border-radius:24px!important;
  border:1px solid #E8F0FE!important;
@@ -2890,88 +2887,6 @@ body .site-footer .site-footer__links a {
 }
 
 /* ============================================================
-   TOUR CARD FINAL NORMALIZATION
-   Single source for tour card styling
-   ============================================================ */
-
-.tour-card {
-    background:#FFFFFF !important;
-    border:1px solid #E8F0FE !important;
-    border-radius:24px !important;
-    box-shadow:0 15px 40px rgba(6,38,61,.08) !important;
-    overflow:hidden;
-    display:flex;
-    flex-direction:column;
-}
-
-.tour-card .tour-content,
-.tour-card .card-body,
-.tour-card-body {
-    padding:20px !important;
-    display:flex;
-    flex-direction:column;
-    min-height:0 !important;
-}
-
-.tour-card h1,
-.tour-card h2,
-.tour-card h3,
-.tour-card h4,
-.tour-card .tour-title,
-.tour-card .card-title {
-    color:#06263D !important;
-    font-weight:800 !important;
-}
-
-.tour-card p,
-.tour-card .tour-description,
-.tour-card .description {
-    color:#475569 !important;
-    line-height:1.6;
-}
-
-.tour-card .capacity,
-.tour-card .tour-meta,
-.tour-card .meta,
-.tour-card .meta-item,
-.tour-card .details {
-    color:#06263D !important;
-}
-
-.tour-card i,
-.tour-card .fas {
-    color:#F4B400 !important;
-}
-
-.tour-card .tour-price,
-.tour-card .price,
-.tour-card .price-tag {
-    color:#0B7CC1 !important;
-    font-size:26px !important;
-    font-weight:800 !important;
-    margin-top:20px;
-}
-
-.tour-card .tour-price small,
-.tour-card .price small {
-    color:#64748B !important;
-}
-
-.tour-card .btn,
-.tour-card button,
-.tour-card .book-btn {
-    background:#F4B400 !important;
-    color:#06263D !important;
-    font-weight:700 !important;
-    border-radius:999px !important;
-}
-
-.tour-card img {
-    filter:none !important;
-    opacity:1 !important;
-}
-
-/* ============================================================
    ACTIVITIES CARD FINAL THEME FIX
    ============================================================ */
 
@@ -3207,7 +3122,7 @@ body :is(h1, h2, h3, h4, h5, h6, p, label, li, .stat-label, [class*="title"], [c
   overflow-wrap: anywhere;
 }
 
-/* Phase 7.9: per-booking rating stars (Rate Your Stay / Rate Your Tour / Rate Your Experience / Edit Feedback).
+/* Phase 7.9: per-booking rating stars (Rate Your Stay / Rate Your Experience / Edit Feedback).
    The JS already toggles .active on stars 1..N but no rule coloured it, so the stars never turned gold. */
 .rating-stars { display: flex; justify-content: center; gap: 6px; font-size: 32px; line-height: 1; margin-bottom: 6px; }
 .rating-stars i { color: #cbd5e1 !important; cursor: pointer; padding: 4px; transition: color .15s ease, transform .15s ease; -webkit-tap-highlight-color: transparent; }

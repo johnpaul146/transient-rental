@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/includes/MailBranding.php';
 /**
  * login.php — Centralized Login Page
  * 
@@ -149,7 +150,7 @@ if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_
 }
 $hero_exists = !empty($hero_path) && file_exists($hero_path);
 
-$site_name    = $content['site_settings']['site_name']    ?? 'Transient House & Tours';
+$site_name    = $content['site_settings']['site_name']    ?? 'Jerry Dino\'s Stay';
 $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away From Home';
 
 // ── If already logged in, go to dashboard ──
@@ -295,10 +296,10 @@ if (isset($_POST['login'])) {
             $upd->execute([$otp_code, $expires, $user['id']]);
 
             try {
-                $mail = MailConfig::getInstance()->getMailer();
+                $mail = MailBranding::mailer();
                 $mail->clearAddresses();
                 $mail->addAddress($user['email'], $user['username']);
-                $mail->Subject = '🔐 New Device Login — Transient House & Tours';
+                $mail->Subject = '🔐 New Device Login — Jerry Dino\'s Stay';
 
                 $mail->Body = '
                 <html>
@@ -334,10 +335,10 @@ if (isset($_POST['login'])) {
                             Someone may have your password. Please change it immediately.
                         </div>
 
-                        <p class="info">Best regards,<br><strong>Transient House & Tours Team</strong></p>
+                        <p class="info">Best regards,<br><strong>Jerry Dino\'s Stay Team</strong></p>
 
                         <div class="footer">
-                            &copy; ' . date('Y') . ' Transient House & Tours. All rights reserved.
+                            &copy; ' . date('Y') . ' Jerry Dino\'s Stay. All rights reserved.
                         </div>
                     </div>
                 </body>

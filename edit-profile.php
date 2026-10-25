@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/includes/MailBranding.php';
 session_start();
 require_once 'database.php';
 require_once 'includes/TermsGate.php';
@@ -206,16 +207,16 @@ if (isset($_POST['pw_action'])) {
             $sent = false;
             try {
                 require_once 'config/mail_config.php';
-                $mail = MailConfig::getInstance()->getMailer();
+                $mail = MailBranding::mailer();
                 $mail->clearAddresses();
                 $nm = (string)($acct['fullname'] ?: $acct['username']);
                 $mail->addAddress($to, $nm);
-                $mail->Subject = '🔐 Password Change Code — Transient House & Tours';
+                $mail->Subject = '🔐 Password Change Code — Jerry Dino\'s Stay';
                 $mail->Body = '<html><body style="font-family:Arial,sans-serif;background:#f5f7fa;padding:20px;">'
                     . '<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">'
                     . '<h2 style="color:#0B2447;margin:0 0 12px;">🔐 Password Change Request</h2>'
                     . '<p style="color:#475569;font-size:14px;">Hi <strong>' . htmlspecialchars($nm) . '</strong>,</p>'
-                    . '<p style="color:#475569;font-size:14px;">Use this code to confirm the password change on your Transient House &amp; Tours account:</p>'
+                    . '<p style="color:#475569;font-size:14px;">Use this code to confirm the password change on your Jerry Dino\'s Stay account:</p>'
                     . '<div style="background:#f0f7fb;padding:22px;text-align:center;font-size:34px;font-weight:bold;letter-spacing:10px;color:#0B2447;border-radius:10px;margin:22px 0;border:2px dashed #4DA6D9;">' . $otp . '</div>'
                     . '<p style="background:#fef3c7;padding:12px 16px;border-radius:8px;color:#92400e;font-size:13px;"><strong>This code expires in 15 minutes.</strong> Your password changes only after you enter it.</p>'
                     . '<p style="color:#475569;font-size:13px;">If you did not request this, ignore this e-mail and consider changing your password.</p>'
@@ -690,7 +691,7 @@ function splitPhoneForForm($fullPhone) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
-    <title>Edit Profile - Transient House & Tours</title>
+    <title>Edit Profile - Jerry Dino's Stay</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1349,12 +1350,12 @@ function splitPhoneForForm($fullPhone) {
     <div class="header-content">
         <a href="index.php" class="logo-wrapper">
             <?php if ($ep_logo !== ''): ?>
-                <img class="logo-image" src="<?php echo htmlspecialchars($ep_logo, ENT_QUOTES, 'UTF-8'); ?>?v=<?php echo (int)@filemtime($ep_logo); ?>" alt="Transient House &amp; Tours logo">
+                <img class="logo-image" src="<?php echo htmlspecialchars($ep_logo, ENT_QUOTES, 'UTF-8'); ?>?v=<?php echo (int)@filemtime($ep_logo); ?>" alt="Jerry Dino&#039;s Stay logo">
             <?php else: ?>
                 <div class="logo-icon"><i class="fas fa-umbrella-beach"></i></div>
             <?php endif; ?>
             <div class="brand-text">
-                <span class="brand-name">Transient House & Tours</span>
+                <span class="brand-name">Jerry Dino&#039;s Stay</span>
                 <span class="brand-tagline">Your Home Away From Home</span>
             </div>
         </a>

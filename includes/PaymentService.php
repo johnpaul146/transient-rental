@@ -277,7 +277,11 @@ class PaymentService {
     // Recording money (idempotent, transactional)
     // ------------------------------------------------------------------
 
+    /** Tours/Boat was retired: no payment, balance, cancellation or row lock may start from a standalone tour booking. */
+    const TOUR_REMOVED_MESSAGE = 'The Tour/Boat service has been discontinued and can no longer be booked or rebooked.';
+
     private static function tableFor($type) {
+        if ($type === 'tour') throw new InvalidArgumentException(self::TOUR_REMOVED_MESSAGE);
         if (!isset(self::TABLES[$type])) throw new InvalidArgumentException('Invalid booking type.');
         return self::TABLES[$type];
     }

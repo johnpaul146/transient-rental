@@ -549,7 +549,7 @@ $is_logged_in = isset($_SESSION['user_id']);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Food Menu - Transient House & Tours</title>
+    <title>Food Menu - Jerry Dino's Stay</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="assets/css/design-system.css?v=<?= (int)(@filemtime(__DIR__ . '/assets/css/design-system.css') ?: 1) ?>">
@@ -993,11 +993,14 @@ $is_logged_in = isset($_SESSION['user_id']);
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
         .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px; text-transform: uppercase; }
         .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; }
-        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay):not(.available) { background: #eef2ff; transform: scale(1.05); }
-        .calendar-grid .day.available { background: #dcfce7; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
-        .calendar-grid .day.available:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay) { background: #bbf7d0; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.past):not(.blocked):not(.outside-stay) { background: #eef2ff; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; font-weight: 700; box-shadow: 0 4px 12px rgba(77, 166, 217, 0.4); }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
+
+        /* Guest calendar: dates that are really bookable (not past / booked / blocked) are green. Set by JS from the same data the
+           booked / blocked styling uses; the server still re-validates every booking. Admin/Staff calendars are separate and unchanged. */
+        .calendar-grid .day.available:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #d1fae5; color: #065f46; font-weight: 600; }
+        .calendar-grid .day.available:hover:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #a7f3d0; }
         .calendar-grid .day.outside-stay { color: #94a3b8 !important; background: #f1f5f9; text-decoration: line-through; cursor: not-allowed !important; opacity: .75; }
         .calendar-grid .day.outside-stay:hover { background: #f1f5f9 !important; transform: none !important; }
         .delivery-window { margin-top: 6px; padding: 8px 10px; background: #fff; border: 1px solid #bae6fd; border-radius: 8px; font-weight: 600; }
@@ -2900,8 +2903,7 @@ function renderFoodCalendar(month, year) {
             if (isBlocked) {
                 d.classList.add('blocked');
             } else {
-                // This branch is reached only for today/future dates inside the stay window.
-                d.classList.add('available');
+                d.classList.add('available');   // green = bookable day (guest calendar)
                 d.onclick = function() { selectFoodDate(this); };
             }
         }

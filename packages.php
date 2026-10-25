@@ -4,6 +4,9 @@ require_once 'database.php';
 require_once 'includes/TermsGate.php';
 TermsGate::enforceGuest($pdo); // Terms & Privacy must be accepted before guest features
 require_once 'includes/PaymentService.php';
+require_once 'includes/GroupHealth.php';   // senior citizens + health condition (replaces guest-name list)
+require_once 'includes/GuestAvailability.php';   // read-only month availability for the green calendar dates
+GuestAvailability::handle($pdo);                 // answers ?ajax=avail_month and exits; otherwise does nothing
 
 if (file_exists('includes/SystemLogger.php')) {
     require_once 'includes/SystemLogger.php';
@@ -96,29 +99,29 @@ if (isset($_SESSION['flash_feedback_success'])) {
 // ============================================================
 // Initialize package cart
 // ============================================================
-if (!isset($_SESSION['package_cart']) || !is_array($_SESSION['package_cart'])) {
+if (!isset($_SESSION['package_cart'])) {
     $_SESSION['package_cart'] = ['house' => null, 'food' => null];
 }
 
 $cart = &$_SESSION['package_cart'];
-$cart['house'] = (is_array($cart['house'] ?? null) && isset($cart['house']['price'])) ? $cart['house'] : null;
-$cart['food']  = (is_array($cart['food'] ?? null) && isset($cart['food']['price'])) ? $cart['food'] : null;
-// Tours/Boat are no longer offered in guest package booking. Remove any stale cart item from older sessions.
+
+if (!is_array($cart['house']) || !isset($cart['house']['price'])) $cart['house'] = null;
+if (!is_array($cart['food'])  || !isset($cart['food']['price']))  $cart['food']  = null;
+
+// Tours/Boat was retired. A cart saved in a session before that may still hold a tour entry: it is dropped here, on the
+// server, so it can never be priced or booked. Everything else in the cart is kept.
+$tour_removed_notice = !empty($cart['tour']);   // tell the guest once if an old saved cart held a tour
 unset($cart['tour']);
 
 $has_house = !empty($cart['house']);
 $has_food  = !empty($cart['food']);
 $has_any   = $has_house || $has_food;
-// A package cart can survive a deployment in the guest's PHP session. Do not silently
-// turn missing answers from an old cart into zero seniors / No health condition.
-$house_needs_group_details = $has_house && (
-    !array_key_exists('senior_citizens', $cart['house']) ||
-    filter_var($cart['house']['senior_citizens'] ?? null, FILTER_VALIDATE_INT) === false ||
-    !array_key_exists('has_health_condition', $cart['house']) ||
-    !in_array((string)($cart['house']['has_health_condition'] ?? ''), ['0', '1'], true)
-);
 
-// Package schedule checks cover food dates against the selected house stay.
+// A house saved in the cart before the senior/health fields existed must be re-confirmed: never booked without them.
+$house_needs_group = $has_house && !array_key_exists('has_health_condition', $cart['house']);
+
+// Schedule rule (AvailabilityService::packageWindowError): with a house in the package, the
+// food must fall inside the house stay. These two helpers only adapt cart rows; the rule lives in the service.
 function pkgCartScheduleItems(array $cart) {
     $items = [];
     if (!empty($cart['food'])) $items[] = ['label' => 'Food', 'date' => (string)($cart['food']['preferred_date'] ?? ''), 'time' => (string)($cart['food']['preferred_time'] ?? '')];
@@ -167,12 +170,6 @@ if (isset($_POST['add_house_to_package'])) {
         $check_out = $_POST['check_out'] ?? '';
         $check_in_time  = $_POST['check_in_time']  ?? '14:00';   // check-out time is NOT read: it follows check-in
         $guests = (int)($_POST['guests'] ?? 1);
-        $senior_citizens = filter_var($_POST['senior_citizens'] ?? 0, FILTER_VALIDATE_INT);
-        $senior_citizens = ($senior_citizens === false) ? -1 : (int)$senior_citizens;
-        $health_answer = (string)($_POST['has_health_condition'] ?? '');
-        if (!in_array($health_answer, ['0', '1'], true)) throw new Exception("Please answer whether any guest has a health condition.");
-        $has_health_condition = $health_answer === '1' ? 1 : 0;
-        $health_condition_details = trim((string)($_POST['health_condition_details'] ?? ''));
 
         if (empty($house_id)) throw new Exception("Please select a house.");
         if (empty($check_in)) throw new Exception("Check-in date is required.");
@@ -205,13 +202,9 @@ if (isset($_POST['add_house_to_package'])) {
         $nights = $check_out_dt->diff($check_in_dt)->days;
         $days = $nights + 1;
 
-        if ($senior_citizens < 0 || $senior_citizens > $guests) {
-            throw new Exception("Senior-citizen count must be between 0 and the total number of guests.");
-        }
-        if (mb_strlen($health_condition_details) > 1000) {
-            throw new Exception("Health-condition details must be 1,000 characters or fewer.");
-        }
-        if (!$has_health_condition) $health_condition_details = '';
+        // Senior citizens (0..guests) + explicit health-condition answer, validated on the server.
+        try { $group_info = GroupHealth::parse($_POST, $guests); }
+        catch (InvalidArgumentException $e) { throw new Exception($e->getMessage()); }
 
         $stmt = $pdo->prepare("SELECT id, house_name, price_per_night, status, capacity FROM houses WHERE id = ?");
         $stmt->execute([$house_id]);
@@ -245,9 +238,9 @@ if (isset($_POST['add_house_to_package'])) {
             'check_out'     => $check_out,
             'check_out_time'=> $check_out_time,  // ✅ NEW
             'guests'        => $guests,
-            'senior_citizens' => $senior_citizens,
-            'has_health_condition' => $has_health_condition,
-            'health_condition_details' => $health_condition_details,
+            'senior_citizens'          => $group_info['senior'],
+            'has_health_condition'     => $group_info['has_health'],
+            'health_condition_details' => $group_info['details'],
             'nights'        => $nights,
             'days'          => $days,
             'price'         => $total_price
@@ -344,6 +337,14 @@ if (isset($_POST['add_food_to_package'])) {
 }
 
 // ============================================================
+// ADD TOUR TO PACKAGE — RETIRED (Pass 4). The Tours/Boat booking service is not offered; a hand-made POST is refused here and nothing is saved.
+// ============================================================
+if (isset($_POST['add_tour_to_package'])) {
+    $modal_error = "The Tour/Boat service has been discontinued. You can still add a house or food to your package.";
+    $open_modal = 'house';
+}
+
+// ============================================================
 // FINAL PACKAGE BOOKING CONFIRMATION
 // ============================================================
 $booking_success = null;
@@ -353,29 +354,7 @@ if (isset($_POST['confirm_package_booking'])) {
     try {
         // A package needs at least one item (house or food). Checked on the server, before anything is written.
         if (!$has_any) throw new Exception("Please add at least one item to your package before confirming.");
-        if ($house_needs_group_details) {
-            throw new Exception("Your saved house selection needs the new group details. Please edit the house item and enter the senior-citizen count and health-condition answer before confirming.");
-        }
-        if ($has_house) {
-            $hCheck = $cart['house'];
-            $seniorCheck = filter_var($hCheck['senior_citizens'] ?? null, FILTER_VALIDATE_INT);
-            $paxCheck = (int)($hCheck['guests'] ?? 0);
-            $healthCheck = (string)($hCheck['has_health_condition'] ?? '');
-            $healthDetailsCheck = trim((string)($hCheck['health_condition_details'] ?? ''));
-            if ($seniorCheck === false || $seniorCheck < 0 || $seniorCheck > $paxCheck) {
-                throw new Exception("Senior-citizen count must be between 0 and the total number of guests. Please edit the house item.");
-            }
-            if (!in_array($healthCheck, ['0', '1'], true)) {
-                throw new Exception("Please answer whether any guest has a health condition. Edit the house item to continue.");
-            }
-            if (mb_strlen($healthDetailsCheck) > 1000) {
-                throw new Exception("Health-condition details must be 1,000 characters or fewer.");
-            }
-            if ($healthCheck === '0') $healthDetailsCheck = '';
-            $cart['house']['senior_citizens'] = (int)$seniorCheck;
-            $cart['house']['has_health_condition'] = (int)$healthCheck;
-            $cart['house']['health_condition_details'] = $healthDetailsCheck;
-        }
+        if ($house_needs_group) throw new Exception("Please edit your house in the package and fill in the senior-citizen count and health-condition answer before confirming.");
 
         $pdo->beginTransaction();
 
@@ -391,11 +370,11 @@ if (isset($_POST['confirm_package_booking'])) {
 
         $package_ref = 'PKG-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(2)));
         $house_amount = 0.00;
-        $tour_amount  = 0.00; // Kept at zero for compatibility with historical package schema.
+        $tour_amount  = 0.00;   // retired Tours/Boat add-on: always 0 / NULL on a new package (columns kept for historical packages)
         $food_amount  = 0.00;
         $created_bookings = [];
         $house_booking_id = null;
-        $tour_booking_id  = null; // New online packages no longer include Tours/Boat.
+        $tour_booking_id  = null;
         $food_booking_id  = null;
         $package_contact  = $guest['contact_number'] ?? null;
         $package_requests = [];
@@ -411,6 +390,10 @@ if (isset($_POST['confirm_package_booking'])) {
                 throw new Exception("House '{$h['name']}' is no longer available for the selected dates.");
             }
 
+            // Re-validate the group details at submit time (a saved cart is never trusted)
+            try { $group_info = GroupHealth::parse(['senior_citizens' => $h['senior_citizens'] ?? '', 'has_health_condition' => ($h['has_health_condition'] ?? null) === null ? '' : (int)$h['has_health_condition'], 'health_condition_details' => $h['health_condition_details'] ?? ''], (int)$h['guests']); }
+            catch (InvalidArgumentException $e) { throw new Exception($e->getMessage() . " Please edit your house in the package."); }
+
             $ref = $package_ref . '-H';
 
             // ✅ NEW: Include check-in/check-out time
@@ -418,19 +401,18 @@ if (isset($_POST['confirm_package_booking'])) {
             $check_out_time_db = $stayTimes['out'];   // = check-in time
 
             // ✅ NEW: booking_status = 'pending' (not 'confirmed' — admin must confirm)
-            $stmt = $pdo->prepare("INSERT INTO house_bookings
+            $stmt = $pdo->prepare("INSERT INTO house_bookings 
                 (guest_id, house_id, reference_number, check_in_date, check_in_time, check_out_date, check_out_time,
-                 number_of_guests, total_amount, senior_citizens, has_health_condition, health_condition_details,
-                 payment_status, booking_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', NOW())");
+                 number_of_guests, total_amount, guest_names, payment_status, booking_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', 'pending', NOW())");   // guest_names: no longer collected
             $stmt->execute([
-                $guest_id, $h['id'], $ref,
+                $guest_id, $h['id'], $ref, 
                 $h['check_in'], $check_in_time_db,
                 $h['check_out'], $check_out_time_db,
-                $h['guests'], $h['price'], (int)($h['senior_citizens'] ?? 0),
-                (int)($h['has_health_condition'] ?? 0), $h['health_condition_details'] ?? null
+                $h['guests'], $h['price']
             ]);
             $house_booking_id = (int)$pdo->lastInsertId();
+            GroupHealth::save($pdo, $house_booking_id, $group_info);
             $created_bookings[] = ['type' => 'house', 'id' => $house_booking_id, 'ref' => $ref, 'name' => $h['name']];
             $house_amount += (float)$h['price'];
         }
@@ -629,7 +611,7 @@ $hero_path = 'uploads/hero/hero-bg.jpg';
 if (!empty($content['site_settings']['hero_image_path'])) $hero_path = $content['site_settings']['hero_image_path'];
 $hero_exists = !empty($hero_path) && file_exists($hero_path) && !is_dir($hero_path);
 
-$site_name = $content['site_settings']['site_name'] ?? "Jerry Dino's Stay";
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 
 $facebook_link = $content['social']['facebook'] ?? '#';
 $location_address = $content['location']['address'] ?? $content['footer']['address'] ?? 'Inansuana, Lucap, Alaminos, Philippines, 2404';
@@ -666,7 +648,6 @@ if ($result !== false) {
     if (is_array($rows)) $food_items = $rows;
 }
 
-$
 $open_modal = $open_modal ?? null;
 
 $user_has_feedback = false;
@@ -761,7 +742,6 @@ foreach ($food_items as $fi) {
         $food_galleries[$fi['id']] = buildItemGallery('food', $fi);
     }
 }
-
 // ============================================================
 // ✅ FIXED: FETCH BOOKED DATES — only confirmed/approved/completed block
 //    Pending bookings do NOT block dates (do NOT turn red)
@@ -868,7 +848,6 @@ foreach ($food_items as $fi) {
     ];
 }
 
-
 // ============================================================
 // Pre-compute main images for cart display
 // ============================================================
@@ -898,8 +877,8 @@ $cart_data_js = [
         'check_out' => $cart['house']['check_out'] ?? '',
         'check_out_time' => $cart['house']['check_in_time'] ?? '14:00',  // check-out time follows check-in time
         'guests' => (int)($cart['house']['guests'] ?? 0),
-        'senior_citizens' => array_key_exists('senior_citizens', $cart['house']) ? $cart['house']['senior_citizens'] : null,
-        'has_health_condition' => array_key_exists('has_health_condition', $cart['house']) ? $cart['house']['has_health_condition'] : null,
+        'senior_citizens' => $cart['house']['senior_citizens'] ?? null,
+        'has_health_condition' => $cart['house']['has_health_condition'] ?? null,
         'health_condition_details' => $cart['house']['health_condition_details'] ?? ''
     ] : null,
     'food' => $has_food ? [
@@ -913,8 +892,7 @@ $cart_data_js = [
         'size_variant_index' => $cart['food']['size_variant_index'] ?? null,
         'size_variant' => $cart['food']['size_variant'] ?? '',
         'quantity' => max(1, (int)($cart['food']['quantity'] ?? 1))
-    ] : null,
-
+    ] : null
 ];
 ?>
 <!DOCTYPE html>
@@ -1180,6 +1158,23 @@ $cart_data_js = [
             .fulfillment-option-label small { font-size: 9.5px; }
         }
 
+        .guest-names-field { background: #f8fafc; border-radius: 12px; padding: 15px; margin: 10px 0; border: 1px solid #e2e8f0; }
+        .guest-names-field .guest-names-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+        .guest-names-field .guest-names-header label { font-weight: 600; color: #1e293b; font-size: 13px; margin: 0; }
+        .guest-names-field .guest-count-badge { background: #e8f0fe; color: #4DA6D9; padding: 2px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+        .guest-names-field .guest-count-badge.match { background: #d1fae5; color: #065f46; }
+        .guest-names-field .guest-count-badge.over { background: #fee2e2; color: #991b1b; }
+        .guest-names-field .guest-count-badge.under { background: #fef3c7; color: #92400e; }
+        .guest-names-field .guest-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .guest-names-field .guest-name-row .guest-badge { min-width: 28px; height: 28px; background: #4DA6D9; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+        .guest-names-field .guest-name-row .guest-name-input { flex: 1; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 10px; font-size: 14px; font-family: inherit; background: white; transition: all 0.2s; min-width: 0; }
+        .guest-names-field .guest-name-row .guest-name-input:focus { outline: none; border-color: #4DA6D9; box-shadow: 0 0 0 3px rgba(77, 166, 217, 0.1); }
+        .guest-names-field .guest-name-row .guest-name-input.invalid { border-color: #ef4444; background: #fef2f2; }
+        .guest-names-field .guest-name-row .guest-name-input.valid { border-color: #10b981; }
+        .guest-names-field .help-text { font-size: 11px; color: #94a3b8; margin-top: 5px; display: flex; align-items: center; gap: 4px; line-height: 1.4; }
+        .guest-names-field .help-text.error { color: #ef4444; font-weight: 600; }
+        .guest-names-field .help-text.ok { color: #10b981; font-weight: 600; }
+        @media (max-width: 480px) { .guest-names-field { padding: 12px; } }
 
         .calendar-container { background: white; border-radius: 16px; padding: 20px; margin: 15px 0; border: 1px solid #e8f0fe; }
         .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 8px; }
@@ -1190,13 +1185,16 @@ $cart_data_js = [
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
         .calendar-grid .day-name { text-align: center; font-size: 11px; font-weight: 600; color: #94a3b8; padding: 5px 0; text-transform: uppercase; }
         .calendar-grid .day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all 0.2s; position: relative; color: #334155; }
-        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.blocked):not(.past):not(.available) { background: #eef2ff; transform: scale(1.05); }
-        .calendar-grid .day.available { background: #dcfce7; color: #166534; box-shadow: inset 0 0 0 1px #86efac; }
-        .calendar-grid .day.available:hover:not(.disabled):not(.booked):not(.blocked):not(.past) { background: #bbf7d0; transform: scale(1.05); }
+        .calendar-grid .day:hover:not(.disabled):not(.booked):not(.past) { background: #eef2ff; transform: scale(1.05); }
         .calendar-grid .day.selected { background: #4DA6D9; color: white; border-radius: 8px; font-weight: 700; }
         .calendar-grid .day.in-range { background: #dbeafe; color: #0B2447; }
-        .calendar-grid .day.booked, .calendar-grid .day.blocked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
+        .calendar-grid .day.booked { background: #fee2e2 !important; color: #dc2626 !important; cursor: not-allowed !important; text-decoration: line-through !important; }
         .calendar-grid .day.past { color: #cbd5e1 !important; cursor: not-allowed !important; }
+
+        /* Guest calendar: dates that are really bookable (not past / booked / blocked) are green. Set by JS from the same data the
+           booked / blocked styling uses; the server still re-validates every booking. Admin/Staff calendars are separate and unchanged. */
+        .calendar-grid .day.available:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #d1fae5; color: #065f46; font-weight: 600; }
+        .calendar-grid .day.available:hover:not(.selected):not(.in-range):not(.booked):not(.blocked):not(.past):not(.disabled):not(.outside-stay) { background: #a7f3d0; }
         .calendar-grid .day.disabled { cursor: not-allowed; opacity: 0.5; }
         .pkg-window-note { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-bottom: 14px; overflow-wrap: anywhere; }
         .pkg-window-note i { margin-right: 4px; }
@@ -1544,7 +1542,7 @@ $cart_data_js = [
         .hero.pb-hero p { font-size: 15px; margin: 0; }
         .hero.pb-hero h1 i { display: inline; margin: 0 6px 0 0; }
         .main-container { max-width: 1180px; }
-        .pb-stepper { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(11,36,71,.05); scroll-margin-top: 90px; }
+        .pb-stepper { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(11,36,71,.05); scroll-margin-top: 90px; }
         .pb-step { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 12px; background: transparent; cursor: pointer; font-family: inherit; text-align: left; min-height: 48px; min-width: 0; }
         .pb-step:disabled { opacity: .5; cursor: not-allowed; }
         .pb-step:not(:disabled):hover { background: #f1f5f9; }
@@ -1669,6 +1667,18 @@ $cart_data_js = [
     </div>
 <?php endif; ?>
 
+<?php if (!empty($tour_removed_notice)): ?>
+    <div style="background: #fffbeb; color: #92400e; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #f59e0b; display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5;">
+        <i class="fas fa-info-circle" style="font-size: 20px; flex-shrink: 0;"></i>
+        <span>The Tour/Boat service has been discontinued, so the tour saved in your package was removed. Your other items are unchanged.</span>
+    </div>
+<?php endif; ?>
+<?php if (!empty($house_needs_group)): ?>
+    <div style="background: #fffbeb; color: #92400e; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #f59e0b; display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5;">
+        <i class="fas fa-exclamation-triangle" style="font-size: 20px; flex-shrink: 0;"></i>
+        <span>Your saved house needs the new group details (senior citizens and health condition). Please click <strong>Edit</strong> on your house and complete them before confirming.</span>
+    </div>
+<?php endif; ?>
 <?php
 $h = $cart['house'] ?? []; $f = $cart['food'] ?? [];
 $pb_fee = PaymentService::feeFor($grand_total > 0 ? $grand_total : PaymentService::RESERVATION_FEE);
@@ -1704,7 +1714,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="pb-empty-icon" style="background:linear-gradient(135deg,#4DA6D9,#3a8bbf);"><i class="fas fa-home"></i></div>
             <div class="pb-empty-body">
                 <h4>No stay selected yet</h4>
-                <p>Browse our transient houses and choose your dates. You can also skip this and build a food package.</p>
+                <p>Browse our transient houses and choose your dates. You can also skip this and build a food-only package.</p>
             </div>
             <button type="button" class="pb-btn pb-btn-primary" onclick="pbOpen('house')"><i class="fas fa-home"></i> Choose a Stay</button>
         </div>
@@ -1764,15 +1774,12 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="item-detail"><i class="fas fa-users"></i>
                 <span><strong>Guests:</strong> <?php echo (int)($h['guests'] ?? 0); ?> pax</span>
             </div>
-            <div class="item-detail"><i class="fas fa-user-check"></i>
-                <span><strong>Senior citizens:</strong> <?php echo $house_needs_group_details ? 'Not provided yet' : (int)($h['senior_citizens'] ?? 0); ?></span>
+            <div class="item-detail"><i class="fas fa-user-clock"></i>
+                <span><strong>Senior citizens:</strong> <?php echo htmlspecialchars(GroupHealth::seniorLabel(['senior_citizens' => $h['senior_citizens'] ?? null])); ?></span>
             </div>
             <div class="item-detail"><i class="fas fa-heartbeat"></i>
-                <span><strong>Health condition:</strong> <?php echo $house_needs_group_details ? 'Answer required' : (!empty($h['has_health_condition']) ? 'Yes' : 'No'); ?><?php if (!$house_needs_group_details && !empty($h['has_health_condition']) && !empty($h['health_condition_details'])): ?> — <?php echo htmlspecialchars($h['health_condition_details']); ?><?php endif; ?></span>
+                <span><strong>Health condition:</strong> <?php echo htmlspecialchars(GroupHealth::healthLabel(['has_health_condition' => $h['has_health_condition'] ?? null, 'health_condition_details' => $h['health_condition_details'] ?? ''])); ?></span>
             </div>
-            <?php if ($house_needs_group_details): ?>
-            <div class="alert alert-warning" role="alert" style="margin:10px 0 0;">This saved house selection predates the new group-details fields. Click <strong>Edit</strong> and complete them before confirming the package.</div>
-            <?php endif; ?>
 
             <span class="item-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
         </div>
@@ -1784,11 +1791,11 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
         </div>
     </section>
 
-    <!-- STEP 3: FOOD -->
-    <section class="pb-panel" data-panel="2" aria-labelledby="pbT3">
+    <!-- STEP 2: FOOD -->
+    <section class="pb-panel" data-panel="2" aria-labelledby="pbT2">
         <div class="pb-panel-head">
             <span class="pb-kicker">Step 2 of 3</span>
-            <h2 id="pbT3"><i class="fas fa-utensils"></i> Add Food</h2>
+            <h2 id="pbT2"><i class="fas fa-utensils"></i> Add Food</h2>
             <p>Add a meal or food package for your stay. This step is optional.</p>
         </div>
         <?php if ($pkg_window): ?>
@@ -1874,10 +1881,10 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
     </section>
 
     <!-- STEP 3: REVIEW -->
-    <section class="pb-panel" data-panel="3" aria-labelledby="pbT4">
+    <section class="pb-panel" data-panel="3" aria-labelledby="pbT3">
         <div class="pb-panel-head">
             <span class="pb-kicker">Step 3 of 3</span>
-            <h2 id="pbT4"><i class="fas fa-clipboard-check"></i> Review Your Package</h2>
+            <h2 id="pbT3"><i class="fas fa-clipboard-check"></i> Review Your Package</h2>
             <p>Check everything below, then confirm your package.</p>
         </div>
         <?php if ($has_any): ?>
@@ -1886,7 +1893,7 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
             <div class="pb-review-row">
                 <div><span class="pb-review-type"><i class="fas fa-home"></i> Stay</span>
                 <strong><?php echo htmlspecialchars($h['name'] ?? ''); ?></strong>
-                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax · <?php echo $house_needs_group_details ? 'senior/health details required' : ((int)($h['senior_citizens'] ?? 0) . ' senior citizen(s) · Health condition: ' . (!empty($h['has_health_condition']) ? 'Yes' : 'No')); ?><?php if (!$house_needs_group_details && !empty($h['has_health_condition']) && !empty($h['health_condition_details'])): ?> · <?php echo htmlspecialchars($h['health_condition_details']); ?><?php endif; ?></small></div>
+                <small><?php echo date('M d', strtotime($h['check_in'] ?? 'now')); ?> – <?php echo date('M d, Y', strtotime($h['check_out'] ?? 'now')); ?> · <?php echo (int)($h['nights'] ?? 0); ?> night<?php echo ((int)($h['nights'] ?? 0)) === 1 ? '' : 's'; ?> · <?php echo (int)($h['guests'] ?? 0); ?> pax</small></div>
                 <span class="pb-review-price">₱<?php echo number_format((float)($h['price'] ?? 0), 2); ?></span>
                 <button type="button" class="pb-link" onclick="pbGo(1)">Change</button>
             </div>
@@ -2111,28 +2118,28 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                 <label><i class="fas fa-users"></i> Number of Pax * <small style="color:#94a3b8; font-weight:400;">(max <span id="h_max_capacity">20</span>)</small></label>
                 <input type="number" name="guests" id="h_guests" class="form-control"
                        min="1" max="20" placeholder="Enter number of pax" required
-                       onchange="calcHouseTotal()"
+                       onchange="rebuildGuestNameInputs(); calcHouseTotal();"
                        oninput="validatePax(this)">
             </div>
 
-            <div class="form-row">
-                <div class="form-group">
-                    <label><i class="fas fa-user-check"></i> Senior citizens in the group *</label>
-                    <input type="number" name="senior_citizens" id="h_senior_citizens" class="form-control" min="0" max="20" value="0" required>
-                    <small class="time-helper">Enter how many of the guests are senior citizens. This cannot exceed total pax.</small>
+            <div class="guest-names-field group-info-field">
+                <div class="guest-names-header">
+                    <label for="h_senior_citizens"><i class="fas fa-user-clock"></i> Senior Citizens in the Group *</label>
                 </div>
-                <div class="form-group">
-                    <label><i class="fas fa-heartbeat"></i> Does any guest have a health condition? *</label>
-                    <select name="has_health_condition" id="h_has_health_condition" class="form-control" required onchange="toggleHouseHealthCondition()">
-                        <option value="" selected>Choose Yes or No</option>
-                        <option value="0">No</option>
-                        <option value="1">Yes</option>
-                    </select>
+                <input type="number" name="senior_citizens" id="h_senior_citizens" class="form-control" min="0" max="20" step="1" inputmode="numeric" placeholder="Enter 0 if none" required oninput="validateSeniorCount(this)">
+                <div class="help-text" id="seniorHelp"><i class="fas fa-info-circle"></i> Senior citizens (60 years old and above) included in your number of pax. Cannot exceed the number of guests.</div>
+
+                <div class="group-health" style="margin-top:14px;">
+                    <label style="font-weight:600;"><i class="fas fa-heartbeat"></i> Does any guest have a health condition? *</label>
+                    <div style="display:flex; gap:18px; margin-top:6px; flex-wrap:wrap;">
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;"><input type="radio" name="has_health_condition" value="yes" onchange="toggleHealthDetails()"> Yes</label>
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:500; cursor:pointer;"><input type="radio" name="has_health_condition" value="no" onchange="toggleHealthDetails()"> No</label>
+                    </div>
+                    <div id="healthDetailsWrap" style="display:none; margin-top:10px;">
+                        <label for="h_health_details" style="font-weight:500;">Details <small style="color:#94a3b8; font-weight:400;">(optional)</small></label>
+                        <textarea name="health_condition_details" id="h_health_details" class="form-control" rows="2" maxlength="500" placeholder="e.g., a guest uses a wheelchair, has asthma, needs a ground-floor room"></textarea>
+                    </div>
                 </div>
-            </div>
-            <div class="form-group" id="h_health_condition_details_group" style="display:none;">
-                <label><i class="fas fa-notes-medical"></i> Health condition details (optional)</label>
-                <textarea name="health_condition_details" id="h_health_condition_details" class="form-control" rows="2" maxlength="1000" placeholder="Briefly describe any condition staff should know about."></textarea>
             </div>
 
             <div class="stay-summary-box">
@@ -2805,13 +2812,13 @@ $pb_balance = max(0, $grand_total - PaymentService::feeFor($grand_total));
                     <h3>👥 Guest Policy</h3>
                     <ul>
                         <li>The number of guests must not exceed the <strong>declared pax count</strong>.</li>
-                        <li>The number of guests and senior citizens must be accurate. Please disclose relevant health conditions for staff safety.</li>
+                        <li>All guest names must be <strong>accurate and complete</strong>.</li>
                         <li>Additional guests beyond the declared pax will not be accommodated.</li>
                     </ul>
 
                     <h3>📋 Package Booking</h3>
                     <ul>
-                        <li>All selected items (House and Food) will be booked together.</li>
+                        <li>All items in this package (House, Food) will be booked together.</li>
                         <li>Partial cancellation of package items is <strong>not allowed</strong>.</li>
                         <li>Changes to any item must be made before confirming.</li>
                     </ul>
@@ -2869,7 +2876,7 @@ function pkgApplyTimes(selectId, dateStr) {
     });
     if (sel.value && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
 }
-// Banner and time guidance for the food form
+// Banner + start month of the calendar for the food form
 function pkgShowWindowNote(noteId, label) {
     var n = document.getElementById(noteId);
     if (!n) return;
@@ -3081,10 +3088,16 @@ function editHouse() {
             guestsInput.value = d.guests;
             document.getElementById('h_max_capacity').textContent = guestsInput.max;
 
-            document.getElementById('h_senior_citizens').value = d.senior_citizens == null ? '' : String(d.senior_citizens);
-            document.getElementById('h_has_health_condition').value = d.has_health_condition == null ? '' : String(d.has_health_condition);
-            document.getElementById('h_health_condition_details').value = d.health_condition_details || '';
-            toggleHouseHealthCondition();
+            rebuildGuestNameInputs();
+            if (d.senior_citizens !== null && d.senior_citizens !== undefined) document.getElementById('h_senior_citizens').value = d.senior_citizens;
+            if (d.has_health_condition !== null && d.has_health_condition !== undefined) {
+                var hv = (parseInt(d.has_health_condition, 10) === 1) ? 'yes' : 'no';
+                var hr = document.querySelector('#houseForm input[name="has_health_condition"][value="' + hv + '"]');
+                if (hr) hr.checked = true;
+            }
+            document.getElementById('h_health_details').value = d.health_condition_details || '';
+            toggleHealthDetails();
+            validateSeniorCount(document.getElementById('h_senior_citizens'));
 
             houseSelectedStart = d.check_in;
             houseSelectedEnd = d.check_out;
@@ -3158,6 +3171,10 @@ function editFood() {
     }, 150);
 }
 
+var hdImages = [];
+var hdIndex = 0;
+var hdCurrentItemId = 0;
+var hdCurrentItemType = '';
 
 function openItemDetail(detailKey) {
     var item = ITEMS_DETAIL[detailKey];
@@ -3374,10 +3391,8 @@ function selectHouse(el) {
     document.getElementById('h_guests').max = currentHouseCapacity;
     document.getElementById('h_max_capacity').textContent = currentHouseCapacity;
 
-    document.getElementById('h_senior_citizens').value = '0';
-    document.getElementById('h_has_health_condition').value = '';
-    document.getElementById('h_health_condition_details').value = '';
-    toggleHouseHealthCondition();
+    resetGroupInfo();
+    rebuildGuestNameInputs();
 
     var today = new Date();
     houseCalMonth = today.getMonth();
@@ -3389,6 +3404,34 @@ function backToHouseList() {
     document.getElementById('houseStep1').style.display = 'block';
     document.getElementById('houseForm').style.display = 'none';
 }
+
+// ---- Green "available" dates for the package house calendar: asked from the server so they follow the real rules.
+// Nothing is green until the answer arrives; confirming the package re-validates everything on the server.
+var hGreenCache = {};
+function hGreenKey(year, month) {
+    var t = (document.getElementById('h_check_in_time') || {}).value || '14:00';
+    return (document.getElementById('h_house_id').value || '0') + '|' + year + '-' + String(month + 1).padStart(2, '0') + '|' + t;
+}
+function hGreenIsFree(dateStr) {
+    var m = hGreenCache[hGreenKey(parseInt(dateStr.slice(0, 4), 10), parseInt(dateStr.slice(5, 7), 10) - 1)];
+    return !!m && typeof m === 'object' && !m[dateStr];
+}
+function hLoadGreen(month, year) {
+    var id = document.getElementById('h_house_id').value, k = hGreenKey(year, month);
+    if (!id || Object.prototype.hasOwnProperty.call(hGreenCache, k)) return;
+    hGreenCache[k] = false;                      // in flight / failed => nothing is green
+    var t = (document.getElementById('h_check_in_time') || {}).value || '14:00';
+    fetch('packages.php?ajax=avail_month&type=house&id=' + encodeURIComponent(id) + '&ym=' + year + '-' + String(month + 1).padStart(2, '0') + '&time=' + encodeURIComponent(t), { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+            if (j && j.ok && j.days && typeof j.days === 'object') { hGreenCache[k] = j.days; if (k === hGreenKey(houseCalYear, houseCalMonth)) renderHouseCalendar(houseCalMonth, houseCalYear); }
+        })
+        .catch(function () { /* stays not-green */ });
+}
+document.addEventListener('DOMContentLoaded', function () {
+    var ti = document.getElementById('h_check_in_time');
+    if (ti) { var rg = function () { if (document.getElementById('h_house_id').value) renderHouseCalendar(houseCalMonth, houseCalYear); }; ti.addEventListener('change', rg); ti.addEventListener('input', rg); }
+});
 
 function renderHouseCalendar(month, year) {
     var firstDay = new Date(year, month, 1).getDay();
@@ -3417,13 +3460,10 @@ function renderHouseCalendar(month, year) {
         var d = document.createElement('div');
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
-        var isPast = dateObj < today;
-        var isBooked = houseCurrentBooked.indexOf(dateStr) !== -1;
-        var isHardBlocked = houseCurrentHard.indexOf(dateStr) !== -1;
-        if (isPast) d.classList.add('past');
-        if (isBooked) d.classList.add('booked');
-        if (isHardBlocked) d.classList.add('blocked');
-        if (!isPast && !isBooked && !isHardBlocked) d.classList.add('available');
+        if (dateObj < today) d.classList.add('past');
+        if (houseCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        // green = the server (AvailabilityService, via ?ajax=avail_month) says a stay can START on this night at the chosen check-in time
+        if (!d.classList.contains('past') && !d.classList.contains('booked') && hGreenIsFree(dateStr)) d.classList.add('available');
 
         if (houseSelectedStart === dateStr || houseSelectedEnd === dateStr) d.classList.add('selected');
         else if (startObj && endObj && dateObj > startObj && dateObj < endObj) d.classList.add('in-range');
@@ -3431,6 +3471,7 @@ function renderHouseCalendar(month, year) {
         d.onclick = function() { selectHouseDate(this); };
         grid.appendChild(d);
     }
+    hLoadGreen(month, year);
 }
 
 function changeHouseMonth(delta) {
@@ -3446,7 +3487,7 @@ function selectHouseDate(el) {
     // A booked night can still be chosen as the CHECK-OUT day (12 NN check-out / 2 PM check-in);
     // the nights in between are checked below.
     var asCheckOut = !!(houseSelectedStart && !houseSelectedEnd && date > houseSelectedStart);
-    if (el.classList.contains('past') || el.classList.contains('disabled') || el.classList.contains('blocked')) return;
+    if (el.classList.contains('past') || el.classList.contains('disabled')) return;
     if (el.classList.contains('booked') && !asCheckOut) return;
     var pickedDate = new Date(date + 'T00:00:00');
 
@@ -3548,29 +3589,60 @@ function calcHouseTotal() {
     document.getElementById('h_display_total').textContent = total.toLocaleString('en-US', {minimumFractionDigits: 2});
 }
 
-
 function validatePax(input) {
-    if (input.value.trim() === '') { calcHouseTotal(); return; }
-    var n = parseInt(input.value, 10);
-    if (!Number.isFinite(n) || n < 1) n = 1;
-    if (n > currentHouseCapacity) n = currentHouseCapacity;
-    input.value = String(n);
-    var seniorInput = document.getElementById('h_senior_citizens');
-    if (seniorInput) seniorInput.max = String(n);
-    if (seniorInput && parseInt(seniorInput.value || '0', 10) > n) seniorInput.value = String(n);
+    let raw = input.value.trim();
+    if (raw === '') { rebuildGuestNameInputs(); return; }
+    let val = parseInt(raw);
+    let maxCap = currentHouseCapacity || 20;
+    if (isNaN(val) || val < 1) input.value = 1;
+    else if (val > maxCap) { input.value = maxCap; alert('Maximum of ' + maxCap + ' guests allowed for this house.'); }
+    rebuildGuestNameInputs();
     calcHouseTotal();
 }
 
-function toggleHouseHealthCondition() {
-    var select = document.getElementById('h_has_health_condition');
-    var group = document.getElementById('h_health_condition_details_group');
-    var details = document.getElementById('h_health_condition_details');
-    if (!select || !group || !details) return;
-    var needsDetails = select.value === '1';
-    group.style.display = needsDetails ? 'block' : 'none';
-    details.required = false;
-    if (!needsDetails) details.value = '';
+// Group details (replaces the individual guest-name inputs)
+function rebuildGuestNameInputs() {   // kept name: called whenever the pax changes
+    const pax = parseInt((document.getElementById('h_guests') || {}).value) || 0;
+    const senior = document.getElementById('h_senior_citizens');
+    if (!senior) return;
+    senior.max = pax > 0 ? pax : 20;
+    validateSeniorCount(senior);
 }
+function validateSeniorCount(input) {
+    const help = document.getElementById('seniorHelp');
+    const pax = parseInt((document.getElementById('h_guests') || {}).value) || 0;
+    const raw = String(input.value).trim();
+    let msg = '';
+    if (raw !== '' && !/^[0-9]{1,3}$/.test(raw)) msg = 'Enter a whole number (0 or more).';
+    else if (raw !== '' && pax > 0 && parseInt(raw, 10) > pax) msg = 'Senior citizens cannot exceed the number of guests (' + pax + ').';
+    input.classList.toggle('invalid', msg !== '');
+    if (help) {
+        help.classList.toggle('error', msg !== '');
+        help.innerHTML = msg ? '<i class="fas fa-exclamation-circle"></i> ' + msg
+            : '<i class="fas fa-info-circle"></i> Senior citizens (60 years old and above) included in your number of pax. Cannot exceed the number of guests.';
+    }
+    return msg === '';
+}
+function toggleHealthDetails() {
+    const yes = document.querySelector('#houseForm input[name="has_health_condition"][value="yes"]');
+    const wrap = document.getElementById('healthDetailsWrap');
+    if (wrap) wrap.style.display = (yes && yes.checked) ? 'block' : 'none';
+}
+function resetGroupInfo() {
+    const senior = document.getElementById('h_senior_citizens');
+    if (senior) { senior.value = ''; senior.classList.remove('invalid'); }
+    document.querySelectorAll('#houseForm input[name="has_health_condition"]').forEach(function(r) { r.checked = false; });
+    const d = document.getElementById('h_health_details');
+    if (d) d.value = '';
+    toggleHealthDetails();
+}
+
+var foodCalMonth = new Date().getMonth();
+var foodCalYear = new Date().getFullYear();
+var foodSelectedDate = null;
+var foodCurrentBooked = [];
+var selectedFood = null;
+var selectedFoodVariations = [];
 
 function selectFood(el) {
     selectedFood = { id: el.dataset.id, name: el.dataset.name, price: parseFloat(el.dataset.price) };
@@ -3652,13 +3724,10 @@ function renderFoodCalendar(month, year) {
         var d = document.createElement('div');
         d.className = 'day'; d.textContent = day; d.dataset.date = dateStr;
 
-        var isPast = dateObj < today;
-        var isOutsideStay = !pkgDateInWindow(dateStr);
-        var isBooked = foodCurrentBooked.indexOf(dateStr) !== -1;
-        if (isPast) d.classList.add('past');
-        if (isOutsideStay) { d.classList.add('outside-stay'); d.title = 'Outside your house stay'; }
-        if (isBooked) d.classList.add('booked');
-        if (!isPast && !isOutsideStay && !isBooked) d.classList.add('available');
+        if (dateObj < today) d.classList.add('past');
+        if (!pkgDateInWindow(dateStr)) { d.classList.add('past'); d.title = 'Outside your house stay'; }
+        if (foodCurrentBooked.indexOf(dateStr) !== -1) d.classList.add('booked');
+        if (!d.classList.contains('past') && !d.classList.contains('booked')) d.classList.add('available');   // green = bookable day (guest calendar)
         if (foodSelectedDate === dateStr) d.classList.add('selected');
 
         d.onclick = function() { selectFoodDate(this); };
@@ -3674,7 +3743,7 @@ function changeFoodMonth(delta) {
 }
 
 function selectFoodDate(el) {
-    if (el.classList.contains('booked') || el.classList.contains('blocked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
+    if (el.classList.contains('booked') || el.classList.contains('past') || el.classList.contains('disabled')) return;
     var date = el.dataset.date;
     if (!date) return;
 
@@ -3771,7 +3840,6 @@ function toggleDelivery() {
     group.style.display = 'none'; addr.required = false; addr.value = '';
 }
 
-
 function validatePhone(input, counterId) {
     let cleaned = input.value.replace(/[^0-9]/g, '');
     if (cleaned.length > 10) cleaned = cleaned.slice(0, 10);
@@ -3783,6 +3851,9 @@ function validatePhone(input, counterId) {
         counter.classList.toggle('complete', cleaned.length === 10);
     }
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+});
 
 document.getElementById('foodForm').addEventListener('submit', function(e) {
     var date = document.getElementById('f_preferred_date').value;
@@ -3797,7 +3868,6 @@ document.getElementById('foodForm').addEventListener('submit', function(e) {
     if (method === 'delivery' && !PKG_HOUSE_NAME) { e.preventDefault(); alert('Delivery requires a selected house because the order will be delivered to your booked unit. Please choose Pickup.'); return false; }
     return true;
 });
-
 
 // ✅ UPDATED: houseForm submit validates times too
 // Business rule: check-out TIME always follows check-in TIME (the date still follows the nights).
@@ -3834,15 +3904,11 @@ document.getElementById('houseForm').addEventListener('submit', function(e) {
         return false;
     }
 
-    var seniorInput = document.getElementById('h_senior_citizens');
-    var seniorCount = parseInt(seniorInput.value, 10);
-    if (seniorInput.value.trim() === '' || isNaN(seniorCount) || seniorCount < 0 || seniorCount > pax) {
-        alert('Senior-citizen count must be between 0 and the total number of guests.');
-        seniorInput.focus();
-        return false;
-    }
-    var healthSelect = document.getElementById('h_has_health_condition');
-    var healthDetails = document.getElementById('h_health_condition_details');
+    var seniorEl = document.getElementById('h_senior_citizens');
+    if (seniorEl.value.trim() === '') { alert('Please enter the number of senior citizens in your group (0 if none).'); seniorEl.focus(); return false; }
+    if (!validateSeniorCount(seniorEl)) { alert('Senior citizens must be a whole number from 0 to ' + pax + ' (cannot exceed the number of guests).'); seniorEl.focus(); return false; }
+    if (!document.querySelector('#houseForm input[name="has_health_condition"]:checked')) { alert('Please answer whether any guest has a health condition (Yes or No).'); return false; }
+
     this.submit();
     return true;
 });

@@ -34,7 +34,7 @@ if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_
     $hero_exists = file_exists($hero_path);
 }
 
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 
 // ============================================================
 // ✅ NAME VALIDATION — Letters only (with ñ, Ñ, accents, space, - ' .)

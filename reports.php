@@ -60,7 +60,7 @@ try {
     error_log('[reports] site_content load failed: ' . $e->getMessage());
     $content = [];
 }
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 
 /** Send JSON and stop; discards any buffered output first. */
 function reportJson(array $payload, $status = 200) {
@@ -301,7 +301,7 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
             --navy: #0B2447; --navy-2: #0B3D91; --blue: #4DA6D9; --blue-2: #7bb8f0;
             --ink: #0B2447; --ink-2: #334155; --muted: #64748b; --faint: #94a3b8;
             --line: #e8f0fe; --bg-soft: #f8fafc;
-            --c-house: #2563eb; --c-tour: #0891b2; --c-food: #d97706; --c-package: #7c3aed;
+            --c-house: #2563eb; --c-food: #d97706; --c-package: #7c3aed;
             --ok: #059669; --warn: #d97706; --bad: #dc2626;
         }
         .main-content > * { min-width: 0; }
@@ -413,6 +413,7 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
 
         /* PERFORMANCE / CUSTOMERS */
         .perf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+        .perf-grid > .panel:last-child:nth-child(odd) { grid-column: 1 / -1; }
         @media (max-width: 899px) { .perf-grid { grid-template-columns: 1fr; } }
         .mini-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         .mini-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 480px; }
@@ -655,7 +656,6 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
                         <select id="f_service">
                             <option value="all">All</option>
                             <option value="house">House</option>
-                            <option value="tour">Tour</option>
                             <option value="food">Food</option>
                             <option value="package">Package</option>
                         </select>
@@ -778,7 +778,7 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
                 <span class="kpi-icon i-sky"><i class="fas fa-users"></i></span>
                 <div class="strip-body">
                     <div class="strip-label">Guests / Pax Served
-                        <span class="info-tip" tabindex="0" aria-label="About Guests served"><i class="fas fa-info-circle"></i><span class="tip">Guests on non-cancelled house, tour and package bookings whose service date falls in the period. A package's guests are counted once. Food orders are excluded (quantity, not guests).</span></span>
+                        <span class="info-tip" tabindex="0" aria-label="About Guests served"><i class="fas fa-info-circle"></i><span class="tip">Guests on non-cancelled house and package bookings whose service date falls in the period. A package's guests are counted once. Food orders are excluded (quantity, not guests).</span></span>
                     </div>
                     <div class="strip-value" id="k_pax">0</div>
                     <div class="strip-sub" id="s_pax">By service date</div>
@@ -838,10 +838,9 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
         </div>
 
         <!-- SERVICE PERFORMANCE -->
-        <div class="section-title"><h2><i class="fas fa-trophy"></i> Service Performance</h2><span class="section-sub">Top 5 by secured booking value (fee received) for bookings created in the period · House/Tour/Food include package parts (service view)</span></div>
+        <div class="section-title"><h2><i class="fas fa-trophy"></i> Service Performance</h2><span class="section-sub">Top 5 by secured booking value (fee received) for bookings created in the period · House/Food include package parts (service view)</span></div>
         <div class="perf-grid">
             <section class="panel card-shell"><div class="panel-head"><h3><i class="fas fa-home"></i> Top Houses</h3></div><div class="mini-table-wrap" id="perfHouses"><div class="empty-inline">Loading…</div></div></section>
-            <section class="panel card-shell"><div class="panel-head"><h3><i class="fas fa-umbrella-beach"></i> Top Tours</h3></div><div class="mini-table-wrap" id="perfTours"><div class="empty-inline">Loading…</div></div></section>
             <section class="panel card-shell"><div class="panel-head"><h3><i class="fas fa-utensils"></i> Top Food Products</h3></div><div class="mini-table-wrap" id="perfFood"><div class="empty-inline">Loading…</div></div></section>
             <section class="panel card-shell"><div class="panel-head"><h3><i class="fas fa-box-open"></i> Package Sales</h3></div><div class="mini-table-wrap" id="perfPackages"><div class="empty-inline">Loading…</div></div></section>
         </div>
@@ -873,7 +872,6 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
                 <button type="button" class="report-tab" data-report="credits" role="tab"><i class="fas fa-redo"></i> Credits</button>
                 <button type="button" class="report-tab" data-report="users" role="tab"><i class="fas fa-users"></i> Customers</button>
                 <button type="button" class="report-tab" data-report="houses" role="tab"><i class="fas fa-home"></i> Houses</button>
-                <button type="button" class="report-tab" data-report="tours" role="tab"><i class="fas fa-umbrella-beach"></i> Tours</button>
                 <button type="button" class="report-tab" data-report="food" role="tab"><i class="fas fa-utensils"></i> Food</button>
                 <button type="button" class="report-tab" data-report="packages" role="tab"><i class="fas fa-box-open"></i> Packages</button>
                 <button type="button" class="report-tab" data-report="activities" role="tab"><i class="fas fa-water"></i> Activities</button>
@@ -887,7 +885,6 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
                 <option value="credits">Rebooking Credits</option>
                 <option value="users">Customers</option>
                 <option value="houses">Houses</option>
-                <option value="tours">Tours</option>
                 <option value="food">Food</option>
                 <option value="packages">Packages</option>
                 <option value="activities">Activities</option>
@@ -918,7 +915,7 @@ $json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON
         <div class="footer">
             <p style="margin:0;">
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Huddled Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Jerry Dino\'s Stay. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i>
@@ -971,9 +968,9 @@ window.REPORT_INIT = <?php echo json_encode($report_init, $json_flags); ?>;
 
     var INIT = window.REPORT_INIT;
     var TZ = 'Asia/Manila';
-    var COLORS = { house: '#2563eb', tour: '#0891b2', food: '#d97706', package: '#7c3aed' };
-    var TYPE_LABEL = { house: 'House', tour: 'Tour', food: 'Food', package: 'Package' };
-    var SERVICE_LABEL = { all: 'All services', house: 'House', tour: 'Tour', food: 'Food', package: 'Package' };
+    var COLORS = { house: '#2563eb', food: '#d97706', package: '#7c3aed' };
+    var TYPE_LABEL = { house: 'House', food: 'Food', package: 'Package' };
+    var SERVICE_LABEL = { all: 'All services', house: 'House', food: 'Food', package: 'Package' };
     var PAYMENT_LABEL = { all: 'All', unpaid: 'Awaiting reservation fee', reservation_paid: 'Reservation fee paid', paid: 'Fully paid', rebook_required: 'Rebooking required (credit)', cancelled: 'Cancelled / rejected (unpaid)' };
     var STATUS_LABEL = { all: 'All', pending: 'Pending', confirmed: 'Confirmed', completed: 'Completed', cancelled: 'Cancelled' };
     var RANGE_LABEL = { today: 'Today', yesterday: 'Yesterday', this_week: 'This Week', last_7: 'Last 7 Days', this_month: 'This Month', last_30: 'Last 30 Days', this_quarter: 'This Quarter', this_year: 'This Year', custom: 'Custom' };
@@ -1175,7 +1172,7 @@ window.REPORT_INIT = <?php echo json_encode($report_init, $json_flags); ?>;
         setPanelState('trendState', html, 'error');
         setPanelState('mixState', html, 'error');
         ['k_net', 'k_fees', 'k_value', 'k_bal', 'k_paid', 'k_pend', 'k_res', 'k_cancel', 'k_credit', 'k_out', 'k_pax', 'k_new', 'k_miss'].forEach(function (id) { $(id).textContent = '—'; });
-        ['bookingStatus', 'paymentStatus', 'perfHouses', 'perfTours', 'perfFood', 'perfPackages', 'topCustomers', 'dqList'].forEach(function (id) {
+        ['bookingStatus', 'paymentStatus', 'perfHouses', 'perfFood', 'perfPackages', 'topCustomers', 'dqList'].forEach(function (id) {
             $(id).innerHTML = '<div class="empty-inline" style="color:#b91c1c;"><i class="fas fa-exclamation-circle"></i> ' + esc(msg) + '</div>';
         });
         $('mixList').innerHTML = ''; $('mixNote').textContent = ''; $('trendLegend').innerHTML = '';
@@ -1245,7 +1242,6 @@ window.REPORT_INIT = <?php echo json_encode($report_init, $json_flags); ?>;
         $('bsNote').textContent = int(a.status.total) + ' reservation' + (a.status.total === 1 ? '' : 's') + ' created in period';
         $('psNote').textContent = 'Same ' + int(a.status.total) + ' reservation' + (a.status.total === 1 ? '' : 's') + ', by payment status';
         renderPerf('perfHouses', a.performance.houses, 'Guests');
-        renderPerf('perfTours', a.performance.tours, 'Guests');
         renderPerf('perfFood', a.performance.food, 'Qty');
         renderPackagePerf(a.performance.packages);
         renderCustomers(a.customers);
@@ -1256,14 +1252,14 @@ window.REPORT_INIT = <?php echo json_encode($report_init, $json_flags); ?>;
 
     function renderTrend(t) {
         var legend = '';
-        ['house', 'tour', 'food', 'package'].forEach(function (s) { legend += '<span><span class="sw" style="background:' + COLORS[s] + '"></span>' + TYPE_LABEL[s] + '</span>'; });
+        ['house', 'food', 'package'].forEach(function (s) { legend += '<span><span class="sw" style="background:' + COLORS[s] + '"></span>' + TYPE_LABEL[s] + '</span>'; });
         $('trendLegend').innerHTML = legend + '<span style="margin-left:auto;font-weight:700;color:#0B2447;">Period total: ' + esc(peso(t.sum)) + '</span>';
         $('trendNote').textContent = 'Money received, by date received · grouped by ' + t.granularity;
         if (charts.trend) { charts.trend.destroy(); charts.trend = null; }
         if (!(t.sum > 0)) { setPanelState('trendState', '<i class="fas fa-chart-bar"></i>No money received in this period.'); return; }
         if (!chartsAvailable()) { setPanelState('trendState', '<i class="fas fa-exclamation-triangle"></i>Chart library could not be loaded. See the Cash table below — totals are unaffected.', 'error'); return; }
         setPanelState('trendState', null);
-        var ds = ['house', 'tour', 'food', 'package'].map(function (s) {
+        var ds = ['house', 'food', 'package'].map(function (s) {
             return { label: TYPE_LABEL[s], data: t.series[s], backgroundColor: COLORS[s], borderColor: '#ffffff', borderWidth: { top: 2 }, borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 42, stack: 'rev' };
         });
         charts.trend = new Chart($('trendChart'), {

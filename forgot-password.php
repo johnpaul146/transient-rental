@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/includes/MailBranding.php';
 // forgot-password.php
 session_start();
 require_once 'database.php';
@@ -39,7 +40,7 @@ if(isset($content['site_settings']['hero_image_path']) && !empty($content['site_
 }
 
 // Site name
-$site_name = $content['site_settings']['site_name'] ?? 'Transient House & Tours';
+$site_name = $content['site_settings']['site_name'] ?? 'Jerry Dino\'s Stay';
 $site_tagline = $content['site_settings']['site_tagline'] ?? 'Your Home Away From Home';
 
 // ============================================================
@@ -112,12 +113,12 @@ if (isset($_POST['resend_otp'])) {
     $stmt = $pdo->prepare("UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?");
     $stmt->execute([$otp_code, $expires, $user_id]);
     
-    $mail = MailConfig::getInstance()->getMailer();
+    $mail = MailBranding::mailer();
     
     try {
         $mail->clearAddresses();
         $mail->addAddress($user['email'], $user['username']);
-        $mail->Subject = '🔐 Password Reset OTP - Transient House & Tours';
+        $mail->Subject = '🔐 Password Reset OTP - Jerry Dino\'s Stay';
         $mail->Body = '
         <html><head><style>
         body { font-family: Arial, sans-serif; background: #f5f7fa; padding: 20px; }
@@ -135,8 +136,8 @@ if (isset($_POST['resend_otp'])) {
         <div class="otp-box">' . $otp_code . '</div>
         <div class="warning"><strong>⏰ This code will expire in 15 minutes.</strong></div>
         <p class="info">If you didn\'t request this, please ignore this email.</p>
-        <p class="info">Best regards,<br><strong>Transient House & Tours Team</strong></p>
-        <div class="footer">&copy; ' . date('Y') . ' Transient House & Tours. All rights reserved.</div>
+        <p class="info">Best regards,<br><strong>Jerry Dino\'s Stay Team</strong></p>
+        <div class="footer">&copy; ' . date('Y') . ' Jerry Dino\'s Stay. All rights reserved.</div>
         </div></body></html>';
         
         $mail->AltBody = "Password Reset Request\n\nOTP Code: " . $otp_code . "\n\nExpires in 15 minutes.";
@@ -194,12 +195,12 @@ if (isset($_POST['send_otp'])) {
             $stmt = $pdo->prepare("UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?");
             $stmt->execute([$otp_code, $expires, $user['id']]);
             
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             
             try {
                 $mail->clearAddresses();
                 $mail->addAddress($user['email'], $user['username']);
-                $mail->Subject = '🔐 Password Reset OTP - Transient House & Tours';
+                $mail->Subject = '🔐 Password Reset OTP - Jerry Dino\'s Stay';
                 $mail->Body = '
                 <html><head><style>
                 body { font-family: Arial, sans-serif; background: #f5f7fa; padding: 20px; }
@@ -217,8 +218,8 @@ if (isset($_POST['send_otp'])) {
                 <div class="otp-box">' . $otp_code . '</div>
                 <div class="warning"><strong>⏰ This code will expire in 15 minutes.</strong></div>
                 <p class="info">If you didn\'t request this, please ignore this email.</p>
-                <p class="info">Best regards,<br><strong>Transient House & Tours Team</strong></p>
-                <div class="footer">&copy; ' . date('Y') . ' Transient House & Tours. All rights reserved.</div>
+                <p class="info">Best regards,<br><strong>Jerry Dino\'s Stay Team</strong></p>
+                <div class="footer">&copy; ' . date('Y') . ' Jerry Dino\'s Stay. All rights reserved.</div>
                 </div></body></html>';
                 
                 $mail->AltBody = "Password Reset Request\n\nOTP Code: " . $otp_code . "\n\nExpires in 15 minutes.";

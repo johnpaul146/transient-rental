@@ -28,11 +28,11 @@ class RebookService {
 
     const MAX_REBOOKS = 2;
     const WINDOW_DAYS = 7;
-    const SERVICE_TYPES = ['tour', 'food', 'package'];   // 'tour' is kept ONLY so old rebook requests/records still load; it can no longer be rebooked
+    const SERVICE_TYPES = ['food', 'package'];   // Tours/Boat was retired: no tour rebook request can be made, loaded, confirmed or rejected
 
     /** The Tours/Boat booking service was removed: rebooking would (re)create a tour reservation, so it is refused everywhere. */
-    const TOUR_REMOVED_MESSAGE = 'Tour/boat bookings are no longer offered, so a tour booking can no longer be rebooked. Please contact us if you need help.';
-    const PACKAGE_TOUR_MESSAGE = 'This package includes a tour, which is no longer offered, so the package can no longer be rebooked online. Please contact us if you need help.';
+    const TOUR_REMOVED_MESSAGE = 'The Tour/Boat service has been discontinued and can no longer be booked or rebooked.';
+    const PACKAGE_TOUR_MESSAGE = 'This package includes a discontinued add-on, so it cannot be rebooked online. Please contact us if you need help.';
 
     /** Remaining rebooks for ONE booking (the backend rule). */
     public static function remaining(array $booking) {
@@ -74,7 +74,7 @@ class RebookService {
         // A confirmed tour whose date has already passed has taken place; only a cancelled-with-credit one may move.
         if ($type === 'tour' && ($booking['booking_status'] ?? '') !== 'cancelled'
             && !empty($booking['booking_date']) && $booking['booking_date'] < date('Y-m-d')) {
-            return 'This tour date has already passed, so it can no longer be rebooked.';
+            return self::TOUR_REMOVED_MESSAGE;
         }
         // Same for food: a confirmed order whose date has passed has been served.
         if ($type === 'food' && ($booking['booking_status'] ?? '') !== 'cancelled'
@@ -775,12 +775,12 @@ class RebookService {
         if (!is_array($s)) return [];
         if ($type === 'house') return [['label' => 'House', 'text' => self::fmtDt($s['in'] ?? '', $s['in_time'] ?? '') . ' to ' . self::fmtDt($s['out'] ?? '', $s['out_time'] ?? '')
             . (isset($s['guests']) ? ' · ' . (int)$s['guests'] . ' guest' . ((int)$s['guests'] === 1 ? '' : 's') : '')]];
-        if ($type === 'tour') return [['label' => 'Tour', 'text' => self::fmtDt($s['date'] ?? '', $s['time'] ?? '')]];
+        if ($type === 'tour') return [];   // Tours/Boat retired: a tour is never shown as a schedule line
         if ($type === 'food') return [['label' => 'Food' . (($s['method'] ?? '') === 'delivery' ? ' (delivery)' : ' (pickup)'), 'text' => self::fmtDt($s['date'] ?? '', $s['time'] ?? '')]];
         $out = [];
         if (!empty($s['house'])) $out[] = ['label' => 'House', 'text' => self::fmtDt($s['house']['in'], $s['house']['in_time']) . ' to ' . self::fmtDt($s['house']['out'], $s['house']['out_time'])
             . (isset($s['house']['guests']) ? ' · ' . (int)$s['house']['guests'] . ' guest' . ((int)$s['house']['guests'] === 1 ? '' : 's') : '')];
-        if (!empty($s['tour'])) $out[] = ['label' => 'Tour', 'text' => self::fmtDt($s['tour']['date'], $s['tour']['time'])];
+        // a historical 'tour' part in an old stored package schedule is intentionally not listed (Tours/Boat retired)
         if (!empty($s['food'])) $out[] = ['label' => 'Food', 'text' => self::fmtDt($s['food']['date'], $s['food']['time'])];
         return $out;
     }
@@ -800,10 +800,10 @@ class RebookService {
         return $r;
     }
 
-    /** Number of tour/food/package requests waiting (0 when the table is not there yet). */
+    /** Number of food/package requests waiting (0 when the table is not there yet). Old tour requests are never counted. */
     public static function pendingCount(PDO $pdo) {
         if (!self::requestTableReady($pdo)) return 0;
-        try { return (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending'")->fetchColumn(); }
+        try { return (int)$pdo->query("SELECT COUNT(*) FROM rebook_requests WHERE status = 'pending' AND booking_type <> 'tour'")->fetchColumn(); }
         catch (PDOException $e) { return 0; }
     }
 
@@ -816,7 +816,7 @@ class RebookService {
         try {
             $sql = "SELECT r.*, COALESCE(NULLIF(u.fullname, ''), u.username, 'Guest') AS guest_name
                       FROM rebook_requests r LEFT JOIN guests g ON g.id = r.guest_id LEFT JOIN users u ON u.id = g.user_id
-                     WHERE r.status = 'pending'" . ($guestId !== null ? ' AND r.guest_id = ?' : '') . " ORDER BY r.requested_at DESC, r.id DESC";
+                     WHERE r.status = 'pending' AND r.booking_type <> 'tour'" . ($guestId !== null ? ' AND r.guest_id = ?' : '') . " ORDER BY r.requested_at DESC, r.id DESC";
             $st = $pdo->prepare($sql);
             $st->execute($guestId !== null ? [(int)$guestId] : []);
             $rows = array_map([self::class, 'decodeRequest'], $st->fetchAll(PDO::FETCH_ASSOC));
@@ -844,7 +844,7 @@ class RebookService {
 
     /** [type][booking_id] => pending request, for marking rows in lists. */
     public static function pendingMap(PDO $pdo, $guestId = null) {
-        $map = ['tour' => [], 'food' => [], 'package' => []];
+        $map = ['food' => [], 'package' => []];
         foreach (self::pendingRequests($pdo, $guestId) as $r) $map[$r['booking_type']][(int)$r['booking_id']] = $r;
         return $map;
     }
@@ -854,11 +854,12 @@ class RebookService {
     }
 
     /**
-     * Guest (or staff assisting the guest) submits a tour/food/package rebook REQUEST. Nothing on the booking changes.
+     * Guest (or staff assisting the guest) submits a food/package rebook REQUEST. Nothing on the booking changes.
      * $in = inputFromRequest(). Throws RuntimeException / InvalidArgumentException with guest-safe messages.
      * Returns ['id', 'reference', 'original', 'requested'].
      */
     public static function requestServiceRebook(PDO $pdo, $type, $id, $guestId, array $in, $userId, $role) {
+        if ($type === 'tour') throw new InvalidArgumentException(self::TOUR_REMOVED_MESSAGE);
         if (!in_array($type, self::SERVICE_TYPES, true)) throw new InvalidArgumentException('Unknown booking type.');
         if (!self::requestTableReady($pdo)) throw new RuntimeException('Rebooking is temporarily unavailable. Please contact us.');
         $table = PaymentService::TABLES[$type];

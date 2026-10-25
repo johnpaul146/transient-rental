@@ -305,9 +305,6 @@ $nav_active = 'home';
 <body>
 
 <?php include 'components/navbar.php'; ?>
-<?php if (($_GET['notice'] ?? '') === 'tours_unavailable'): ?>
-    <div role="status" style="max-width:1100px;margin:110px auto -90px;padding:14px 18px;border-radius:12px;background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">Tours/Boat booking is no longer available online. You can still book a stay, food, or a package.</div>
-<?php endif; ?>
 
 <!-- ============================================================
      HERO
@@ -327,7 +324,7 @@ $nav_active = 'home';
                     Hundred Islands &bull; Alaminos, Pangasinan
                 </span>
 
-                <h1><?php echo htmlspecialchars((!empty($content['hero']['title']) && $content['hero']['title'] !== 'Welcome to Transient House & Tours') ? $content['hero']['title'] : "Jerry Dino's Stay"); ?></h1>
+                <h1><?php echo htmlspecialchars($content['hero']['title'] ?? 'Welcome to Jerry Dino\'s Stay'); ?></h1>
 
                 <p class="hero__subtitle">
                     <?php echo htmlspecialchars($content['hero']['subtitle'] ?? 'Your home away from home and gateway to unforgettable island adventures.'); ?>
@@ -403,7 +400,7 @@ $nav_active = 'home';
             </p>
         </div>
 
-        <div class="experience-grid">
+        <div class="experience-grid experience-grid--3">
 
             <!-- Stay -->
             <a href="houses.php" class="experience-card">
@@ -449,7 +446,7 @@ $nav_active = 'home';
                     <h3 class="experience-card__title">Activities</h3>
 
                     <p class="experience-card__desc">
-                        Snorkeling, kayaking, banana boat rides, and island hopping.
+                        Snorkeling, kayaking, banana boat and jet ski rides, and more.
                     </p>
 
                     <span class="experience-card__arrow">
@@ -711,7 +708,7 @@ $nav_active = 'home';
                  <?php endif; ?>></div>
 
             <h2><?php echo htmlspecialchars($content['cta']['title'] ?? 'Ready to Book Your Stay?'); ?></h2>
-            <p><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose a comfortable house, build a package, or order food for your stay.'); ?></p>
+            <p><?php echo htmlspecialchars($content['cta']['subtitle'] ?? 'Choose from our comfortable houses, local food and island activities.'); ?></p>
 
             <div class="cta-banner__actions">
                 <a href="houses.php" class="btn btn-primary btn-lg">

@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/MailBranding.php';
 // includes/EmailNotifications.php
 
 require_once __DIR__ . '/../config/mail_config.php';
@@ -72,17 +73,13 @@ class EmailNotifications {
             return self::getPackageBookingDetails($booking_id, $pdo);
         }
 
-        // ---- HOUSE / TOUR / FOOD ----
+        // ---- HOUSE / FOOD (Tours/Boat bookings are retired: no new e-mails are built for them) ----
         $table = ''; $join = ''; $item_column = '';
 
         if ($booking_type == 'house') {
             $table = 'house_bookings';
             $join = 'JOIN houses h ON b.house_id = h.id';
             $item_column = 'h.house_name';
-        } elseif ($booking_type == 'tour') {
-            $table = 'tour_bookings';
-            $join = 'JOIN tours t ON b.tour_id = t.id';
-            $item_column = 't.tour_name';
         } elseif ($booking_type == 'food') {
             $table = 'food_bookings';
             $join = 'JOIN food_items f ON b.food_id = f.id';
@@ -140,16 +137,6 @@ class EmailNotifications {
                        hb.guest_names      AS house_guest_names,
                        hb.total_amount     AS house_amount,
 
-                       t.tour_name,
-                       tb.reference_number AS tour_ref,
-                       tb.booking_date     AS tour_date,
-                       tb.preferred_time   AS tour_time,
-                       tb.number_of_guests AS tour_guests,
-                       tb.guest_name       AS tour_guest_name,
-                       tb.contact_number   AS tour_contact,
-                       tb.special_requests AS tour_special_requests,
-                       tb.total_amount     AS tour_amount,
-
                        f.name              AS food_name,
                        fb.reference_number AS food_ref,
                        fb.size_variant     AS food_size,
@@ -168,8 +155,6 @@ class EmailNotifications {
                 LEFT JOIN users u ON g.user_id = u.id
                 LEFT JOIN house_bookings hb ON p.house_booking_id = hb.id
                 LEFT JOIN houses h ON hb.house_id = h.id
-                LEFT JOIN tour_bookings tb ON p.tour_booking_id = tb.id
-                LEFT JOIN tours t ON tb.tour_id = t.id
                 LEFT JOIN food_bookings fb ON p.food_booking_id = fb.id
                 LEFT JOIN food_items f ON fb.food_id = f.id
                 WHERE p.id = ?";
@@ -185,7 +170,6 @@ class EmailNotifications {
 
         $parts = [];
         if (!empty($row['house_name'])) $parts[] = $row['house_name'];
-        if (!empty($row['tour_name']))  $parts[] = $row['tour_name'];
         if (!empty($row['food_name']))  $parts[] = $row['food_name'];
         $row['item_name']        = implode(' + ', $parts);
         $row['total_amount']     = $row['grand_total'] ?? 0;
@@ -226,7 +210,7 @@ class EmailNotifications {
     // 🎨 SHARED DARK BLUE EMAIL WRAPPER
     // ============================================================
     private static function wrapTemplate($params) {
-        $badge        = $params['badge_text']    ?? 'TRANSIT HOUSE & TOURS';
+        $badge        = $params['badge_text']    ?? 'JERRY DINO\'S STAY';
         $title        = $params['title']         ?? 'Notification';
         $ref_code     = $params['ref_code']      ?? '';
         $greeting     = $params['greeting_name'] ?? 'Guest';
@@ -461,16 +445,14 @@ class EmailNotifications {
               </td></tr>
             </table>';
         }
-        if (!empty($pkg['tour_name'])) {
+        // Historical packages only: a discontinued add-on charge stays in the total, so show it as a neutral line.
+        if ((float)($pkg['tour_amount'] ?? 0) > 0) {
             $html .= '
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #0a1628; border-left: 4px solid #10b981; border-radius: 10px; margin-top: 10px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #0a1628; border-left: 4px solid #64748b; border-radius: 10px; margin-top: 10px;">
               <tr><td style="padding: 14px 18px;">
-                <p style="margin:0 0 8px 0; color:#ffffff; font-size:13px; font-weight:700;">🏖️ ' . htmlspecialchars($pkg['tour_name']) . '</p>
+                <p style="margin:0 0 8px 0; color:#ffffff; font-size:13px; font-weight:700;">Other charges (discontinued add-on)</p>
                 <p style="margin:0; color:#94a3b8; font-size:12px; line-height:1.6;">
-                  Ref: <strong style="color:#60a5fa;">' . htmlspecialchars($pkg['tour_ref'] ?? 'N/A') . '</strong><br>
-                  Date: ' . self::fmtDate($pkg['tour_date'] ?? null) . (($pkg['tour_time'] ?? '') ? ' at ' . htmlspecialchars($pkg['tour_time']) : '') . '<br>
-                  Guests: ' . (int)($pkg['tour_guests'] ?? 0) . '<br>
-                  Amount: <strong style="color:#fbbf24;">₱' . number_format((float)($pkg['tour_amount'] ?? 0), 2) . '</strong>
+                  Included in the package total: <strong style="color:#fbbf24;">₱' . number_format((float)$pkg['tour_amount'], 2) . '</strong>
                 </p>
               </td></tr>
             </table>';
@@ -508,7 +490,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -539,7 +521,7 @@ class EmailNotifications {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
             if (!$booking) { self::$lastError = 'Booking not found.'; return false; }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
 
             $admins = self::getAdminEmails($pdo);
@@ -581,7 +563,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -613,7 +595,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -645,7 +627,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -674,7 +656,7 @@ class EmailNotifications {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
             if (!$booking || !$booking['email'] || self::isPlaceholderEmail($booking['email'])) return false;
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -706,7 +688,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -735,7 +717,7 @@ class EmailNotifications {
             $booking = self::getBookingDetails($booking_id, $booking_type, $pdo);
             if (!$booking) { self::$lastError = 'Booking not found.'; return false; }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
 
             $admins = self::getAdminEmails($pdo);
@@ -774,7 +756,7 @@ class EmailNotifications {
             $booking = self::getBookingDetails($booking_id, 'house', $pdo);
             if (!$booking) { self::$lastError = 'Booking not found.'; return false; }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
 
             $admins = self::getAdminEmails($pdo);
@@ -813,7 +795,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -842,7 +824,7 @@ class EmailNotifications {
                 return false;
             }
 
-            $mail = MailConfig::getInstance()->getMailer();
+            $mail = MailBranding::mailer();
             $mail->clearAddresses();
             $mail->addAddress($booking['email'], $booking['guest_name'] ?? $booking['username']);
 
@@ -912,7 +894,7 @@ class EmailNotifications {
     }
 
     // ============================================================
-    // 🎨 TEMPLATE BUILDERS — HOUSE / TOUR / FOOD
+    // 🎨 TEMPLATE BUILDERS — HOUSE / FOOD
     // ============================================================
 
     private static function buildBookingConfirmationEmail($booking, $type) {
@@ -976,7 +958,7 @@ class EmailNotifications {
                 • Contact us at least 24 hours before if you need to reschedule.', 'blue');
 
         return self::wrapTemplate([
-            'badge_text'    => '🌴 TRANSIT HOUSE & TOURS',
+            'badge_text'    => '🌴 JERRY DINO\'S STAY',
             'title'         => 'Booking Confirmation',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
@@ -1434,7 +1416,7 @@ class EmailNotifications {
                 • Contact us at least 24 hours before if you need to reschedule.', 'blue');
 
         return self::wrapTemplate([
-            'badge_text'    => '🌴 TRANSIT HOUSE & TOURS',
+            'badge_text'    => '🌴 JERRY DINO\'S STAY',
             'title'         => 'Package Booking Confirmation',
             'ref_code'      => $ref,
             'greeting_name' => $guest,
@@ -1454,7 +1436,6 @@ class EmailNotifications {
 
         $itemCount = 0;
         if (!empty($pkg['house_name'])) $itemCount++;
-        if (!empty($pkg['tour_name']))  $itemCount++;
         if (!empty($pkg['food_name']))  $itemCount++;
 
         $content = '
@@ -1711,7 +1692,7 @@ class EmailNotifications {
     //   approve -> guest "approved" (new schedule, payment carried forward, no new fee)
     //   reject  -> guest "rejected" (requested schedule + the rejection reason entered by Admin/Staff)
     //   cancel  -> Admin/Staff "cancelled by the guest" (so an earlier alert is not mistaken for an open request)
-    // A Package request lives on the package itself, so a Package gets ONE e-mail per event — never one per House/Tour/Food part.
+    // A Package request lives on the package itself, so a Package gets ONE e-mail per event — never one per House/Food part.
     // Admin/Staff recipients = the existing getAdminEmails() convention (admin + staff accounts with an e-mail); there is no
     // hard-coded fallback address here, and placeholder (@walkin.invalid) addresses are never used.
     // Returns ['guest' => true|false|null, 'admin' => true|false|null]  (null = not applicable / no valid recipient).
@@ -1746,7 +1727,7 @@ class EmailNotifications {
                               WHERE r.id = ?");
         $st->execute([(int)$requestId]);
         $r = $st->fetch(PDO::FETCH_ASSOC);
-        if (!$r || !in_array($r['booking_type'], ['house', 'tour', 'food', 'package'], true)) return null;
+        if (!$r || !in_array($r['booking_type'], ['house', 'food', 'package'], true)) return null;
         if (!class_exists('RebookService')) require_once __DIR__ . '/RebookService.php';
         $type = $r['booking_type'];
         $lines = function ($json) use ($type) {
@@ -1755,7 +1736,7 @@ class EmailNotifications {
         };
         $r['current_lines'] = $lines($r['original_schedule']);
         $r['requested_lines'] = $lines($r['requested_schedule']);
-        $r['service_label'] = ['house' => 'House / Stay', 'tour' => 'Tour / Boat', 'food' => 'Food', 'package' => 'Package'][$type];
+        $r['service_label'] = ['house' => 'House / Stay', 'food' => 'Food', 'package' => 'Package'][$type];
         return $r;
     }
 
@@ -1770,7 +1751,7 @@ class EmailNotifications {
     }
 
     private static function emergencySend($to, $toName, $subject, $html) {
-        $mail = MailConfig::getInstance()->getMailer();
+        $mail = MailBranding::mailer();
         $mail->clearAddresses();
         foreach ((array)$to as $addr) $mail->addAddress($addr, count((array)$to) === 1 ? $toName : '');
         $mail->Subject = $subject;
@@ -1822,7 +1803,7 @@ class EmailNotifications {
                 . self::noteBlock('Your current schedule stays in place. If you still need to change your plans, please contact us.', 'red');
             $grad = '#991b1b';
         }
-        $html = self::wrapTemplate(['badge_text' => '🌴 TRANSIT HOUSE & TOURS', 'title' => $title, 'ref_code' => $ref,
+        $html = self::wrapTemplate(['badge_text' => '🌴 JERRY DINO\'S STAY', 'title' => $title, 'ref_code' => $ref,
                                     'greeting_name' => (string)$r['guest_name'], 'intro_text' => $intro, 'content' => $content,
                                     'gradient_from' => '#0B2447', 'gradient_to' => $grad]);
         return self::emergencySend($to, (string)$r['guest_name'], $subject, $html);

@@ -63,22 +63,15 @@ try {
     $available_houses = $pdo->query("SELECT COUNT(*) FROM houses WHERE status = 'available'")->fetchColumn();
 } catch(PDOException $e) {}
 
-$total_tours = 0;
-$available_tours = 0;
-try {
-    $total_tours = $pdo->query("SELECT COUNT(*) FROM tours")->fetchColumn();
-    $available_tours = $pdo->query("SELECT COUNT(*) FROM tours WHERE status = 'available'")->fetchColumn();
-} catch(PDOException $e) {}
-
 $total_users = 0;
 try {
     $total_users = $pdo->query("SELECT COUNT(*) FROM users WHERE role = 'guest'")->fetchColumn();
 } catch(PDOException $e) {}
 
 // Booking counts — same definitions as booking-management.php (packages count once, not per component)
+// Tours/Boat was retired: old tour rows are never counted or listed here (they stay in the database).
 $dash_counts = DashboardService::bookingCounts($pdo);
 $total_house_bookings   = $dash_counts['by_type']['house'];
-$total_tour_bookings    = $dash_counts['by_type']['tour'];
 $total_food_bookings    = $dash_counts['by_type']['food'];
 $total_package_bookings = $dash_counts['by_type']['package'];
 $total_all_bookings     = $dash_counts['total'];
@@ -103,12 +96,10 @@ try {
 $total_blocked = 0;
 $today_blocked = 0;
 $house_blocked = 0;
-$tour_blocked = 0;
 try {
-    $total_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates")->fetchColumn();
-    $today_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE block_date >= CURDATE()")->fetchColumn();
+    $total_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour'")->fetchColumn();
+    $today_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type <> 'tour' AND block_date >= CURDATE()")->fetchColumn();
     $house_blocked  = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'house'")->fetchColumn();
-    $tour_blocked   = (int)$pdo->query("SELECT COUNT(*) FROM blocked_dates WHERE item_type = 'tour'")->fetchColumn();
 } catch (PDOException $e) {}
 
 // Recent bookings
@@ -123,16 +114,6 @@ try {
     $recent_house_bookings = $stmt->fetchAll();
 } catch(PDOException $e) {}
 
-$recent_tour_bookings = [];
-try {
-    $stmt = $pdo->query("SELECT b.*, t.tour_name, u.fullname as guest_name 
-                        FROM tour_bookings b 
-                        LEFT JOIN tours t ON b.tour_id = t.id 
-                        LEFT JOIN guests g ON b.guest_id = g.id 
-                        LEFT JOIN users u ON g.user_id = u.id 
-                        ORDER BY b.created_at DESC LIMIT 5");
-    $recent_tour_bookings = $stmt->fetchAll();
-} catch(PDOException $e) {}
 
 $recent_reviews = [];
 try {
@@ -167,7 +148,7 @@ try {
     $ops_week_end = date('Y-m-d', strtotime('+7 days'));
 
     $live = "booking_status NOT IN ('cancelled','completed','rejected')";
-    foreach (['house_bookings' => 'package_id IS NULL', 'tour_bookings' => 'package_id IS NULL', 'food_bookings' => 'package_id IS NULL', 'package_bookings' => '1=1'] as $tbl => $own) {
+    foreach (['house_bookings' => 'package_id IS NULL', 'food_bookings' => 'package_id IS NULL', 'package_bookings' => '1=1'] as $tbl => $own) {
         $q = $pdo->prepare("SELECT COUNT(*) FROM `$tbl` WHERE $own AND DATE(created_at) = ? AND booking_status <> 'cancelled'");
         $q->execute([$ops_today]);
         $ops['bookings_today'] += (int)$q->fetchColumn();
@@ -193,13 +174,13 @@ try {
     $ops['departures_today'] = (int)$q->fetchColumn();
 
     try {
-        $ops['block_requests'] = (int)$pdo->query("SELECT COUNT(*) FROM blocked_date_requests WHERE status = 'pending'")->fetchColumn();
+        $ops['block_requests'] = (int)$pdo->query("SELECT COUNT(*) FROM blocked_date_requests WHERE status = 'pending' AND item_type <> 'tour'")->fetchColumn();
     } catch (PDOException $e) {}
 
     // Raw activity feed. Staff must not see payment amounts or reasons that booking log lines can carry.
     $staffFeed = $is_staff ? ' AND ' . DashboardService::staffLogFeedFilter() : '';
     $q = $pdo->query("SELECT description, fullname, username, role, status, created_at FROM system_logs
-                      WHERE module IN ('booking','house','tour','food','activity','blocked_dates','review')$staffFeed
+                      WHERE module IN ('booking','house','food','activity','blocked_dates','review') AND COALESCE(target_type,'') NOT IN ('tour_booking','tour') AND description NOT LIKE '%tour booking%' AND description NOT LIKE '%tour reservation%' AND description NOT LIKE '%Tour service%'$staffFeed
                       ORDER BY created_at DESC, id DESC LIMIT 6");
     $ops_recent_activity = $q->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {
@@ -872,7 +853,7 @@ function getBookingStatusLabel($payment_status) {
                         <?php endif; ?>
                     </span>
                 </h1>
-                <p>Manage your transient house, tours, and activities</p>
+                <p>Manage your houses, food, and activities</p>
             </div>
             <div class="user-profile">
                 <div class="user-info" style="text-align: right;">
@@ -928,13 +909,6 @@ function getBookingStatusLabel($payment_status) {
                         <div class="stat-small"><i class="fas fa-check-circle"></i> <?php echo $available_houses; ?> available</div>
                     </a>
 
-                    <a href="tour-dashboard.php" class="stat-card">
-                        <div class="stat-icon"><i class="fas fa-umbrella-beach"></i></div>
-                        <div class="stat-number"><?php echo $total_tours; ?></div>
-                        <div class="stat-label">Tour Packages</div>
-                        <div class="stat-small"><i class="fas fa-check-circle"></i> <?php echo $available_tours; ?> available</div>
-                    </a>
-
               
 
                     <a href="booking-management.php" class="stat-card">
@@ -943,7 +917,6 @@ function getBookingStatusLabel($payment_status) {
                         <div class="stat-label">Total Bookings</div>
                         <div class="stat-small stat-small-wrap">
                             <span title="House bookings"><?php echo (int)$total_house_bookings; ?> houses</span>
-                            <span title="Tour bookings"><?php echo (int)$total_tour_bookings; ?> tours</span>
                             <span title="Food orders"><?php echo (int)$total_food_bookings; ?> food</span>
                             <span title="Package bookings"><?php echo (int)$total_package_bookings; ?> packages</span>
                         </div>
@@ -955,8 +928,6 @@ function getBookingStatusLabel($payment_status) {
                         <div class="stat-label">Blocked Dates</div>
                         <div class="stat-small">
                             <i class="fas fa-home"></i> <?php echo $house_blocked; ?> houses
-                            <span style="margin: 0 4px;">|</span>
-                            <i class="fas fa-umbrella-beach"></i> <?php echo $tour_blocked; ?> tours
                         </div>
                     </a>
 
@@ -1070,7 +1041,7 @@ function getBookingStatusLabel($payment_status) {
                             if ($d === date('Y-m-d', strtotime('+1 day'))) return 'Tomorrow';
                             return date('M d', strtotime($d));
                         };
-                        $an_tab = ['House' => 'house', 'Tour' => 'tour', 'Food' => 'food', 'Package' => 'package'];
+                        $an_tab = ['House' => 'house', 'Food' => 'food', 'Package' => 'package'];
                     ?>
                     <ul class="ops-list">
                         <li class="ops-li-link"><a class="ops-row" href="booking-management.php?status=pending"><span>Payments to verify<span class="sub">Proof uploaded, waiting for review</span></span><?php echo $an_pill($an_verify, ''); ?></a></li>
@@ -1132,7 +1103,7 @@ function getBookingStatusLabel($payment_status) {
 
         <!-- ============================================================
              DASHBOARD GRID
-             LEFT:  Quick Actions + Recent Tour Bookings
+             LEFT:  Quick Actions
              RIGHT: Recent House Bookings + Recent Reviews
              ============================================================ -->
         <div class="dashboard-grid">
@@ -1153,12 +1124,6 @@ function getBookingStatusLabel($payment_status) {
                             <small><?php echo $is_admin ? 'Create new accommodation' : 'Check availability'; ?></small>
                         </a>
 
-                        <a href="tour-dashboard.php" class="action-btn">
-                            <i class="fas fa-ship"></i>
-                            <span><?php echo $is_admin ? 'Add Tour' : 'View Tours'; ?></span>
-                            <small><?php echo $is_admin ? 'Create tour package' : 'Check schedules'; ?></small>
-                        </a>
-
                         <a href="booking-management.php" class="action-btn">
                             <i class="fas fa-calendar-check"></i>
                             <span>Review Bookings</span>
@@ -1176,59 +1141,6 @@ function getBookingStatusLabel($payment_status) {
                             <span><?php echo $is_admin ? 'Block Date' : 'Blocked Dates'; ?></span>
                             <small><?php echo $is_admin ? 'Manage availability' : 'View &amp; request blocks'; ?></small>
                         </a>
-                    </div>
-                </div>
-
-                <!-- Recent Tour Bookings -->
-                <div class="card">
-                    <div class="card-header">
-                        <h2><i class="fas fa-umbrella-beach"></i> Recent Tour Bookings</h2>
-                        <a href="booking-management.php">View All →</a>
-                    </div>
-
-                    <div class="table-responsive desktop-table">
-                        <table>
-                            <thead>
-                                <tr><th>Guest</th><th>Tour</th><th>Status</th></tr>
-                            </thead>
-                            <tbody>
-                                <?php if(empty($recent_tour_bookings)): ?>
-                                <tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 20px;">No tour bookings yet</td></tr>
-                                <?php else: ?>
-                                    <?php foreach($recent_tour_bookings as $booking):
-                                        $bstat = getBookingStatusLabel($booking['payment_status'] ?? '');
-                                    ?>
-                                    <tr>
-                                        <td><?php echo htmlspecialchars($booking['guest_name'] ?? 'N/A'); ?></td>
-                                        <td><strong><?php echo $booking['tour_name'] ?? 'N/A'; ?></strong></td>
-                                        <td><span class="badge <?php echo $bstat['class']; ?>"><?php echo $bstat['label']; ?></span></td>
-                                    </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div class="dashboard-cards-mobile">
-                        <?php if(empty($recent_tour_bookings)): ?>
-                            <div style="text-align: center; color: #94a3b8; padding: 20px;">No tour bookings yet</div>
-                        <?php else: ?>
-                            <?php foreach($recent_tour_bookings as $booking):
-                                $bstat = getBookingStatusLabel($booking['payment_status'] ?? '');
-                            ?>
-                            <div class="dashboard-card-mobile">
-                                <div class="card-top-row">
-                                    <div class="card-title"><?php echo htmlspecialchars($booking['guest_name'] ?? 'N/A'); ?></div>
-                                    <div class="card-badges"><span class="badge <?php echo $bstat['class']; ?>"><?php echo $bstat['label']; ?></span></div>
-                                </div>
-                                <div class="card-row">
-                                    <i class="fas fa-umbrella-beach"></i>
-                                    <span class="card-label">Tour</span>
-                                    <span class="card-value"><?php echo $booking['tour_name'] ?? 'N/A'; ?></span>
-                                </div>
-                            </div>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -1362,7 +1274,7 @@ function getBookingStatusLabel($payment_status) {
         <div class="footer">
             <p>
                 <i class="fas fa-umbrella-beach"></i>
-                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Hundred Islands Tour and Reservation. All rights reserved.'); ?>
+                &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($content['footer']['copyright'] ?? 'Jerry Dino\'s Stay. All rights reserved.'); ?>
                 <span style="opacity: 0.3; margin: 0 10px;">|</span>
                 <span style="color: #7bb8f0; font-size: 11px;">
                     <i class="fas fa-user-shield"></i>

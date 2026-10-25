@@ -11,8 +11,8 @@
  *
  * WHAT IS ONE TRANSACTION
  * ----------------------------------------------------------------------------
- *   - a standalone house / tour / food booking (package_id IS NULL OR 0)
- *   - one package_bookings row (its house/tour/food rows are COMPONENTS and are
+ *   - a standalone house / food booking (package_id IS NULL OR 0)
+ *   - one package_bookings row (its house/food rows are COMPONENTS and are
  *     never counted again; they carry no money of their own)
  *   - old rebooking copies (house_bookings.original_booking_id IS NOT NULL,
  *     reference "RE-...") are EXCLUDED from sales: the money belongs to the
@@ -61,14 +61,16 @@ class ReportExporter {
     const PREVIEW_ROW_LIMIT = 5000;       // preview payload cap (CSV is never capped)
     const REPORT_TZ = 'Asia/Manila';
 
-    const SERVICES = ['all', 'house', 'tour', 'food', 'package'];
+    // Tours/Boat was retired (Pass 4): old tour bookings and their payments are not part of any report. An old ?service=tour link means 'all'.
+    const SERVICES = ['all', 'house', 'food', 'package'];
+    const SERVICE_ALIASES = ['tour' => 'all'];
     // Combined payment states (PaymentService::state). 'cancelled' covers unpaid cancellations and rejected payments.
     const PAYMENTS = ['all', 'unpaid', 'reservation_paid', 'paid', 'rebook_required', 'cancelled'];
     const PAYMENT_ALIASES = ['pending' => 'unpaid'];   // links saved before the update
     const STATUSES = ['all', 'pending', 'confirmed', 'completed', 'cancelled'];
-    const REPORT_TYPES = ['bookings', 'revenue', 'balances', 'credits', 'users', 'houses', 'tours', 'food', 'packages', 'activities', 'feedback'];
+    const REPORT_TYPES = ['bookings', 'revenue', 'balances', 'credits', 'users', 'houses', 'food', 'packages', 'activities', 'feedback'];
 
-    const TYPE_LABELS = ['house' => 'House', 'tour' => 'Tour', 'food' => 'Food', 'package' => 'Package'];
+    const TYPE_LABELS = ['house' => 'House', 'food' => 'Food', 'package' => 'Package'];
     const PAYMENT_LABELS = [
         'all' => 'All', 'unpaid' => 'Awaiting reservation fee', 'reservation_paid' => 'Reservation fee paid',
         'paid' => 'Fully paid', 'rebook_required' => 'Rebooking required (credit)', 'cancelled' => 'Cancelled / rejected (unpaid)',
@@ -133,7 +135,7 @@ class ReportExporter {
             'date_from' => $from->format('Y-m-d'),
             'date_to'   => $to->format('Y-m-d'),
             'days'      => $days,
-            'service'   => $pick('service', self::SERVICES, 'service'),
+            'service'   => $pick('service', self::SERVICES, 'service', self::SERVICE_ALIASES),
             'payment'   => $pick('payment', self::PAYMENTS, 'payment status', self::PAYMENT_ALIASES),
             'status'    => $pick('status', self::STATUSES, 'booking status'),
             'q'         => $q,
@@ -231,23 +233,6 @@ class ReportExporter {
          WHERE (b.package_id IS NULL OR b.package_id = 0) AND b.original_booking_id IS NULL
 
         UNION ALL
-        SELECT 'tour', b.id, b.reference_number,
-               COALESCE(t.tour_name, CONCAT('Tour #', b.tour_id)),
-               b.guest_id, $guest,
-               b.created_at, b.booking_date, NULL,
-               b.number_of_guests, b.total_amount,
-               b.reservation_fee_amount, b.amount_paid,
-               b.reservation_paid_at, b.balance_paid_at, b.cancelled_at,
-               $hbPay, $hbSt,
-               CASE WHEN b.booking_status IS NULL OR b.booking_status = '' THEN 1 ELSE 0 END,
-               0, 0, 0, 0, 0, 0, 0
-          FROM tour_bookings b
-          LEFT JOIN tours  t ON t.id = b.tour_id
-          LEFT JOIN guests g ON g.id = b.guest_id
-          LEFT JOIN users  u ON u.id = g.user_id
-         WHERE (b.package_id IS NULL OR b.package_id = 0)
-
-        UNION ALL
         SELECT 'food', b.id, b.reference_number,
                COALESCE(f.name, CONCAT('Food #', b.food_id)),
                b.guest_id, $guest,
@@ -266,24 +251,22 @@ class ReportExporter {
 
         UNION ALL
         SELECT 'package', p.id, p.reference_number,
-               COALESCE(NULLIF(CONCAT_WS(' + ', hh.house_name, tt.tour_name, ff.name), ''), '(no items)'),
+               COALESCE(NULLIF(CONCAT_WS(' + ', hh.house_name, ff.name), ''), '(no items)'),
                p.guest_id, $guest,
-               p.created_at, COALESCE(hb.check_in_date, tb.booking_date, fb.preferred_date), hb.check_out_date,
-               GREATEST(COALESCE(hb.number_of_guests, 0), COALESCE(tb.number_of_guests, 0)), p.grand_total,
+               p.created_at, COALESCE(hb.check_in_date, fb.preferred_date), hb.check_out_date,
+               COALESCE(hb.number_of_guests, 0), p.grand_total,
                p.reservation_fee_amount, p.amount_paid,
                p.reservation_paid_at, p.balance_paid_at, p.cancelled_at,
                $pPay, $pSt,
                CASE WHEN p.booking_status IS NULL OR p.booking_status = '' THEN 1 ELSE 0 END,
                p.house_amount, p.tour_amount, p.food_amount,
                CASE WHEN p.house_booking_id IS NOT NULL THEN 1 ELSE 0 END,
-               CASE WHEN p.tour_booking_id  IS NOT NULL THEN 1 ELSE 0 END,
+               0,
                CASE WHEN p.food_booking_id  IS NOT NULL THEN 1 ELSE 0 END,
                0
           FROM package_bookings p
           LEFT JOIN house_bookings hb ON hb.id = p.house_booking_id
           LEFT JOIN houses hh         ON hh.id = hb.house_id
-          LEFT JOIN tour_bookings tb  ON tb.id = p.tour_booking_id
-          LEFT JOIN tours tt          ON tt.id = tb.tour_id
           LEFT JOIN food_bookings fb  ON fb.id = p.food_booking_id
           LEFT JOIN food_items ff     ON ff.id = fb.food_id
           LEFT JOIN guests g ON g.id = p.guest_id
@@ -303,7 +286,6 @@ class ReportExporter {
         $parts = [];
         $defs = [
             'house' => ['house_bookings', 'houses', 'house_id', 'house_name', 'b.check_in_date', 'b.number_of_guests', "CONCAT('House #', b.house_id)", 'b.original_booking_id IS NULL'],
-            'tour'  => ['tour_bookings', 'tours', 'tour_id', 'tour_name', 'b.booking_date', 'b.number_of_guests', "CONCAT('Tour #', b.tour_id)", '1 = 1'],
             'food'  => ['food_bookings', 'food_items', 'food_id', 'name', 'b.preferred_date', 'b.quantity', "CONCAT('Food #', b.food_id)", '1 = 1'],
         ];
         foreach ($defs as $type => $d) {
@@ -642,7 +624,7 @@ class ReportExporter {
                 if ($gran === 'day') $label = $cursor->format('M j');
                 elseif ($gran === 'week') $label = 'Wk of ' . $cursor->format('M j');
                 else $label = $cursor->format('M Y');
-                $buckets[$k] = ['label' => $label, 'house' => 0, 'tour' => 0, 'food' => 0, 'package' => 0];
+                $buckets[$k] = ['label' => $label, 'house' => 0, 'food' => 0, 'package' => 0];
             }
             $cursor->modify('+1 day');
         }
@@ -652,12 +634,12 @@ class ReportExporter {
                 if (isset($buckets[$k])) $buckets[$k][$r['tx_type']] += $p['cents'];
             }
         }
-        $out = ['granularity' => $gran, 'labels' => [], 'series' => ['house' => [], 'tour' => [], 'food' => [], 'package' => []], 'total' => []];
+        $out = ['granularity' => $gran, 'labels' => [], 'series' => ['house' => [], 'food' => [], 'package' => []], 'total' => []];
         $sum = 0;
         foreach ($buckets as $b) {
             $out['labels'][] = $b['label'];
             $t = 0;
-            foreach (['house', 'tour', 'food', 'package'] as $s) { $out['series'][$s][] = $b[$s] / 100; $t += $b[$s]; }
+            foreach (['house', 'food', 'package'] as $s) { $out['series'][$s][] = $b[$s] / 100; $t += $b[$s]; }
             $out['total'][] = $t / 100;
             $sum += $t;
         }
@@ -667,7 +649,7 @@ class ReportExporter {
 
     /** Cash collected by transaction type (each package once). */
     private function buildMix(array $rows) {
-        $mix = ['house' => [0, 0], 'tour' => [0, 0], 'food' => [0, 0], 'package' => [0, 0]];
+        $mix = ['house' => [0, 0], 'food' => [0, 0], 'package' => [0, 0]];
         $total = 0;
         foreach ($rows as $r) {
             if ($r['cash_c'] <= 0) continue;
@@ -740,7 +722,6 @@ class ReportExporter {
     private static function compositionLabel(array $r) {
         $p = [];
         if ((int)$r['has_house']) $p[] = 'House';
-        if ((int)$r['has_tour'])  $p[] = 'Tour';
         if ((int)$r['has_food'])  $p[] = 'Food';
         return $p ? implode(' + ', $p) : '(no items)';
     }
@@ -897,11 +878,9 @@ class ReportExporter {
             $sql = "SELECT p.reference_number, p.grand_total,
                            " . self::normStatus('p.booking_status') . " AS p_status, " . self::normStatus('p.payment_status') . " AS p_pay,
                            " . self::normStatus('hb.booking_status') . " AS h_status, " . self::normStatus('hb.payment_status') . " AS h_pay, hb.id AS h_id, hb.amount_paid AS h_amt,
-                           " . self::normStatus('tb.booking_status') . " AS t_status, " . self::normStatus('tb.payment_status') . " AS t_pay, tb.id AS t_id, tb.amount_paid AS t_amt,
                            " . self::normStatus('fb.booking_status') . " AS f_status, " . self::normStatus('fb.payment_status') . " AS f_pay, fb.id AS f_id, fb.amount_paid AS f_amt
                       FROM package_bookings p
                       LEFT JOIN house_bookings hb ON hb.id = p.house_booking_id
-                      LEFT JOIN tour_bookings  tb ON tb.id = p.tour_booking_id
                       LEFT JOIN food_bookings  fb ON fb.id = p.food_booking_id
                      WHERE p.id IN ($in)";
             $stmt = $this->pdo->prepare($sql);
@@ -909,7 +888,7 @@ class ReportExporter {
             $list = [];
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $p) {
                 $issues = [];
-                foreach (['h' => 'house', 't' => 'tour', 'f' => 'food'] as $px => $lbl) {
+                foreach (['h' => 'house', 'f' => 'food'] as $px => $lbl) {
                     if (empty($p[$px . '_id'])) continue;
                     if ($p['p_status'] === 'cancelled' && $p[$px . '_status'] !== 'cancelled') $issues[] = "$lbl part is " . $p[$px . '_status'];
                     if ($p['p_status'] !== 'cancelled' && $p[$px . '_status'] === 'cancelled') $issues[] = "$lbl part is cancelled";
@@ -954,11 +933,12 @@ class ReportExporter {
         }
 
         // 8. Owner review list left by the migration
+        // Pass 6: rows about the discontinued Tour/Boat service stay in the table (history is kept) but are not listed on the Reports screen.
         try {
             $hasReview = (int)$this->pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'migration_2026_10_owner_review'")->fetchColumn();
             if ($hasReview) {
                 $rv = $this->pdo->query("SELECT category, booking_type, reference_number, total_amount, details
-                                           FROM migration_2026_10_owner_review WHERE resolved_at IS NULL ORDER BY category, id LIMIT 200")->fetchAll(PDO::FETCH_ASSOC);
+                                           FROM migration_2026_10_owner_review WHERE resolved_at IS NULL AND LOWER(COALESCE(booking_type, '')) <> 'tour' ORDER BY category, id LIMIT 200")->fetchAll(PDO::FETCH_ASSOC);
                 if ($rv) {
                     $list = [];
                     foreach ($rv as $x) $list[] = ['reference' => $x['reference_number'] ?: '—', 'type' => ucfirst((string)$x['booking_type']) ?: '—',
@@ -1047,7 +1027,6 @@ class ReportExporter {
             'status'   => $this->buildStatusMix($rows),
             'performance' => [
                 'houses'   => $this->topList($this->aggregateUnits($units, 'house')),
-                'tours'    => $this->topList($this->aggregateUnits($units, 'tour')),
                 'food'     => $this->topList($this->aggregateUnits($units, 'food')),
                 'packages' => array_slice($packages, 0, 5),
             ],
@@ -1072,7 +1051,7 @@ class ReportExporter {
     }
 
     public static function filterSummary(array $f) {
-        $svc = ['all' => 'All services', 'house' => 'House', 'tour' => 'Tour', 'food' => 'Food', 'package' => 'Package'];
+        $svc = ['all' => 'All services', 'house' => 'House', 'food' => 'Food', 'package' => 'Package'];
         $st  = ['all' => 'All', 'pending' => 'Pending', 'confirmed' => 'Confirmed', 'completed' => 'Completed', 'cancelled' => 'Cancelled'];
         return 'Service: ' . $svc[$f['service']] . ' | Payment: ' . self::PAYMENT_LABELS[$f['payment']] . ' | Booking status: ' . $st[$f['status']];
     }
@@ -1095,7 +1074,6 @@ class ReportExporter {
             case 'credits':    $t = $this->tableCredits($f); break;
             case 'users':      $t = $this->tableCustomers($f); break;
             case 'houses':     $t = $this->tableItems($f, 'house'); break;
-            case 'tours':      $t = $this->tableItems($f, 'tour'); break;
             case 'food':       $t = $this->tableItems($f, 'food'); break;
             case 'packages':   $t = $this->tablePackages($f); break;
             case 'activities': $t = $this->tableActivities(); break;
@@ -1198,7 +1176,7 @@ class ReportExporter {
         $cursor = new DateTime($f['date_from'], $tz);
         $end = new DateTime($f['date_to'], $tz);
         while ($cursor <= $end) {
-            $days[$cursor->format('Y-m-d')] = ['house' => 0, 'tour' => 0, 'food' => 0, 'package' => 0, 'fee' => 0, 'bal' => 0, 'n' => 0];
+            $days[$cursor->format('Y-m-d')] = ['house' => 0, 'food' => 0, 'package' => 0, 'fee' => 0, 'bal' => 0, 'n' => 0];
             $cursor->modify('+1 day');
         }
         foreach ($this->getTransactions($f) as $r) {
@@ -1212,15 +1190,15 @@ class ReportExporter {
         }
         $out = [];
         foreach ($days as $d => $v) {
-            $total = $v['house'] + $v['tour'] + $v['food'] + $v['package'];
-            $out[] = [$d, $v['house'] / 100, $v['tour'] / 100, $v['food'] / 100, $v['package'] / 100, $total / 100, $v['fee'] / 100, $v['bal'] / 100, $v['n']];
+            $total = $v['house'] + $v['food'] + $v['package'];
+            $out[] = [$d, $v['house'] / 100, $v['food'] / 100, $v['package'] / 100, $total / 100, $v['fee'] / 100, $v['bal'] / 100, $v['n']];
         }
         return [
             'title' => 'Daily Cash Collected',
-            'headers' => ['Date Received', 'House (PHP)', 'Tour (PHP)', 'Food (PHP)', 'Package (PHP)', 'Daily Total (PHP)', 'Reservation Fees (PHP)', 'Balance Payments (PHP)', 'Payments'],
-            'types' => ['date', 'money', 'money', 'money', 'money', 'money', 'money', 'money', 'int'],
+            'headers' => ['Date Received', 'House (PHP)', 'Food (PHP)', 'Package (PHP)', 'Daily Total (PHP)', 'Reservation Fees (PHP)', 'Balance Payments (PHP)', 'Payments'],
+            'types' => ['date', 'money', 'money', 'money', 'money', 'money', 'money', 'int'],
             'rows' => $out,
-            'sum' => [1, 2, 3, 4, 5, 6, 7, 8],
+            'sum' => [1, 2, 3, 4, 5, 6, 7],
             'notes' => ['Money actually received, by the date it was received (payment ledger). Each package is counted once in the Package column.',
                         'Daily Total = Reservation Fees + Balance Payments. Payments without a recorded date are listed under Data Quality, not here.'],
         ];
@@ -1328,9 +1306,6 @@ class ReportExporter {
         if ($kind === 'house') {
             $items = $this->pdo->query('SELECT id, house_name AS name, price_per_night AS price, capacity AS cap, status FROM houses ORDER BY house_name')->fetchAll(PDO::FETCH_ASSOC);
             $title = 'House Performance'; $priceH = 'Rate / Night (PHP)'; $capH = 'Capacity'; $paxH = 'Guests Booked';
-        } elseif ($kind === 'tour') {
-            $items = $this->pdo->query('SELECT id, tour_name AS name, price_per_boat AS price, max_guests AS cap, status FROM tours ORDER BY tour_name')->fetchAll(PDO::FETCH_ASSOC);
-            $title = 'Tour Performance'; $priceH = 'Price / Boat (PHP)'; $capH = 'Max Guests'; $paxH = 'Guests Booked';
         } else {
             $items = $this->pdo->query("SELECT id, name, price, category AS cap, CASE WHEN is_available = 1 THEN 'available' ELSE 'unavailable' END AS status FROM food_items ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
             $title = 'Food Performance'; $priceH = 'Base Price (PHP)'; $capH = 'Category'; $paxH = 'Quantity Ordered';
@@ -1376,11 +1351,11 @@ class ReportExporter {
         }
         return [
             'title' => 'Package Performance',
-            'headers' => ['Package Composition', 'Packages Created', 'Cancelled', 'Fee Paid', 'Booking Value (PHP)', 'Avg. Package Value (PHP)', 'Cash in Period (PHP)', 'House Share (PHP)', 'Tour Share (PHP)', 'Food Share (PHP)'],
+            'headers' => ['Package Composition', 'Packages Created', 'Cancelled', 'Fee Paid', 'Booking Value (PHP)', 'Avg. Package Value (PHP)', 'Cash in Period (PHP)', 'House Share (PHP)', 'Other Share (PHP)', 'Food Share (PHP)'],
             'types' => ['text', 'int', 'int', 'int', 'money', 'money', 'money', 'money', 'money', 'money'],
             'rows' => $out,
             'sum' => [1, 2, 3, 4, 6, 7, 8, 9],
-            'notes' => ['Each package is one transaction with one ₱1,000 reservation fee. Booking Value = package total of packages created in the period with the fee received. House/Tour/Food shares split that same value for information only; they are not added again.'],
+            'notes' => ['Each package is one transaction with one ₱1,000 reservation fee. Booking Value = package total of packages created in the period with the fee received. House/Food shares split that same value for information only; they are not added again. "Other Share" is the amount of a retired add-on that some older packages still carry in their total.'],
         ];
     }
 
@@ -1509,7 +1484,6 @@ class ReportExporter {
     public function exportRevenue($filters = [])    { $this->exportReport('revenue', $filters); }
     public function exportUsers($filters = [])      { $this->exportReport('users', $filters); }
     public function exportHouses($filters = [])     { $this->exportReport('houses', $filters); }
-    public function exportTours($filters = [])      { $this->exportReport('tours', $filters); }
     public function exportFood($filters = [])       { $this->exportReport('food', $filters); }
     public function exportFeedback($filters = [])   { $this->exportReport('feedback', $filters); }
     public function exportActivities($filters = []) { $this->exportReport('activities', $filters); }
@@ -1519,7 +1493,6 @@ class ReportExporter {
     public function getRevenueData($filters = [])    { return $this->previewRows('revenue', $filters); }
     public function getUsersData($filters = [])      { return $this->previewRows('users', $filters); }
     public function getHousesData($filters = [])     { return $this->previewRows('houses', $filters); }
-    public function getToursData($filters = [])      { return $this->previewRows('tours', $filters); }
     public function getFoodData($filters = [])      { return $this->previewRows('food', $filters); }
     public function getFeedbackData($filters = [])   { return $this->previewRows('feedback', $filters); }
     public function getActivitiesData($filters = []) { return $this->previewRows('activities', $filters); }
